@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Environment / secrets — NEVER commit
+.env
+*.env
+!/**/.env.example
+
+# Build output
+frontend/dist/
+
+# TLS certificates (never commit private keys)
+gateway/certs/
+*.crt
+*.key
+*.pem
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

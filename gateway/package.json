@@ -1,0 +1,28 @@
+{
+  "name": "grelin-pms-ehr-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Grelin Health PMS & EHR — public security gateway (WAF + reverse proxy). The only internet-facing service.",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "compression": "^1.7.5",
+    "cookie-parser": "^1.4.7",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.0.0",
+    "http-proxy-middleware": "^3.0.3",
+    "pino": "^9.6.0",
+    "pino-http": "^10.4.0",
+    "pino-pretty": "^13.0.0",
+    "selfsigned": "^5.5.0"
+  }
+}
