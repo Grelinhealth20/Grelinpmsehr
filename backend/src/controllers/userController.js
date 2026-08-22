@@ -12,7 +12,13 @@ import {
 import { hashPassword, validatePasswordPolicy } from '../utils/password.js';
 import { recordAudit } from '../services/auditService.js';
 import { findSpecialtyIdByUuid } from '../services/specialtyService.js';
-import { ROLES } from '../config/env.js';
+import { blindIndex } from '../utils/crypto.js';
+import { config, ROLES } from '../config/env.js';
+
+/** The configured master-admin account — protected from demotion/deletion. */
+function isMasterAccount(row) {
+  return row.role === ROLES.MASTER_ADMIN || row.email_bidx === blindIndex(config.masterAdmin.email);
+}
 
 /** Resolve a specialty UUID to its internal id; throws 400 if the UUID is unknown. */
 async function resolveSpecialtyId(specialtyUuid) {
@@ -113,6 +119,11 @@ export async function update(req, res, next) {
     const row = await findRawByUuid(req.params.uuid);
     if (!row) return res.status(404).json({ error: 'User not found.' });
     assertCanManageTarget(req.user, row);
+
+    // The master administrator can never be demoted to another role.
+    if (isMasterAccount(row) && req.body.role && req.body.role !== ROLES.MASTER_ADMIN) {
+      return res.status(400).json({ error: 'The master administrator role cannot be changed.', code: 'MASTER_PROTECTED' });
+    }
 
     const { specialtyUuid, ...rest } = req.body;
     const specialtyId = await resolveSpecialtyId(specialtyUuid);

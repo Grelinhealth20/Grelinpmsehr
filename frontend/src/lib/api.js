@@ -47,6 +47,15 @@ api.interceptors.response.use(
         throw e;
       }
     }
+
+    // Resilience: a transient gateway/upstream hiccup (e.g. a backend restart)
+    // shouldn't surface as an error for a safe read — retry a GET once.
+    const method = (original?.method || 'get').toLowerCase();
+    if ([502, 503, 504].includes(status) && method === 'get' && !original._upRetried) {
+      original._upRetried = true;
+      await new Promise((r) => setTimeout(r, 900));
+      return api(original);
+    }
     throw error;
   },
 );
@@ -89,6 +98,11 @@ export const specialtiesApi = {
   create: (name) => api.post('/specialties', { name }),
 };
 
+// --- Providers (picker for appointments) -----------------------------------
+export const providersApi = {
+  list: () => api.get('/providers'),
+};
+
 // --- Patients (EHR face sheet) ---------------------------------------------
 export const patientsApi = {
   list: () => api.get('/patients'),
@@ -107,6 +121,13 @@ export const patientsApi = {
     });
   },
   documentUrl: (uuid, docUuid) => api.get(`/patients/${uuid}/documents/${docUuid}/url`),
+  extractDocument: (uuid, docUuid) => api.post(`/patients/${uuid}/documents/${docUuid}/extract`),
+  // Stateless auto-fill (no patient yet): OCR a face sheet, persist nothing.
+  extractUpload: (file) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return api.post('/patients/extract-upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+  },
   removeDocument: (uuid, docUuid) => api.delete(`/patients/${uuid}/documents/${docUuid}`),
 };
 

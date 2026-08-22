@@ -35,6 +35,7 @@ export default function ResetPasswordModal({ user, onClose, onSaved }) {
   return (
     <Modal
       title="Reset password"
+      size="full"
       onClose={onClose}
       footer={
         <>

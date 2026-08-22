@@ -1,9 +1,10 @@
-import { pool } from './pool.js';
+import { pool, execute } from './pool.js';
 import { runMigrations } from './migrate.js';
 import { config, ROLES } from '../config/env.js';
 import { logger } from '../config/logger.js';
 import { emailExists, createUser } from '../services/userService.js';
 import { hashPassword } from '../utils/password.js';
+import { blindIndex } from '../utils/crypto.js';
 
 /**
  * Seed the master administrator. Idempotent: does nothing if the account
@@ -13,7 +14,14 @@ import { hashPassword } from '../utils/password.js';
 export async function seedMasterAdmin() {
   const { email, password, name } = config.masterAdmin;
   if (await emailExists(email)) {
-    logger.info({ email }, 'Master admin already present — skipping seed');
+    // Self-heal: the configured master account must always hold the master role
+    // (it can never be demoted or locked out).
+    const [res] = await execute(
+      `UPDATE users SET role = 'master_admin', locked_until = NULL
+        WHERE email_bidx = :bidx AND (role <> 'master_admin' OR locked_until IS NOT NULL)`,
+      { bidx: blindIndex(email) },
+    );
+    logger.info({ email, healed: res.affectedRows > 0 }, 'Master admin present — ensured master role');
     return;
   }
   const passwordHash = await hashPassword(password);

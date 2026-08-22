@@ -90,8 +90,10 @@ const apptTitle = z.string().trim().min(1, 'Title is required.').max(200);
 const apptPatient = z.string().trim().max(200).optional();
 const apptPatientUuid = z.union([z.string().uuid(), z.literal('')]).optional();
 
+const renderingProviderUuid = z.union([z.string().uuid(), z.literal('')]).optional();
+
 export const createAppointmentSchema = z
-  .object({ title: apptTitle, patient: apptPatient, patientUuid: apptPatientUuid, type: apptType, date: apptDate, startMin, durationMin })
+  .object({ title: apptTitle, patient: apptPatient, patientUuid: apptPatientUuid, renderingProviderUuid, type: apptType, date: apptDate, startMin, durationMin })
   .strict();
 
 export const updateAppointmentSchema = z
@@ -99,6 +101,7 @@ export const updateAppointmentSchema = z
     title: apptTitle.optional(),
     patient: apptPatient,
     patientUuid: apptPatientUuid,
+    renderingProviderUuid,
     type: apptType.optional(),
     date: apptDate.optional(),
     startMin: startMin.optional(),
@@ -129,16 +132,28 @@ const demographicsSchema = z
   })
   .strict();
 
-const insuranceSchema = z
-  .object({ payer: optStr(120), memberId: optStr(80), group: optStr(80), planType: optStr(60) })
-  .strict()
-  .nullable()
-  .optional();
+// One or more insurance policies (primary / secondary / tertiary).
+const insuranceItemSchema = z
+  .object({
+    type: z.enum(['primary', 'secondary', 'tertiary']).optional(),
+    payer: optStr(120), memberId: optStr(80), group: optStr(80), planType: optStr(60),
+    mbi: optStr(20),
+  })
+  .strict();
+const insuranceSchema = z.array(insuranceItemSchema).max(5).nullable().optional();
+
+// Emergency contact(s). A patient may have several (from the CONTACTS section).
+const emergencyContactItemSchema = z
+  .object({ name: optStr(120), relationship: optStr(60), phone: optStr(40), email: optEmail })
+  .strict();
+const emergencyContactSchema = emergencyContactItemSchema.nullable().optional(); // legacy single
+const emergencyContactsSchema = z.array(emergencyContactItemSchema).max(8).nullable().optional();
 
 // SNF facility information.
 const facilitySchema = z
   .object({
     facilityName: optStr(160), npi: optStr(20), unit: optStr(40), room: optStr(40),
+    residentId: optStr(40), admittedFrom: optStr(120), admissionLocation: optStr(160),
     admitDate: optDate, address: optStr(200), city: optStr(80), state: optStr(40), zip: optStr(12),
   })
   .strict()
@@ -146,11 +161,11 @@ const facilitySchema = z
   .optional();
 
 export const createPatientSchema = z
-  .object({ demographics: demographicsSchema, insurance: insuranceSchema, facility: facilitySchema })
+  .object({ demographics: demographicsSchema, insurance: insuranceSchema, facility: facilitySchema, emergencyContact: emergencyContactSchema, emergencyContacts: emergencyContactsSchema })
   .strict();
 
 export const updatePatientSchema = z
-  .object({ demographics: demographicsSchema.optional(), insurance: insuranceSchema, facility: facilitySchema })
+  .object({ demographics: demographicsSchema.optional(), insurance: insuranceSchema, facility: facilitySchema, emergencyContact: emergencyContactSchema, emergencyContacts: emergencyContactsSchema })
   .strict()
   .refine((v) => Object.keys(v).length > 0, { message: 'No fields to update.' });
 

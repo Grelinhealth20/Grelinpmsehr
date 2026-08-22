@@ -6,6 +6,7 @@ import specialtyRoutes from './specialtyRoutes.js';
 import appointmentRoutes from './appointmentRoutes.js';
 import patientRoutes from './patientRoutes.js';
 import encounterRoutes from './encounterRoutes.js';
+import providerRoutes from './providerRoutes.js';
 
 const router = Router();
 
@@ -14,6 +15,7 @@ router.get('/health', (req, res) => res.json({ status: 'ok', service: 'grelin-pm
 router.use('/auth', authRoutes);
 router.use('/users', userRoutes);
 router.use('/specialties', specialtyRoutes);
+router.use('/providers', providerRoutes);
 router.use('/appointments', appointmentRoutes);
 router.use('/patients', patientRoutes);
 router.use('/encounters', encounterRoutes);

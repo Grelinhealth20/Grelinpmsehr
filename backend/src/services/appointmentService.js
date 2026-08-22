@@ -9,10 +9,12 @@ import { encrypt, decrypt } from '../utils/crypto.js';
  * midnight so the grid renders deterministically.
  */
 
-const SELECT = `SELECT a.id, a.uuid, a.provider_id, a.title_enc, a.patient_name_enc, a.patient_uuid,
+const SELECT = `SELECT a.id, a.uuid, a.provider_id, a.rendering_provider_id, a.title_enc, a.patient_name_enc, a.patient_uuid,
   a.appt_type, DATE_FORMAT(a.appt_date, '%Y-%m-%d') AS appt_date,
-  a.start_min, a.duration_min, a.status, a.created_at, a.updated_at
-  FROM appointments a`;
+  a.start_min, a.duration_min, a.status, a.created_at, a.updated_at,
+  rp.uuid AS rendering_provider_uuid, rp.full_name_enc AS rendering_provider_name_enc
+  FROM appointments a
+  LEFT JOIN users rp ON rp.id = a.rendering_provider_id`;
 
 export function toPublicAppointment(row) {
   if (!row) return null;
@@ -21,6 +23,8 @@ export function toPublicAppointment(row) {
     title: decrypt(row.title_enc),
     patient: row.patient_name_enc ? decrypt(row.patient_name_enc) : '',
     patientUuid: row.patient_uuid || null,
+    renderingProviderUuid: row.rendering_provider_uuid || null,
+    renderingProvider: row.rendering_provider_name_enc ? decrypt(row.rendering_provider_name_enc) : null,
     type: row.appt_type,
     date: row.appt_date,
     startMin: row.start_min,
@@ -48,16 +52,17 @@ export async function getRawByUuid(uuid) {
   return rows[0] || null;
 }
 
-export async function createAppointment({ providerId, title, patient, patientUuid, type, date, startMin, durationMin, createdBy }) {
+export async function createAppointment({ providerId, renderingProviderId, title, patient, patientUuid, type, date, startMin, durationMin, createdBy }) {
   const uuid = uuidv4();
   await execute(
     `INSERT INTO appointments
-       (uuid, provider_id, title_enc, patient_name_enc, patient_uuid, appt_type, appt_date, start_min, duration_min, status, created_by)
+       (uuid, provider_id, rendering_provider_id, title_enc, patient_name_enc, patient_uuid, appt_type, appt_date, start_min, duration_min, status, created_by)
      VALUES
-       (:uuid, :pid, :titleEnc, :patientEnc, :patientUuid, :type, :date, :startMin, :durationMin, 'scheduled', :createdBy)`,
+       (:uuid, :pid, :rpid, :titleEnc, :patientEnc, :patientUuid, :type, :date, :startMin, :durationMin, 'scheduled', :createdBy)`,
     {
       uuid,
       pid: providerId,
+      rpid: renderingProviderId || null,
       titleEnc: encrypt(title),
       patientEnc: patient ? encrypt(patient) : null,
       patientUuid: patientUuid || null,
@@ -77,6 +82,7 @@ export async function updateAppointment(uuid, fields) {
   if (fields.title !== undefined) { sets.push('title_enc = :titleEnc'); params.titleEnc = encrypt(fields.title); }
   if (fields.patient !== undefined) { sets.push('patient_name_enc = :patientEnc'); params.patientEnc = fields.patient ? encrypt(fields.patient) : null; }
   if (fields.patientUuid !== undefined) { sets.push('patient_uuid = :patientUuid'); params.patientUuid = fields.patientUuid || null; }
+  if (fields.renderingProviderId !== undefined) { sets.push('rendering_provider_id = :rpid'); params.rpid = fields.renderingProviderId || null; }
   if (fields.type !== undefined) { sets.push('appt_type = :type'); params.type = fields.type; }
   if (fields.date !== undefined) { sets.push('appt_date = :date'); params.date = fields.date; }
   if (fields.startMin !== undefined) { sets.push('start_min = :startMin'); params.startMin = fields.startMin; }

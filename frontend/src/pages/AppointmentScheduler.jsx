@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Modal from '../components/Modal.jsx';
 import PatientModal from '../components/PatientModal.jsx';
 import { useToast } from '../components/Toast.jsx';
-import { appointmentsApi, patientsApi, toApiError } from '../lib/api.js';
+import { appointmentsApi, patientsApi, providersApi, toApiError } from '../lib/api.js';
+
+const providerLabel = (p) => `${p.fullName}${p.credentials?.length ? `, ${p.credentials.join(', ')}` : ''}${p.specialty ? ` · ${p.specialty.name}` : ''}`;
 
 const patientName = (p) => `${p?.demographics?.firstName || ''} ${p?.demographics?.lastName || ''}`.trim() || '(unnamed)';
 
@@ -74,9 +76,16 @@ export default function AppointmentScheduler() {
   const [patients, setPatients] = useState([]); // provider's own patients (for search)
   const [patientOpen, setPatientOpen] = useState(false);
   const [patientModal, setPatientModal] = useState(null); // { uuid? } — face sheet popup
+  const [providers, setProviders] = useState([]); // active providers (from DB)
 
   const refreshPatients = useCallback(() => {
     patientsApi.list().then(({ data }) => setPatients(data.patients)).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    providersApi.list().then(({ data }) => active && setProviders(data.providers)).catch(() => {});
+    return () => { active = false; };
   }, []);
 
   useEffect(() => {
@@ -119,11 +128,11 @@ export default function AppointmentScheduler() {
   /* --- Create / edit modal ------------------------------------------------- */
   function openNew(dateKey, startMin) {
     setPatientOpen(false);
-    setModal({ mode: 'new', form: { title: '', patient: '', patientUuid: '', type: 'consult', dateKey, startMin: clampStart(startMin, 30), durationMin: 30, status: 'scheduled' } });
+    setModal({ mode: 'new', form: { title: '', patient: '', patientUuid: '', renderingProviderUuid: '', type: 'consult', dateKey, startMin: clampStart(startMin, 30), durationMin: 30, status: 'scheduled' } });
   }
   function openEdit(a) {
     setPatientOpen(false);
-    setModal({ mode: 'edit', uuid: a.uuid, form: { title: a.title, patient: a.patient || '', patientUuid: a.patientUuid || '', type: a.type, dateKey: a.date, startMin: a.startMin, durationMin: a.durationMin, status: a.status } });
+    setModal({ mode: 'edit', uuid: a.uuid, form: { title: a.title, patient: a.patient || '', patientUuid: a.patientUuid || '', renderingProviderUuid: a.renderingProviderUuid || '', type: a.type, dateKey: a.date, startMin: a.startMin, durationMin: a.durationMin, status: a.status } });
   }
   function onColClick(e, dateKey) {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -144,6 +153,7 @@ export default function AppointmentScheduler() {
       title: f.title.trim(),
       patient: f.patient.trim() || undefined,
       patientUuid: f.patientUuid || undefined,
+      renderingProviderUuid: f.renderingProviderUuid || undefined,
       type: f.type,
       date: f.dateKey,
       startMin: clampStart(f.startMin, f.durationMin),
@@ -357,6 +367,15 @@ export default function AppointmentScheduler() {
                 )}
               </div>
             </div>
+            <div className="field">
+              <label>Rendering provider</label>
+              <select className="select" value={modal.form.renderingProviderUuid} onChange={(e) => setF({ renderingProviderUuid: e.target.value })}>
+                <option value="">— Select provider —</option>
+                {providers.map((p) => <option key={p.uuid} value={p.uuid}>{providerLabel(p)}</option>)}
+              </select>
+              {providers.length === 0 && <span className="hint">No providers yet — create one in the Admin panel.</span>}
+            </div>
+
             <div className="field">
               <label>Type</label>
               <div className="seg-ctrl">

@@ -6,6 +6,8 @@ import {
   getRawByUuid,
 } from '../services/appointmentService.js';
 import { getRawByUuid as getPatientRawByUuid } from '../services/patientService.js';
+import { findProviderIdByUuid } from '../services/userService.js';
+import { ensureEncounter } from '../services/encounterService.js';
 import { recordAudit } from '../services/auditService.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -27,6 +29,14 @@ async function assertOwnedPatient(req, patientUuid) {
   }
 }
 
+/** Resolve a selected rendering-provider uuid to an internal id (active providers only). */
+async function resolveRenderingProvider(uuid) {
+  if (!uuid) return null;
+  const id = await findProviderIdByUuid(uuid);
+  if (!id) { const e = new Error('Selected provider not found.'); e.status = 400; e.code = 'BAD_PROVIDER'; throw e; }
+  return id;
+}
+
 export async function list(req, res, next) {
   try {
     const from = DATE_RE.test(req.query.from || '') ? req.query.from : null;
@@ -38,10 +48,12 @@ export async function list(req, res, next) {
 
 export async function create(req, res, next) {
   try {
-    const { title, patient, patientUuid, type, date, startMin, durationMin } = req.body;
+    const { title, patient, patientUuid, renderingProviderUuid, type, date, startMin, durationMin } = req.body;
     await assertOwnedPatient(req, patientUuid);
+    const renderingProviderId = await resolveRenderingProvider(renderingProviderUuid);
     const appt = await createAppointment({
       providerId: req.authUserId,
+      renderingProviderId,
       title,
       patient: patient || '',
       patientUuid: patientUuid || null,
@@ -51,6 +63,17 @@ export async function create(req, res, next) {
       durationMin,
       createdBy: req.authUserId,
     });
+    // Auto-create a numbered encounter (wired to MRN + DOS) for patient bookings.
+    if (patientUuid) {
+      const p = await getPatientRawByUuid(patientUuid);
+      const apptRaw = await getRawByUuid(appt.uuid);
+      if (p && apptRaw) {
+        await ensureEncounter({
+          appointmentId: apptRaw.id, patientId: p.id, providerId: req.authUserId,
+          apptDate: appt.date, mrn: p.mrn, createdBy: req.authUserId,
+        });
+      }
+    }
     await recordAudit({
       actorUserId: req.authUserId,
       action: 'appointment.create',
@@ -70,7 +93,11 @@ export async function update(req, res, next) {
     assertOwner(req, row);
     if (req.body.patientUuid) await assertOwnedPatient(req, req.body.patientUuid);
 
-    const b = req.body;
+    const b = { ...req.body };
+    if (b.renderingProviderUuid !== undefined) {
+      b.renderingProviderId = await resolveRenderingProvider(b.renderingProviderUuid);
+      delete b.renderingProviderUuid;
+    }
     // Choose the most meaningful audit action for the change.
     let action = 'appointment.update';
     if (b.status === 'cancelled') action = 'appointment.cancel';

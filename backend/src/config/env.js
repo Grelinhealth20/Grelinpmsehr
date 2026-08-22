@@ -85,6 +85,21 @@ export const config = {
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || '',
     enabled: !!(process.env.S3_BUCKET && process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY),
   },
+
+  // Document-AI extraction: open-source PP-StructureV2 + docTR, served by the
+  // Python OCR microservice (ocr-service/). The Node API calls it over HTTP.
+  ocr: {
+    serviceUrl: process.env.OCR_SERVICE_URL || 'http://127.0.0.1:8600',
+    apiKey: process.env.OCR_API_KEY || '',
+    timeoutMs: int('OCR_TIMEOUT_MS', 60000),
+  },
+
+  // NPPES NPI Registry (CMS, public) — auto-fills SNF facility NPI + address.
+  nppes: {
+    enabled: bool('NPPES_ENABLED', true),
+    baseUrl: process.env.NPPES_BASE_URL || 'https://npiregistry.cms.hhs.gov/api/',
+    timeoutMs: int('NPPES_TIMEOUT_MS', 8000),
+  },
 };
 
 /** Roles, ordered by privilege. Used for RBAC checks. */

@@ -42,6 +42,17 @@ export async function runMigrations() {
   );
   // Provider credential tags (MD, DO, NP, APRN, ASNP, PA, …) — staff metadata, not PHI.
   await ensureColumn('users', 'credentials', '`credentials` JSON NULL AFTER `specialty_id`');
+  // Rendering provider selected for an appointment (may differ from the owner).
+  await ensureColumn(
+    'appointments',
+    'rendering_provider_id',
+    '`rendering_provider_id` BIGINT UNSIGNED NULL AFTER `provider_id`',
+    'CONSTRAINT `fk_appt_rendering` FOREIGN KEY (`rendering_provider_id`) REFERENCES `users`(`id`) ON DELETE SET NULL',
+  );
+  // Emergency contact on the patient face sheet (encrypted PHI blob).
+  await ensureColumn('patients', 'emergency_enc', '`emergency_enc` VARBINARY(2048) NULL AFTER `facility_enc`');
+  // Human-readable encounter number per DOS, wired to the patient MRN.
+  await ensureColumn('encounters', 'encounter_no', '`encounter_no` VARCHAR(48) NULL AFTER `uuid`');
   logger.info(`Schema ensured (${SCHEMA_STATEMENTS.length} tables)`);
 }
 

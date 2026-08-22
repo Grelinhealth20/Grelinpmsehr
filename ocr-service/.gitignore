@@ -1,0 +1,11 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.log
+models/
+samples/
+*.pdf
+*.png
+*.jpg
+*.jpeg

@@ -3,11 +3,6 @@ import PatientModal from '../components/PatientModal.jsx';
 import { useToast } from '../components/Toast.jsx';
 import { encountersApi, toApiError } from '../lib/api.js';
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const pad = (n) => String(n).padStart(2, '0');
-const fmtDate = (iso) => { const [y, m, d] = (iso || '').split('-').map(Number); return m ? `${MONTHS[m - 1]} ${d}, ${y}` : '—'; };
-const fmtTime = (min) => { if (min == null) return ''; const h = Math.floor(min / 60); const ap = h < 12 ? 'AM' : 'PM'; return `${((h + 11) % 12) + 1}:${pad(min % 60)} ${ap}`; };
-
 const ELIG = {
   not_verified: { label: 'Not verified', cls: 'disabled' },
   pending: { label: 'Pending', cls: 'restricted' },
@@ -37,6 +32,7 @@ export default function Encounter() {
   const [search, setSearch] = useState('');
   const [collapsed, setCollapsed] = useState(() => new Set());
   const [viewPatient, setViewPatient] = useState(null);
+  const [newPatient, setNewPatient] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -50,8 +46,7 @@ export default function Encounter() {
     if (!q) return rows;
     return rows.filter((r) =>
       (r.patientName || '').toLowerCase().includes(q) ||
-      (r.mrn || '').toLowerCase().includes(q) ||
-      (r.accountNumber || '').toLowerCase().includes(q));
+      (r.mrn || '').toLowerCase().includes(q));
   }, [rows, search]);
 
   // Group encounters by patient (unlinked ones fall into a single group).
@@ -61,8 +56,7 @@ export default function Encounter() {
       const key = r.patientUuid || '__unlinked__';
       if (!map.has(key)) {
         map.set(key, {
-          key, patientUuid: r.patientUuid,
-          accountNumber: r.accountNumber, mrn: r.mrn,
+          key, patientUuid: r.patientUuid, mrn: r.mrn,
           patientName: r.patientUuid ? r.patientName : 'Unlinked encounters',
           facilityName: r.facilityName, renderingProvider: r.renderingProvider,
           encounters: [],
@@ -83,16 +77,15 @@ export default function Encounter() {
           <span className="enc-title-sub">{loading ? 'Loading…' : `${groups.length} patient${groups.length === 1 ? '' : 's'} · ${filtered.length} encounter${filtered.length === 1 ? '' : 's'}`}</span>
         </div>
         <span className="spacer" />
-        <input className="input search" placeholder="Search patient, MRN or account…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <input className="input search" placeholder="Search patient or MRN…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <button className="btn sm" onClick={() => setNewPatient(true)}>+ New Patient</button>
       </div>
 
       <div className="enc-table-wrap">
         <table className="table enc-table">
           <thead>
             <tr>
-              <th>Account Number</th>
               <th>MRN</th>
-              <th>Appointment Date</th>
               <th>Patient Name</th>
               <th>Facility Name</th>
               <th>Rendering Provider</th>
@@ -103,9 +96,9 @@ export default function Encounter() {
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={9} className="table-empty"><span className="spinner dark" /> Loading…</td></tr>
+              <tr><td colSpan={7} className="table-empty"><span className="spinner dark" /> Loading…</td></tr>
             ) : groups.length === 0 ? (
-              <tr><td colSpan={9} className="table-empty">No encounters yet. Book an appointment to create one.</td></tr>
+              <tr><td colSpan={7} className="table-empty">No encounters yet. Book an appointment to create one.</td></tr>
             ) : (
               groups.map((g) => {
                 const open = !collapsed.has(g.key);
@@ -125,6 +118,7 @@ export default function Encounter() {
       </div>
 
       {viewPatient && <PatientModal uuid={viewPatient} onClose={() => setViewPatient(null)} onSaved={() => load()} />}
+      {newPatient && <PatientModal docMode="records" onClose={() => setNewPatient(false)} onSaved={() => load()} />}
     </div>
   );
 }
@@ -134,9 +128,7 @@ function FragmentGroup({ g, open, onToggle, onView }) {
   return (
     <>
       <tr className={`enc-group ${open ? 'is-open' : ''}`} onClick={onToggle}>
-        <td className="mono">{g.accountNumber || '—'}</td>
         <td className="mono">{g.mrn || '—'}</td>
-        <td className="enc-nowrap">{fmtDate(g.encounters[0].date)} · {fmtTime(g.encounters[0].startMin)}</td>
         <td className="enc-strong">
           <span className="enc-group-name"><span className={`enc-chev ${open ? 'open' : ''}`} aria-hidden="true" />{g.patientName || '—'}</span>
         </td>
@@ -150,9 +142,7 @@ function FragmentGroup({ g, open, onToggle, onView }) {
       </tr>
       {open && g.encounters.map((r) => (
         <tr className="enc-child" key={r.appointmentUuid}>
-          <td />
-          <td />
-          <td className="enc-nowrap enc-child-date">{fmtDate(r.date)} · {fmtTime(r.startMin)}</td>
+          <td className="mono enc-child-eno">{r.encounterNo || '—'}</td>
           <td />
           <td />
           <td />

@@ -15,6 +15,9 @@ const router = Router();
 router.use(authenticate, requirePasswordSettled);
 
 router.get('/', ctrl.list);
+// Stateless face-sheet auto-fill: OCR a face sheet BEFORE the patient exists.
+// Nothing is written to S3 or the DB — the buffer is processed in memory only.
+router.post('/extract-upload', csrfProtection, upload.single('file'), ctrl.extractUpload);
 router.post('/', csrfProtection, validate(createPatientSchema), ctrl.create);
 router.get('/:uuid', validate(uuidParam, 'params'), ctrl.getOne);
 router.patch('/:uuid', csrfProtection, validate(uuidParam, 'params'), validate(updatePatientSchema), ctrl.update);
@@ -24,6 +27,7 @@ router.delete('/:uuid', csrfProtection, validate(uuidParam, 'params'), ctrl.remo
 router.get('/:uuid/documents', validate(uuidParam, 'params'), ctrl.listDocs);
 router.post('/:uuid/documents', csrfProtection, validate(uuidParam, 'params'), upload.single('file'), ctrl.uploadDoc);
 router.get('/:uuid/documents/:docUuid/url', validate(uuidParam, 'params'), ctrl.getDocUrl);
+router.post('/:uuid/documents/:docUuid/extract', csrfProtection, validate(uuidParam, 'params'), ctrl.extractDoc);
 router.delete('/:uuid/documents/:docUuid', csrfProtection, validate(uuidParam, 'params'), ctrl.deleteDoc);
 
 export default router;

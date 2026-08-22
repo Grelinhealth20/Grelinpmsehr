@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { pool, execute } from '../db/pool.js';
-import { config, USER_STATUS } from '../config/env.js';
+import { config, USER_STATUS, ROLES } from '../config/env.js';
 import { verifyPassword, hashPassword, validatePasswordPolicy } from '../utils/password.js';
 import { signAccessToken, signRefreshToken, verifyRefreshToken } from '../utils/tokens.js';
 import { sha256Hex, blindIndex } from '../utils/crypto.js';
@@ -70,8 +70,13 @@ export async function login(email, password, ctx = {}) {
     throw new AuthError('This account has been disabled.', 403, 'ACCOUNT_DISABLED');
   }
 
+  // The master admin — by role OR the configured master email — is never locked
+  // out (the top account must always remain reachable).
+  const isMaster = user.role === ROLES.MASTER_ADMIN || user.email_bidx === blindIndex(config.masterAdmin.email);
+  const lockable = !isMaster;
+
   // Any non-null lock marker means the account is locked until a password reset.
-  if (user.locked_until) {
+  if (user.locked_until && lockable) {
     await logAttempt(email, ctx.ip, false);
     throw new AuthError(
       'Account locked after too many failed attempts. Ask an administrator to reset your password.',
@@ -82,7 +87,7 @@ export async function login(email, password, ctx = {}) {
 
   const ok = await verifyPassword(user.password_hash, password);
   if (!ok) {
-    await recordFailedLogin(user.id);
+    await recordFailedLogin(user.id, { lock: lockable });
     await logAttempt(email, ctx.ip, false);
     await recordAudit({
       actorUserId: user.id,
@@ -91,8 +96,8 @@ export async function login(email, password, ctx = {}) {
       ip: ctx.ip,
       userAgent: ctx.userAgent,
     });
-    // If this failure reached the threshold, the account is now locked.
-    if (user.failed_login_attempts + 1 >= config.policy.maxFailedLogins) {
+    // If this failure reached the threshold, the account is now locked (non-master only).
+    if (lockable && user.failed_login_attempts + 1 >= config.policy.maxFailedLogins) {
       await recordAudit({
         actorUserId: user.id,
         action: 'auth.account.locked',

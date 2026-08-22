@@ -13,11 +13,13 @@ export const pool = mysql.createPool({
   user: config.db.user,
   password: config.db.password,
   database: config.db.database,
-  waitForConnections: true,
+  waitForConnections: true, // queue instead of erroring when all connections are busy
   connectionLimit: config.db.connectionLimit,
-  maxIdle: 2,
-  idleTimeout: 20000, // recycle idle connections before the remote closes them
-  queueLimit: 0,
+  // Keep a warm pool (up to half the limit) so bursty hospital traffic doesn't
+  // pay connection-setup latency on every request; recycle the rest after 60s.
+  maxIdle: Math.max(4, Math.floor(config.db.connectionLimit / 2)),
+  idleTimeout: 60000,
+  queueLimit: 0, // unbounded fair queue under load (back-pressure, never drop)
   enableKeepAlive: true,
   keepAliveInitialDelay: 10000, // TCP keepalive so idle sockets aren't dropped
   connectTimeout: 15000,

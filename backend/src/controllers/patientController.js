@@ -7,14 +7,25 @@ import {
   createDocumentRecord, deleteDocumentRecord,
 } from '../services/patientDocumentService.js';
 import {
-  s3Enabled, ensurePatientFolder, uploadPatientObject, signedGetUrl, deleteObject, deleteObjects,
+  s3Enabled, ensurePatientFolder, uploadPatientObject, signedGetUrl, deleteObject, deleteObjects, getObjectBytes,
 } from '../services/s3Service.js';
+import { extractDocument, ocrEnabled } from '../services/docExtractService.js';
 import { recordAudit } from '../services/auditService.js';
 
 const DOC_TYPES = new Set(['license_front', 'license_back', 'insurance_front', 'insurance_back', 'other']);
 const ALLOWED_MIME = {
   'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'application/pdf': '.pdf',
+  'application/msword': '.doc',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
 };
+// Cards (license/insurance) are scans → images or PDF. Patient records → images
+// (OCR-able scans), PDF, or Word documents.
+const IMG_PDF = new Set(['image/jpeg', 'image/png', 'image/webp', 'application/pdf']);
+const RECORDS_MIME = new Set([
+  'image/jpeg', 'image/png', 'image/webp', 'application/pdf',
+  'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+]);
+const allowedMimes = (docType) => (docType === 'other' ? RECORDS_MIME : IMG_PDF);
 const MAX_BYTES = 10 * 1024 * 1024;
 
 /** STRICT isolation: a patient (and its documents) is only reachable by its owner. */
@@ -37,8 +48,8 @@ export async function list(req, res, next) {
 
 export async function create(req, res, next) {
   try {
-    const { demographics, insurance, facility } = req.body;
-    const patient = await createPatient({ providerId: req.authUserId, demographics, insurance, facility, createdBy: req.authUserId });
+    const { demographics, insurance, facility, emergencyContact, emergencyContacts } = req.body;
+    const patient = await createPatient({ providerId: req.authUserId, demographics, insurance, facility, emergencyContact, emergencyContacts, createdBy: req.authUserId });
     if (s3Enabled()) { try { await ensurePatientFolder(patient.uuid); } catch { /* folder marker is best-effort */ } }
     await recordAudit({ actorUserId: req.authUserId, action: 'patient.create', entityType: 'patient', entityId: patient.uuid, ...ctx(req), metadata: { mrn: patient.mrn } });
     res.status(201).json({ patient });
@@ -92,7 +103,10 @@ export async function uploadDoc(req, res, next) {
     if (!DOC_TYPES.has(docType)) return res.status(400).json({ error: 'Invalid document type.', code: 'BAD_DOC_TYPE' });
     if (!req.file) return res.status(400).json({ error: 'No file uploaded.', code: 'NO_FILE' });
     const ext = ALLOWED_MIME[req.file.mimetype];
-    if (!ext) return res.status(400).json({ error: 'Unsupported file type. Use JPG, PNG, WEBP or PDF.', code: 'BAD_MIME' });
+    if (!ext || !allowedMimes(docType).has(req.file.mimetype)) {
+      const msg = docType === 'other' ? 'Records accept images, PDF or Word documents.' : 'Use JPG, PNG, WEBP or PDF.';
+      return res.status(400).json({ error: `Unsupported file type. ${msg}`, code: 'BAD_MIME' });
+    }
     if (req.file.size > MAX_BYTES) return res.status(400).json({ error: 'File exceeds the 10 MB limit.', code: 'TOO_LARGE' });
 
     // Replace an existing slot (e.g. re-upload license front) — delete the old object.
@@ -120,6 +134,47 @@ export async function getDocUrl(req, res, next) {
     const url = await signedGetUrl(doc.s3_key, 300);
     await recordAudit({ actorUserId: req.authUserId, action: 'patient.document.view', entityType: 'patient', entityId: row.uuid, ...ctx(req), metadata: { docType: doc.doc_type } });
     res.json({ url, expiresIn: 300 });
+  } catch (err) { next(err); }
+}
+
+// Auto-fill supports OCR-able scans only (images + PDF), not Word docs.
+const EXTRACT_MIME = new Set(['image/jpeg', 'image/png', 'image/webp', 'application/pdf']);
+
+/**
+ * Stateless auto-fill: run OCR on an uploaded face sheet and return suggestions
+ * WITHOUT persisting anything (no S3 object, no DB row). Lets the New Patient
+ * form be populated before the patient is created. The in-memory buffer is
+ * discarded when the request ends.
+ */
+export async function extractUpload(req, res, next) {
+  try {
+    if (!ocrEnabled()) return res.status(503).json({ error: 'Document extraction is not configured.', code: 'OCR_DISABLED' });
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded.', code: 'NO_FILE' });
+    if (!EXTRACT_MIME.has(req.file.mimetype)) return res.status(400).json({ error: 'Auto-fill supports image (JPG, PNG, WEBP) or PDF face sheets.', code: 'BAD_MIME' });
+    if (req.file.size > MAX_BYTES) return res.status(400).json({ error: 'File exceeds the 10 MB limit.', code: 'TOO_LARGE' });
+
+    const suggestions = await extractDocument({ buffer: req.file.buffer, contentType: req.file.mimetype, fileName: req.file.originalname });
+    await recordAudit({ actorUserId: req.authUserId, action: 'patient.extract.stateless', entityType: 'extraction', entityId: 'adhoc', ...ctx(req), metadata: { mime: req.file.mimetype, size: req.file.size } });
+    res.json({ suggestions });
+  } catch (err) { next(err); }
+}
+
+/** Auto-extract demographics + insurance suggestions from an uploaded document. */
+export async function extractDoc(req, res, next) {
+  try {
+    if (!ocrEnabled()) return res.status(503).json({ error: 'Document extraction is not configured.', code: 'OCR_DISABLED' });
+    if (!s3Enabled()) return res.status(503).json({ error: 'Document storage is not configured.', code: 'S3_DISABLED' });
+    const row = await ownedPatientOr404(req);
+    const doc = await getRawDocByUuid(req.params.docUuid);
+    if (!doc || Number(doc.patient_id) !== Number(row.id)) return res.status(404).json({ error: 'Document not found.', code: 'NOT_FOUND' });
+
+    // OCR runs on the raw bytes (image or PDF); fetch them from the patient's S3 folder.
+    const buffer = await getObjectBytes(doc.s3_key);
+    const fileName = `document${ALLOWED_MIME[doc.content_type] || ''}`;
+    const suggestions = await extractDocument({ buffer, contentType: doc.content_type, fileName });
+
+    await recordAudit({ actorUserId: req.authUserId, action: 'patient.document.extract', entityType: 'patient', entityId: row.uuid, ...ctx(req), metadata: { docType: doc.doc_type, engine: 'ppstructure+doctr' } });
+    res.json({ suggestions });
   } catch (err) { next(err); }
 }
 

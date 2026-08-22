@@ -191,17 +191,18 @@ export async function getPasswordHistory(userId) {
   return rows.map((r) => r.password_hash);
 }
 
-export async function recordFailedLogin(userId) {
+export async function recordFailedLogin(userId, { lock = true } = {}) {
   // On reaching the threshold we set locked_until as a permanent lock marker.
   // The lock is cleared ONLY when a password is (re)set — see setPassword().
+  // `lock=false` (master admin) still counts the attempt but never locks.
   await execute(
     `UPDATE users
         SET failed_login_attempts = failed_login_attempts + 1,
             locked_until = CASE
-              WHEN failed_login_attempts + 1 >= :max THEN NOW()
+              WHEN :lock = 1 AND failed_login_attempts + 1 >= :max THEN NOW()
               ELSE locked_until END
       WHERE id = :id`,
-    { max: config.policy.maxFailedLogins, id: userId },
+    { max: config.policy.maxFailedLogins, id: userId, lock: lock ? 1 : 0 },
   );
 }
 
@@ -217,4 +218,25 @@ export async function recordSuccessfulLogin(userId) {
 export async function countUsers() {
   const [rows] = await execute(`SELECT COUNT(*) AS n FROM users`);
   return rows[0].n;
+}
+
+/** Active providers, as a minimal DTO for provider pickers (no email/PII leak). */
+export async function listProviders() {
+  const [rows] = await execute(
+    `${USER_SELECT} WHERE u.role = 'provider' AND u.status = 'active' ORDER BY u.created_at DESC`,
+  );
+  return rows.map((r) => {
+    const u = toPublicUser(r);
+    return { uuid: u.uuid, fullName: u.fullName, credentials: u.credentials, specialty: u.specialty };
+  });
+}
+
+/** Resolve a provider uuid to its internal id (only active providers qualify). */
+export async function findProviderIdByUuid(uuid) {
+  if (!uuid) return null;
+  const [rows] = await execute(
+    `SELECT id FROM users WHERE uuid = :uuid AND role = 'provider' AND status = 'active' LIMIT 1`,
+    { uuid },
+  );
+  return rows[0]?.id ?? null;
 }

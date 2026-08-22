@@ -66,7 +66,7 @@ export default function AccessControlModal({ user, onClose, onSaved }) {
   return (
     <Modal
       title="Access Control"
-      width={540}
+      size="full"
       onClose={onClose}
       footer={
         <>

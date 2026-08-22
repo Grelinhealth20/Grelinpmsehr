@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback } from 'react';
+import { createContext, useContext, useState, useCallback, useMemo } from 'react';
 
 const ToastContext = createContext(null);
 
@@ -11,11 +11,13 @@ export function ToastProvider({ children }) {
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 4200);
   }, []);
 
-  const toast = {
+  // Stable object — never re-created — so consumers that put `toast` in a
+  // dependency array (useCallback/useEffect) don't churn and re-fetch in a loop.
+  const toast = useMemo(() => ({
     success: (m) => push(m, 'success'),
     error: (m) => push(m, 'error'),
     info: (m) => push(m, 'info'),
-  };
+  }), [push]);
 
   return (
     <ToastContext.Provider value={toast}>

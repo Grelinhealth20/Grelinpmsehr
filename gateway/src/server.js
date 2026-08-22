@@ -231,12 +231,14 @@ app.use(
 app.use(compression());
 app.use(cookieParser());
 
-// Edge rate limits.
+// Edge rate limits — applied to /api only (below). Static SPA assets are NOT
+// rate-limited, so page/asset loads never consume the API budget.
 const edgeLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 600,
+  max: 1200, // per client IP / minute, for /api
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => req.path === '/api/health',
   message: { error: 'Too many requests. Please slow down.' },
 });
 const authEdgeLimiter = rateLimit({
@@ -246,9 +248,8 @@ const authEdgeLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: 'Too many attempts. Please try again later.' },
 });
-app.use(edgeLimiter);
 
-// Gateway liveness (never proxied, never WAF-scanned).
+// Gateway liveness (never proxied, never WAF-scanned, never rate-limited).
 app.get('/healthz', (req, res) => res.json({ status: 'ok', service: 'grelin-pms-gateway' }));
 
 // ---------------------------------------------------------------------------
@@ -262,8 +263,11 @@ const apiProxy = createProxyMiddleware({
   target: INTERNAL_API_URL,
   changeOrigin: false, // loopback upstream; preserve Host for the backend CORS/origin logic
   xfwd: true,
-  proxyTimeout: 30000,
-  timeout: 30000,
+  // Long enough for synchronous document-AI OCR extraction (multi-page scans)
+  // to complete without the edge cutting the connection; the backend enforces
+  // its own per-request OCR deadline below this.
+  proxyTimeout: 120000,
+  timeout: 120000,
   // Mounting at '/api' makes Express strip the prefix from req.url; restore the
   // full original path so the backend (which serves everything under /api) matches.
   pathRewrite: (_path, req) => req.originalUrl,
@@ -284,7 +288,7 @@ const apiProxy = createProxyMiddleware({
 });
 
 app.use('/api/auth', authEdgeLimiter);
-app.use('/api', apiBodyParser, waf, apiProxy);
+app.use('/api', edgeLimiter, apiBodyParser, waf, apiProxy);
 
 // ---------------------------------------------------------------------------
 // Static SPA (React build) + history-API fallback for client-side routing.

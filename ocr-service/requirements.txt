@@ -1,0 +1,16 @@
+# Grelin OCR microservice — PP-StructureV2 (PaddleOCR) + docTR
+# Pinned to CPU builds; swap the torch/paddle wheels for GPU on a g5/g6 host.
+
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+pillow==11.1.0
+numpy==1.26.4
+PyMuPDF==1.25.2
+
+# PaddleOCR / PP-StructureV2 (layout + table + key-value structure)
+paddlepaddle==2.6.2
+paddleocr==2.9.1
+
+# docTR (deep-learning OCR/recognition) — CPU torch backend
+python-doctr[torch]==0.10.0

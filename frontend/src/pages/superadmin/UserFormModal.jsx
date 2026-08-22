@@ -47,9 +47,8 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
   const isEdit = mode === 'edit';
   const [fullName, setFullName] = useState(user?.fullName || '');
   const [email, setEmail] = useState(user?.email || '');
-  const [role, setRole] = useState(
-    isEdit ? (user?.role !== 'master_admin' ? user.role : 'super_admin') : lockedRole || 'provider',
-  );
+  const isMasterUser = isEdit && user?.role === 'master_admin';
+  const [role, setRole] = useState(isEdit ? user.role : lockedRole || 'provider');
   const [scope, setScope] = useState(user?.accessLevel?.scope || 'standard');
   const [notes, setNotes] = useState(user?.accessLevel?.notes || '');
   const [credentials, setCredentials] = useState(user?.credentials || []);
@@ -116,13 +115,14 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
       // editing scope/notes must never silently wipe a user's granted access.
       const accessLevel = { ...(user?.accessLevel || {}), scope, notes: notes.trim() || undefined };
       if (isEdit) {
-        await usersApi.update(user.uuid, {
+        const payload = {
           fullName: fullName.trim(),
-          role,
           accessLevel,
           credentials: isProvider ? credentials : [],
           specialtyUuid: isProvider ? specialtyUuid || null : null,
-        });
+        };
+        if (!isMasterUser) payload.role = role; // master admin role is immutable
+        await usersApi.update(user.uuid, payload);
       } else {
         await usersApi.create({
           email: email.trim().toLowerCase(),
@@ -145,7 +145,7 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
   return (
     <Modal
       title={isEdit ? 'Edit user' : `Create ${lockedLabel}`}
-      width={520}
+      size="full"
       onClose={onClose}
       footer={
         <>
@@ -171,7 +171,9 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
 
         <div className="field">
           <label>Role</label>
-          {isEdit ? (
+          {isMasterUser ? (
+            <span className="role-locked"><span className="chip-dot" style={{ background: 'var(--c-accent)' }} />Master Admin</span>
+          ) : isEdit ? (
             <Segmented options={ROLE_OPTIONS} value={role} onChange={setRole} />
           ) : (
             <span className="role-locked"><span className="chip-dot" style={{ background: 'var(--c-accent)' }} />{lockedLabel}</span>
