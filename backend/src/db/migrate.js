@@ -53,6 +53,8 @@ export async function runMigrations() {
   await ensureColumn('patients', 'emergency_enc', '`emergency_enc` VARBINARY(2048) NULL AFTER `facility_enc`');
   // Human-readable encounter number per DOS, wired to the patient MRN.
   await ensureColumn('encounters', 'encounter_no', '`encounter_no` VARCHAR(48) NULL AFTER `uuid`');
+  // Date of service for standalone (manually created) encounters not tied to an appointment.
+  await ensureColumn('encounters', 'encounter_date', '`encounter_date` DATE NULL AFTER `patient_id`');
   logger.info(`Schema ensured (${SCHEMA_STATEMENTS.length} tables)`);
 }
 

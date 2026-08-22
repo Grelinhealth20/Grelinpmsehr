@@ -257,7 +257,11 @@ app.get('/healthz', (req, res) => res.json({ status: 'ok', service: 'grelin-pms-
 // ---------------------------------------------------------------------------
 // Parse the JSON body ONLY for /api so the WAF can inspect it; fixRequestBody
 // re-streams it to the upstream. Small cap mirrors the backend (DoS resistance).
-const apiBodyParser = express.json({ limit: '100kb' });
+// Multipart file uploads are streamed RAW to the backend — never JSON-parsed,
+// WAF-buffered, or re-emitted — so the upload stream reaches multer intact.
+const jsonParser = express.json({ limit: '100kb' });
+const isMultipart = (req) => (req.headers['content-type'] || '').toLowerCase().startsWith('multipart/form-data');
+const skipForUploads = (mw) => (req, res, next) => (isMultipart(req) ? next() : mw(req, res, next));
 
 const apiProxy = createProxyMiddleware({
   target: INTERNAL_API_URL,
@@ -275,8 +279,9 @@ const apiProxy = createProxyMiddleware({
     proxyReq: (proxyReq, req) => {
       // Prove to the backend that the request came through the trusted gateway.
       if (INTERNAL_API_KEY) proxyReq.setHeader('x-internal-api-key', INTERNAL_API_KEY);
-      // Re-emit the body the JSON parser consumed.
-      fixRequestBody(proxyReq, req);
+      // Re-emit the body the JSON parser consumed — but NEVER for multipart
+      // uploads (those stream raw; re-emitting would corrupt the file body).
+      if (!isMultipart(req)) fixRequestBody(proxyReq, req);
     },
     error: (err, req, res) => {
       logger.error({ err: err.message, url: req.originalUrl }, 'Proxy error');
@@ -288,7 +293,7 @@ const apiProxy = createProxyMiddleware({
 });
 
 app.use('/api/auth', authEdgeLimiter);
-app.use('/api', edgeLimiter, apiBodyParser, waf, apiProxy);
+app.use('/api', edgeLimiter, skipForUploads(jsonParser), skipForUploads(waf), apiProxy);
 
 // ---------------------------------------------------------------------------
 // Static SPA (React build) + history-API fallback for client-side routing.

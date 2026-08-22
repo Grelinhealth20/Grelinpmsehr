@@ -110,7 +110,7 @@ function parsePCC(text) {
   if (dob) demographics.dob = dob;
   const gm = afterSex.match(/^\s*(m|male|f|female)\s*$/im);
   const gender = gm ? normGender(gm[1]) : '';
-  if (gender) demographics.gender = gender;
+  demographics.gender = gender || 'unknown';
 
   // --- SSN: unique ###-##-#### pattern.
   const sm = T.match(/\b(\d{3}-\d{2}-\d{4})\b/);

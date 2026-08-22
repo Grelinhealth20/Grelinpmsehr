@@ -191,4 +191,30 @@ export const SCHEMA_STATEMENTS = [
     KEY idx_login_ip (ip),
     KEY idx_login_created (created_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+  // Clinical documentation — CMS-compliant SNF MD notes. Body is an encrypted
+  // PHI blob (structured JSON). A note is immutable once signed (billing-ready).
+  `CREATE TABLE IF NOT EXISTS encounter_notes (
+    id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    uuid          CHAR(36)        NOT NULL,
+    encounter_id  BIGINT UNSIGNED NOT NULL,
+    provider_id   BIGINT UNSIGNED NOT NULL,
+    note_type     VARCHAR(60)     NOT NULL,
+    reason        VARCHAR(120)    NULL,
+    content_enc   VARBINARY(16384) NULL,
+    status        ENUM('draft','signed') NOT NULL DEFAULT 'draft',
+    billing_ready TINYINT(1)      NOT NULL DEFAULT 0,
+    signed_by     BIGINT UNSIGNED NULL,
+    signed_by_name VARCHAR(160)   NULL,
+    signed_at     DATETIME        NULL,
+    created_by    BIGINT UNSIGNED NULL,
+    created_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_note_uuid (uuid),
+    KEY idx_note_encounter (encounter_id),
+    KEY idx_note_provider (provider_id),
+    CONSTRAINT fk_note_encounter FOREIGN KEY (encounter_id) REFERENCES encounters(id) ON DELETE CASCADE,
+    CONSTRAINT fk_note_provider FOREIGN KEY (provider_id) REFERENCES users(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 ];

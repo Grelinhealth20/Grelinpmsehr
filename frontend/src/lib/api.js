@@ -115,8 +115,10 @@ export const patientsApi = {
     const fd = new FormData();
     fd.append('docType', docType);
     fd.append('file', file);
+    // Let the browser set multipart/form-data WITH its boundary — never set it
+    // manually (a boundary-less header makes the server fail to parse the file).
     return api.post(`/patients/${uuid}/documents`, fd, {
-      headers: { 'Content-Type': 'multipart/form-data' },
+      headers: { 'Content-Type': undefined },
       onUploadProgress: onProgress,
     });
   },
@@ -126,7 +128,8 @@ export const patientsApi = {
   extractUpload: (file) => {
     const fd = new FormData();
     fd.append('file', file);
-    return api.post('/patients/extract-upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+    // Browser sets multipart/form-data + boundary; do not set it manually.
+    return api.post('/patients/extract-upload', fd, { headers: { 'Content-Type': undefined } });
   },
   removeDocument: (uuid, docUuid) => api.delete(`/patients/${uuid}/documents/${docUuid}`),
 };
@@ -134,7 +137,17 @@ export const patientsApi = {
 // --- Encounters (EHR worklist) ---------------------------------------------
 export const encountersApi = {
   list: () => api.get('/encounters'),
+  // Server-side pagination (enterprise scale)
+  listPatients: (params) => api.get('/encounters/patients', { params }),
+  patientEncounters: (patientUuid, params) => api.get(`/encounters/patient/${patientUuid}/encounters`, { params }),
+  create: (payload) => api.post('/encounters', payload),
   updateStatus: (appointmentUuid, payload) => api.patch(`/encounters/${appointmentUuid}`, payload),
+  // Clinical notes
+  listNotes: (encounterUuid) => api.get(`/encounters/${encounterUuid}/notes`),
+  createNote: (encounterUuid, payload) => api.post(`/encounters/${encounterUuid}/notes`, payload),
+  getNote: (noteUuid) => api.get(`/encounters/notes/${noteUuid}`),
+  updateNote: (noteUuid, payload) => api.patch(`/encounters/notes/${noteUuid}`, payload),
+  signNote: (noteUuid, payload) => api.post(`/encounters/notes/${noteUuid}/sign`, payload),
 };
 
 // --- Appointments (EHR scheduler) ------------------------------------------

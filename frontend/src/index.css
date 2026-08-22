@@ -190,7 +190,7 @@ button { font-family: inherit; }
 }
 @keyframes modalSheen { 0%, 100% { background-position: 0% 0; } 50% { background-position: 100% 0; } }
 /* Full-window popup (content-heavy forms) */
-.modal--full { max-width: 1200px; width: 96vw; height: 94vh; max-height: 94vh; }
+.modal--full { max-width: 1360px; width: 96vw; height: 94vh; max-height: 94vh; }
 .modal > .row { flex-shrink: 0; }
 .modal > .row h3 { color: var(--c-dark-blue); }
 .modal-body { padding: 22px; overflow-y: auto; flex: 1; min-height: 0; }

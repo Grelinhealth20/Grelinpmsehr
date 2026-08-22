@@ -3,11 +3,11 @@ import {
   listPatients, createPatient, updatePatient, deletePatient, getRawByUuid, toPublicPatient,
 } from '../services/patientService.js';
 import {
-  listDocuments, listRawDocuments, getRawDocByUuid, findDocByType,
+  listDocuments, getRawDocByUuid, findDocByType,
   createDocumentRecord, deleteDocumentRecord,
 } from '../services/patientDocumentService.js';
 import {
-  s3Enabled, ensurePatientFolder, uploadPatientObject, signedGetUrl, deleteObject, deleteObjects, getObjectBytes,
+  s3Enabled, ensurePatientFolder, uploadPatientObject, signedGetUrl, deleteObject, deleteObjects, getObjectBytes, listPatientKeys,
 } from '../services/s3Service.js';
 import { extractDocument, ocrEnabled } from '../services/docExtractService.js';
 import { recordAudit } from '../services/auditService.js';
@@ -78,8 +78,12 @@ export async function remove(req, res, next) {
   try {
     const row = await ownedPatientOr404(req);
     if (s3Enabled()) {
-      const docs = await listRawDocuments(row.id);
-      try { await deleteObjects([...docs.map((d) => d.s3_key), `patients/${row.uuid}/.keep`]); } catch { /* best-effort */ }
+      // Purge the patient's ENTIRE S3 folder (records, signed note documents,
+      // the .keep marker — every object under patients/{uuid}/) so no PHI is left.
+      try {
+        const keys = await listPatientKeys(row.uuid);
+        if (keys.length) await deleteObjects(keys);
+      } catch { /* best-effort */ }
     }
     await deletePatient(row.uuid);
     await recordAudit({ actorUserId: req.authUserId, action: 'patient.delete', entityType: 'patient', entityId: row.uuid, ...ctx(req) });

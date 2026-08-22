@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, DeleteObjectsCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, DeleteObjectsCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { config } from '../config/env.js';
 import { logger } from '../config/logger.js';
@@ -83,6 +83,24 @@ export async function getObjectBytes(s3Key) {
   if (!client) throw new Error('S3 is not configured.');
   const res = await client.send(new GetObjectCommand({ Bucket: config.s3.bucket, Key: s3Key }));
   return Buffer.from(await res.Body.transformToByteArray());
+}
+
+/** List object keys under a patient's sub-prefix (e.g. 'notes/') — scoped to the
+ * patient's folder, so it can never see another patient's objects. */
+export async function listPatientKeys(patientUuid, subPrefix = '') {
+  if (!client) return [];
+  const out = [];
+  let token;
+  do {
+    const res = await client.send(new ListObjectsV2Command({
+      Bucket: config.s3.bucket,
+      Prefix: `${patientPrefix(patientUuid)}${subPrefix}`,
+      ContinuationToken: token,
+    }));
+    for (const o of res.Contents || []) out.push(o.Key);
+    token = res.IsTruncated ? res.NextContinuationToken : undefined;
+  } while (token);
+  return out;
 }
 
 export async function deleteObject(s3Key) {

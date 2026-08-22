@@ -121,7 +121,7 @@ const demographicsSchema = z
     firstName: z.string().trim().min(1, 'First name is required.').max(80),
     lastName: z.string().trim().min(1, 'Last name is required.').max(80),
     dob: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date of birth must be YYYY-MM-DD.'),
-    gender: z.enum(['male', 'female', 'other', 'unknown']).optional(),
+    gender: z.enum(['male', 'female', 'other', 'unknown'], { required_error: 'Gender is required.' }),
     phone: optStr(40),
     email: optEmail,
     address: optStr(200),
@@ -177,3 +177,48 @@ export const updateEncounterSchema = z
   })
   .strict()
   .refine((v) => Object.keys(v).length > 0, { message: 'No fields to update.' });
+
+// CMS-compliant SNF MD note types.
+export const NOTE_TYPES = [
+  'hp_admission', 'progress', 'acute_visit', 'change_in_condition', 'follow_up',
+  'regulatory', 'post_hospital', 'medication', 'lab_imaging', 'wound_care',
+  'advance_care', 'discharge', 'death',
+];
+const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be YYYY-MM-DD');
+// Structured note body (PHI, encrypted at rest): narrative sections + Rx list.
+const prescriptionItem = z
+  .object({
+    drug: optStr(160), dose: optStr(80), route: optStr(60), frequency: optStr(80),
+    quantity: optStr(40), refills: optStr(20), sig: optStr(400),
+  })
+  .strict();
+const vitalsSchema = z
+  .object({
+    temp: optStr(20), hr: optStr(20), bp: optStr(20), rr: optStr(20),
+    spo2: optStr(20), weight: optStr(20), pain: optStr(20),
+  })
+  .strict();
+const noteContentSchema = z
+  .object({
+    vitals: vitalsSchema.optional(),
+    sections: z.record(z.string().max(20000)).optional(),
+    prescriptions: z.array(prescriptionItem).max(40).optional(),
+  })
+  .strict()
+  .optional();
+
+export const createEncounterSchema = z
+  .object({ patientUuid: z.string().uuid(), encounterDate: isoDate })
+  .strict();
+
+export const createNoteSchema = z
+  .object({ noteType: z.enum(NOTE_TYPES), reason: optStr(120), content: noteContentSchema })
+  .strict();
+
+export const updateNoteSchema = z
+  .object({ noteType: z.enum(NOTE_TYPES).optional(), reason: optStr(120), content: noteContentSchema })
+  .strict();
+
+export const signNoteSchema = z
+  .object({ reason: optStr(120), content: noteContentSchema })
+  .strict();

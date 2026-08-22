@@ -53,9 +53,10 @@ export async function getRawByUuid(uuid) {
   return rows[0] || null;
 }
 
+// Approved MRN format: 7-digit numeric (1000000–9999999), unique.
 async function generateMrn() {
-  for (let i = 0; i < 6; i++) {
-    const mrn = `GRH${crypto.randomInt(10_000_000, 99_999_999)}`;
+  for (let i = 0; i < 10; i++) {
+    const mrn = String(crypto.randomInt(1_000_000, 9_999_999));
     const [rows] = await execute(`SELECT id FROM patients WHERE mrn = :mrn LIMIT 1`, { mrn });
     if (rows.length === 0) return mrn;
   }
@@ -121,6 +122,11 @@ export async function updatePatient(uuid, { demographics, insurance, facility, e
 }
 
 export async function deletePatient(uuid) {
+  // Remove the patient's clinical footprint first: encounters (which cascade to
+  // their notes) — so deletion never leaves orphaned encounters/notes behind.
+  const [pr] = await execute(`SELECT id FROM patients WHERE uuid = :u LIMIT 1`, { u: uuid });
+  const pid = pr[0]?.id;
+  if (pid) await execute(`DELETE FROM encounters WHERE patient_id = :pid`, { pid });
   const [res] = await execute(`DELETE FROM patients WHERE uuid = :uuid`, { uuid });
   return res.affectedRows > 0;
 }
