@@ -9,6 +9,8 @@ import {
   findRawByUuid,
   recordFailedLogin,
   recordSuccessfulLogin,
+  clearLockWindow,
+  getLockState,
   setPassword,
   getPasswordHistory,
 } from './userService.js';
@@ -75,14 +77,22 @@ export async function login(email, password, ctx = {}) {
   const isMaster = user.role === ROLES.MASTER_ADMIN || user.email_bidx === blindIndex(config.masterAdmin.email);
   const lockable = !isMaster;
 
-  // Any non-null lock marker means the account is locked until a password reset.
-  if (user.locked_until && lockable) {
+  // Time-based lockout, evaluated DB-side (timezone-safe). Locked only while the
+  // window is still in the future; once it lapses the account auto-unlocks.
+  const lockState = user.locked_until ? await getLockState(user.id) : { locked: false, minutesLeft: 0 };
+  if (lockState.locked && lockable) {
     await logAttempt(email, ctx.ip, false);
+    const mins = Math.max(1, lockState.minutesLeft);
     throw new AuthError(
-      'Account locked after too many failed attempts. Ask an administrator to reset your password.',
+      `Account temporarily locked after too many failed attempts. Try again in ${mins} minute${mins === 1 ? '' : 's'}.`,
       423,
       'ACCOUNT_LOCKED',
     );
+  }
+  // A lapsed lock (or leftover counter) starts a fresh attempt window (auto-unlock).
+  if (lockable && user.locked_until && !lockState.locked) {
+    await clearLockWindow(user.id);
+    user.failed_login_attempts = 0;
   }
 
   const ok = await verifyPassword(user.password_hash, password);
@@ -96,7 +106,7 @@ export async function login(email, password, ctx = {}) {
       ip: ctx.ip,
       userAgent: ctx.userAgent,
     });
-    // If this failure reached the threshold, the account is now locked (non-master only).
+    // If this failure reached the threshold, the account is now locked for the window.
     if (lockable && user.failed_login_attempts + 1 >= config.policy.maxFailedLogins) {
       await recordAudit({
         actorUserId: user.id,
@@ -106,7 +116,7 @@ export async function login(email, password, ctx = {}) {
         userAgent: ctx.userAgent,
       });
       throw new AuthError(
-        'Account locked after too many failed attempts. Ask an administrator to reset your password.',
+        `Account temporarily locked after too many failed attempts. Try again in ${config.policy.accountLockMinutes} minutes.`,
         423,
         'ACCOUNT_LOCKED',
       );

@@ -221,18 +221,40 @@ export async function getPasswordHistory(userId) {
 }
 
 export async function recordFailedLogin(userId, { lock = true } = {}) {
-  // On reaching the threshold we set locked_until as a permanent lock marker.
-  // The lock is cleared ONLY when a password is (re)set — see setPassword().
+  // On reaching the threshold we lock the account for a TIME WINDOW
+  // (ACCOUNT_LOCK_MINUTES) after which it auto-unlocks — no admin action needed.
   // `lock=false` (master admin) still counts the attempt but never locks.
   await execute(
     `UPDATE users
         SET failed_login_attempts = failed_login_attempts + 1,
             locked_until = CASE
-              WHEN :lock = 1 AND failed_login_attempts + 1 >= :max THEN NOW()
+              WHEN :lock = 1 AND failed_login_attempts + 1 >= :max
+                THEN DATE_ADD(NOW(), INTERVAL :mins MINUTE)
               ELSE locked_until END
       WHERE id = :id`,
-    { max: config.policy.maxFailedLogins, id: userId, lock: lock ? 1 : 0 },
+    { max: config.policy.maxFailedLogins, mins: config.policy.accountLockMinutes, id: userId, lock: lock ? 1 : 0 },
   );
+}
+
+/** Clear a lapsed lock so the user gets a fresh attempt window (auto-unlock). */
+export async function clearLockWindow(userId) {
+  await execute(`UPDATE users SET failed_login_attempts = 0, locked_until = NULL WHERE id = :id`, { id: userId });
+}
+
+/**
+ * Current lock state, computed ENTIRELY in the database (NOW() vs locked_until)
+ * so it is immune to any timezone offset between the DB and the app server.
+ * @returns {Promise<{ locked: boolean, minutesLeft: number }>}
+ */
+export async function getLockState(userId) {
+  const [rows] = await execute(
+    `SELECT (locked_until IS NOT NULL AND locked_until > NOW()) AS locked,
+        GREATEST(0, CEIL(TIMESTAMPDIFF(SECOND, NOW(), locked_until) / 60)) AS mins_left
+       FROM users WHERE id = :id LIMIT 1`,
+    { id: userId },
+  );
+  const r = rows[0] || {};
+  return { locked: !!Number(r.locked), minutesLeft: Number(r.mins_left) || 0 };
 }
 
 export async function recordSuccessfulLogin(userId) {
