@@ -387,10 +387,9 @@ export default function PatientModal({ uuid = null, docMode = 'license', onClose
         onSaved?.(data.patient);
       } else {
         const { data } = await patientsApi.create(payload);
-        setPUuid(data.patient.uuid);
-        setMrn(data.patient.mrn);
-        toast.success('Patient created. You can now upload documents.');
+        toast.success(`Patient created — MRN ${data.patient.mrn}.`);
         onSaved?.(data.patient);
+        onClose(); // creation is complete; the patient now appears in the list
       }
     } catch (e) { toast.error(toApiError(e).message); } finally { setSaving(false); }
   }

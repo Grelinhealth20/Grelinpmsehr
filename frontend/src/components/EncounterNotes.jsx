@@ -3,11 +3,13 @@ import Modal from './Modal.jsx';
 import { useToast } from './Toast.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
 import { encountersApi, patientsApi, toApiError } from '../lib/api.js';
-import { NOTE_TYPES, NOTE_MENU, NOTE_MENU_MORE, PROGRESS_REASONS, TEMPLATES } from '../lib/noteTemplates.js';
+import { NOTE_TYPES, NOTE_MENU, NOTE_MENU_MORE, TEMPLATES } from '../lib/noteTemplates.js';
 
 const today = () => new Date().toISOString().slice(0, 10);
 // Display DOS in US format (MM/DD/YYYY); inputs keep the ISO value they require.
 export const usDate = (iso) => { const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${m[2]}/${m[3]}/${m[1]}` : (iso || '—'); };
+// Encounter ID display — clean sequential number, strip any legacy leading zeros.
+export const encNo = (v) => { const s = String(v ?? '').trim(); return s ? s.replace(/^0+(?=\d)/, '') : '—'; };
 const hasMD = (user) => (user?.credentials || []).some((c) => String(c).toUpperCase().trim() === 'MD');
 const blankRx = () => ({ drug: '', dose: '', route: '', frequency: '', quantity: '', refills: '', sig: '' });
 // Structured vital signs shown at the TOP of the note.
@@ -20,6 +22,47 @@ const VITALS = [
   { k: 'weight', label: 'Wt lb', ph: '—' },
   { k: 'pain', label: 'Pain', ph: '0' },
 ];
+
+// Section icons — a clean, monochrome visual anchor per section (enterprise EHR feel).
+const ICON_PATHS = {
+  doc: <><path d="M7 3h7l4 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z" /><path d="M14 3v4h4M9 13h6M9 16.5h4" /></>,
+  clock: <><circle cx="12" cy="12" r="8" /><path d="M12 8v4l3 2" /></>,
+  pill: <><rect x="3" y="9" width="18" height="6" rx="3" transform="rotate(-45 12 12)" /><path d="M8.5 8.5l7 7" /></>,
+  alert: <><path d="M12 4l8.5 15H3.5z" /><path d="M12 10v4M12 17h.01" /></>,
+  activity: <path d="M3 12h4l2.5-6 4 12 2.5-6H21" />,
+  list: <><path d="M8 6h11M8 12h11M8 18h11" /><path d="M4 6h.01M4 12h.01M4 18h.01" /></>,
+  check: <path d="M4 12.5l5 5 11-11" />,
+  target: <><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3.2" /></>,
+  shield: <path d="M12 3l7.5 3.2v5.3c0 4.8-3.2 8.3-7.5 10.2-4.3-1.9-7.5-5.4-7.5-10.2V6.2z" />,
+  users: <><circle cx="9" cy="9" r="3" /><path d="M3.5 19a5.5 5.5 0 0 1 11 0M16 6.3a3 3 0 0 1 0 5.4M15.5 13.6a5.5 5.5 0 0 1 5 5.4" /></>,
+  home: <><path d="M4 11l8-6.5 8 6.5" /><path d="M6 10v9a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-9M10 20v-6h4v6" /></>,
+  bell: <><path d="M6.5 9a5.5 5.5 0 0 1 11 0c0 5 2 6 2 6H4.5s2-1 2-6Z" /><path d="M10 20a2 2 0 0 0 4 0" /></>,
+  flask: <path d="M9.5 3h5M10.5 3v5.5L5.6 18a1.2 1.2 0 0 0 1 1.9h10.8a1.2 1.2 0 0 0 1-1.9L13.5 8.5V3" />,
+  hospital: <><rect x="4" y="7" width="16" height="13" rx="1" /><path d="M12 10v5M9.5 12.5h5" /></>,
+  trend: <><path d="M4 16l5-5 4 3 7-7" /><path d="M15 7h5v5" /></>,
+  brain: <><path d="M12 5a3.5 3.5 0 0 0-3.5 3.5A3 3 0 0 0 7 14v.5a3 3 0 0 0 5 2 3 3 0 0 0 5-2V14a3 3 0 0 0-1.5-5.5A3.5 3.5 0 0 0 12 5Z" /><path d="M12 5v11.5" /></>,
+  plus: <><circle cx="12" cy="12" r="8" /><path d="M12 8.5v7M8.5 12h7" /></>,
+};
+const SEC_ICON = {
+  chiefComplaint: 'doc', changeDescription: 'alert', hpi: 'doc', interval: 'clock', hospitalCourse: 'hospital',
+  ros: 'list', pmh: 'clock', psh: 'clock', familyHistory: 'users', socialHistory: 'users',
+  medications: 'pill', medChanges: 'pill', dischargeMeds: 'pill', allergies: 'alert', adverseEffects: 'alert',
+  vitals: 'activity', exam: 'activity', wound: 'plus', treatment: 'plus', results: 'flask', carePlanReview: 'list',
+  assessment: 'check', mdm: 'brain', plan: 'target', orders: 'list', notifications: 'bell', prognosis: 'trend',
+  goals: 'target', participants: 'users', decisionsMade: 'check', codeStatus: 'shield', advanceDirective: 'shield',
+  dischargeDiagnoses: 'doc', procedures: 'activity', functionalStatus: 'activity', disposition: 'home',
+  followUp: 'clock', dischargeInstructions: 'doc', careCoordination: 'users', pronouncement: 'doc',
+  circumstances: 'doc', causeOfDeath: 'doc', regulatoryAttestation: 'shield', timeSpent: 'clock', addendum: 'doc',
+};
+function SectionIcon({ k }) {
+  return (
+    <span className="nt-sec-ic" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+        {ICON_PATHS[SEC_ICON[k] || 'doc']}
+      </svg>
+    </span>
+  );
+}
 
 /* -------- New Encounter: select patient + date ---------------------------- */
 export function NewEncounterModal({ onClose, onCreated }) {
@@ -114,13 +157,15 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
     setBusy(true);
     try {
       const { data } = await encountersApi.createNote(encounter.encounterUuid, { noteType, content: { vitals: {}, sections: {}, prescriptions: [] } });
-      await loadNotes();
+      // Show the template immediately (single round-trip) — refresh the tab list
+      // in the background so there's no perceived wait.
       skipSave.current = true;
       setAutoState('idle');
       setActive(data.note);
       setContent({ vitals: {}, sections: {}, prescriptions: [] });
       setReason('');
       setTab('note');
+      loadNotes();
       onChanged?.();
     } catch (e) { toast.error(toApiError(e).message); } finally { setBusy(false); }
   }
@@ -179,13 +224,12 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   }
 
   const template = active ? (TEMPLATES[active.noteType] || []) : [];
-  const isProgress = active?.noteType === 'progress';
 
   return (
     <>
     {picking && <NoteTypePicker busy={busy} onPick={createNote} onClose={() => setPicking(false)} />}
     <Modal size="full" title={`Encounter · ${encounter.patientName || 'Patient'}`} onClose={closeWithSave} footer={<>
-      <span className="nt-foot-meta">{encounter.encounterNo || ''} · DOS {usDate(encounter.date)}</span>
+      <span className="nt-foot-meta">Encounter {encNo(encounter.encounterNo)} · DOS {usDate(encounter.date)}</span>
       {active && !signed && (
         <span className={`nt-autosave ${autoState}`}>
           {autoState === 'saving' ? 'Saving…' : autoState === 'saved' ? 'All changes saved' : 'Auto-saves as you type'}
@@ -204,7 +248,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
         <div className="nt2-info">
           <span className="nt2-info-nm">{encounter.patientName || 'Patient'}</span>
           <span className="nt2-info-item"><b>MRN</b> {encounter.mrn || '—'}</span>
-          <span className="nt2-info-item"><b>Encounter ID</b> {encounter.encounterNo || '—'}</span>
+          <span className="nt2-info-item"><b>Encounter ID</b> {encNo(encounter.encounterNo)}</span>
           <span className="nt2-info-item"><b>DOS</b> {usDate(encounter.date)}</span>
         </div>
         {/* Top toolbar: note tabs (horizontal) + New note (top-right) */}
@@ -246,21 +290,21 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
 
               {tab === 'note' ? (
                 <div className="nt-doc-scroll">
-                  <article className="nt-doc-page">
+                  <article className={`nt-doc-page ${signed ? 'is-signed' : 'is-editing'}`}>
                     <header className="nt-page-head">
                       {encounter.facilityName && <div className="nt-page-fac">{encounter.facilityName}</div>}
                       <div className="nt-page-title">{NOTE_TYPES[active.noteType]?.label}</div>
                       <div className="nt-page-meta">
                         <span><b>Patient:</b> {encounter.patientName || '—'}</span>
                         <span><b>MRN:</b> {encounter.mrn || '—'}</span>
-                        <span><b>Encounter ID:</b> {encounter.encounterNo || '—'}</span>
+                        <span><b>Encounter ID:</b> {encNo(encounter.encounterNo)}</span>
                         <span><b>Date of Service:</b> {usDate(encounter.date)}</span>
                       </div>
                     </header>
 
                     {template.some((s) => s.key === 'vitals') && (!signed || VITALS.some((v) => content.vitals?.[v.k])) && (
                       <section className={`nt-sec ${signed ? '' : 'nt-vitals-sec'}`}>
-                        <h4 className="nt-sec-h">Vital Signs</h4>
+                        <h4 className="nt-sec-h">{!signed && <SectionIcon k="vitals" />}Vital Signs</h4>
                         {signed ? (
                           <div className="nt-sec-body"><p>{VITALS.map((v) => (content.vitals?.[v.k] ? `${v.label}: ${content.vitals[v.k]}` : null)).filter(Boolean).join('    ·    ')}</p></div>
                         ) : (
@@ -276,23 +320,9 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
                       </section>
                     )}
 
-                    {isProgress && (!signed || reason) && (
-                      <section className="nt-sec">
-                        <h4 className="nt-sec-h">Reason for Encounter</h4>
-                        {signed
-                          ? <div className="nt-sec-body"><p>{reason || '—'}</p></div>
-                          : (
-                            <select className="nt-sec-select" value={reason} onChange={(e) => setReason(e.target.value)}>
-                              <option value="">Select reason…</option>
-                              {PROGRESS_REASONS.map((r) => <option key={r} value={r}>{r}</option>)}
-                            </select>
-                          )}
-                      </section>
-                    )}
-
                     {template.filter((s) => s.key !== 'vitals' && (!signed || (content.sections[s.key] || '').trim())).map((s) => (
                       <section className="nt-sec" key={s.key}>
-                        <h4 className="nt-sec-h">{s.label}</h4>
+                        <h4 className="nt-sec-h">{!signed && <SectionIcon k={s.key} />}{s.label}</h4>
                         {signed ? (
                           <div className="nt-sec-body">
                             {(content.sections[s.key] || '').trim()
@@ -300,7 +330,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
                               : <p className="nt-sec-blank">—</p>}
                           </div>
                         ) : (
-                          <AutoText rows={s.rows >= 4 ? 5 : 3} value={content.sections[s.key] || ''} placeholder={s.prompt} onChange={(v) => setSection(s.key, v)} />
+                          <AutoText rows={s.rows >= 4 ? 4 : 2} value={content.sections[s.key] || ''} placeholder={s.prompt} onChange={(v) => setSection(s.key, v)} />
                         )}
                       </section>
                     ))}
@@ -376,28 +406,33 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   );
 }
 
-/** Pop-up: choose the note template to create (enterprise-grade card picker). */
+/** Pop-up: choose the note template to create (enterprise-grade template gallery). */
 function NoteTypePicker({ onPick, onClose, busy }) {
   const card = (k) => {
     const t = NOTE_TYPES[k];
     return (
       <button key={k} type="button" className="ntp-card" disabled={busy} onClick={() => onPick(k)}>
-        <span className="ntp-card-head">
-          <span className="ntp-card-cat">{t.category}</span>
+        <span className="ntp-card-top">
+          <span className="ntp-card-ic" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none">
+              <path d="M6 3h7l5 5v12.5a.5.5 0 0 1-.5.5h-11a.5.5 0 0 1-.5-.5v-17a.5.5 0 0 1 .5-.5Z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+              <path d="M13 3v5h5M8.5 12.5h7M8.5 16h4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            </svg>
+          </span>
           <span className="ntp-card-cpt">CPT {t.cpt}</span>
         </span>
         <span className="ntp-card-title">{t.label}</span>
-        <span className="ntp-card-go">
-          Start note
-          <svg viewBox="0 0 16 16" width="12" height="12" fill="none" aria-hidden="true">
-            <path d="M3 8h9M8.5 4l4 4-4 4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+        <span className="ntp-card-cat">{t.category}</span>
+        <span className="ntp-card-arrow" aria-hidden="true">
+          <svg viewBox="0 0 16 16" width="13" height="13" fill="none">
+            <path d="M3 8h9M8.5 4l4 4-4 4" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </span>
       </button>
     );
   };
   return (
-    <Modal title="Create a New Note" width={880} onClose={onClose} footer={<>
+    <Modal title="Create a New Note" width={900} onClose={onClose} footer={<>
       <span className="ntp-foot">CMS-compliant SNF templates · MD sign-off required for billing</span>
       <span className="spacer" />
       <button className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
@@ -417,11 +452,19 @@ function NoteTypePicker({ onPick, onClose, busy }) {
   );
 }
 
-/** Large, clean, auto-growing writing area — document typography, generous size. */
+/** Large, clean, auto-growing writing area — grows to fit the text exactly, no
+ *  scrollbar. Accounts for the border (box-sizing: border-box) so the last line
+ *  is never clipped. */
 function AutoText({ value, onChange, placeholder, rows = 3 }) {
   const ref = useRef(null);
   const minH = rows * 24 + 20;
-  const resize = () => { const el = ref.current; if (el) { el.style.height = 'auto'; el.style.height = `${Math.max(el.scrollHeight, minH)}px`; } };
+  const resize = () => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    const borderY = el.offsetHeight - el.clientHeight; // top+bottom border (border-box)
+    el.style.height = `${Math.max(el.scrollHeight + borderY, minH)}px`;
+  };
   useEffect(resize, [value]);
   return (
     <textarea

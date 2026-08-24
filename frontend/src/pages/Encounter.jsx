@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import PatientModal from '../components/PatientModal.jsx';
-import { NewEncounterModal, EncounterNotesModal, usDate } from '../components/EncounterNotes.jsx';
+import { NewEncounterModal, EncounterNotesModal, usDate, encNo } from '../components/EncounterNotes.jsx';
 import { useToast } from '../components/Toast.jsx';
 import { encountersApi, toApiError } from '../lib/api.js';
 import { NOTE_TYPES } from '../lib/noteTemplates.js';
@@ -175,7 +175,7 @@ function PatientRow({ p, open, onToggle, onView, onNotes, refreshKey }) {
                   <tr><td colSpan={6} className="table-empty">No encounters for this patient yet.</td></tr>
                 ) : (encs || []).map((r) => (
                   <tr key={r.encounterUuid}>
-                    <td className="mono">{r.encounterNo || '—'}</td>
+                    <td className="mono">{encNo(r.encounterNo)}</td>
                     <td>{usDate(r.date)}</td>
                     <td>{procedureLabel(r)}</td>
                     <td>{r.renderingProvider || '—'}</td>

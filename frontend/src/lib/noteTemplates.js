@@ -149,7 +149,7 @@ const T = (keys, over = {}) => keys.map((key) => ({
 export const TEMPLATES = {
   // Comprehensive initial evaluation (99304–99306).
   hp_admission: T(
-    ['chiefComplaint', 'hpi', 'pmh', 'psh', 'familyHistory', 'socialHistory', 'medications', 'allergies', 'ros', 'vitals', 'exam', 'results', 'functionalStatus', 'assessment', 'mdm', 'plan', 'codeStatus', 'careCoordination', 'timeSpent'],
+    ['chiefComplaint', 'hpi', 'pmh', 'psh', 'familyHistory', 'socialHistory', 'medications', 'allergies', 'ros', 'vitals', 'exam', 'results', 'functionalStatus', 'assessment', 'mdm', 'plan', 'codeStatus', 'advanceDirective', 'careCoordination', 'timeSpent'],
     { chiefComplaintLabel: 'Reason for Admission', resultsLabel: 'Diagnostic Data on Admission', medicationsLabel: 'Admission Medication Reconciliation', functionalStatusLabel: 'Functional / Rehabilitation Status' },
   ),
   // Routine subsequent visit (99307–99310) — interval-focused, no re-documented history.

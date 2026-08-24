@@ -50,6 +50,31 @@ export async function findRawByUuid(uuid) {
   return rows[0] || null;
 }
 
+/**
+ * Short-TTL in-memory cache for the auth hot path. `authenticate` runs on EVERY
+ * request; without this it pays a remote-DB round-trip (~240ms) per call. With a
+ * brief TTL the identity/revocation check still refreshes within seconds while
+ * the common case is served from memory. Mutations invalidate explicitly.
+ */
+const AUTH_CACHE_TTL_MS = 20_000;
+const authUserCache = new Map(); // uuid -> { row, exp }
+
+export function invalidateUserCache(uuid) {
+  if (uuid) authUserCache.delete(uuid);
+  else authUserCache.clear();
+}
+
+export async function findRawByUuidCached(uuid) {
+  const now = Date.now();
+  const hit = authUserCache.get(uuid);
+  if (hit && hit.exp > now) return hit.row;
+  const row = await findRawByUuid(uuid);
+  authUserCache.set(uuid, { row, exp: now + AUTH_CACHE_TTL_MS });
+  // Bound memory: drop the oldest entry if the map grows unexpectedly large.
+  if (authUserCache.size > 5000) authUserCache.delete(authUserCache.keys().next().value);
+  return row;
+}
+
 export async function emailExists(email) {
   const [rows] = await execute(
     `SELECT id FROM users WHERE email_bidx = :bidx LIMIT 1`,
@@ -137,16 +162,19 @@ export async function updateUserProfile(uuid, { fullName, role, accessLevel, cre
   }
   if (!sets.length) return findRawByUuid(uuid);
   await execute(`UPDATE users SET ${sets.join(', ')} WHERE uuid = :uuid`, params);
+  invalidateUserCache(uuid);
   return findRawByUuid(uuid);
 }
 
 export async function setUserStatus(uuid, status) {
   await execute(`UPDATE users SET status = :status WHERE uuid = :uuid`, { uuid, status });
+  invalidateUserCache(uuid);
   return findRawByUuid(uuid);
 }
 
 export async function deleteUser(uuid) {
   const [res] = await execute(`DELETE FROM users WHERE uuid = :uuid`, { uuid });
+  invalidateUserCache(uuid);
   return res.affectedRows > 0;
 }
 
@@ -163,6 +191,7 @@ export async function setPassword(userId, passwordHash, { clearMustReset = true 
       WHERE id = :id`,
     { hash: passwordHash, mrp: clearMustReset ? 0 : 1, id: userId },
   );
+  invalidateUserCache(); // password/lock state changed — refresh all cached identities
   await execute(
     `INSERT INTO password_history (user_id, password_hash) VALUES (:id, :hash)`,
     { id: userId, hash: passwordHash },

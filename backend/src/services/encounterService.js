@@ -26,10 +26,13 @@ const pad2 = (n) => String(n).padStart(2, '0');
 async function nextEncounterNo(patientId) {
   if (!patientId) return null;
   const [m] = await execute(
-    `SELECT COALESCE(MAX(CAST(encounter_no AS UNSIGNED)), 0) + 1 AS nxt FROM encounters WHERE patient_id = :pid`,
+    // Clean multi-digit per-patient visit number: starts at 1001, increments by 1,
+    // no leading zeros, always numeric and ≤5 characters (1001, 1002, 1003 …).
+    `SELECT GREATEST(COALESCE(MAX(CAST(encounter_no AS UNSIGNED)), 0) + 1, 1001) AS nxt
+       FROM encounters WHERE patient_id = :pid`,
     { pid: patientId },
   );
-  return String(m[0].nxt).padStart(5, '0');
+  return String(m[0].nxt);
 }
 
 /**
@@ -169,17 +172,22 @@ export async function listProviderPatients(providerId, { page = 1, pageSize = 25
     params.qlike = `%${q}%`;
     params.qbidx = blindIndex(q.trim().toLowerCase());
   }
-  const [rows] = await execute(
-    `SELECT p.uuid, p.mrn, p.demographics_enc, p.facility_enc,
-        (SELECT COUNT(*) FROM encounters e WHERE e.patient_id = p.id) AS enc_count
-      FROM patients p
-      WHERE ${where}
-      ORDER BY p.id DESC
-      LIMIT ${lim} OFFSET ${off}`,
-    params,
-  );
-  const [cnt] = await execute(`SELECT COUNT(*) AS total FROM patients p WHERE ${where}`, params);
-  const [me] = await execute(`SELECT full_name_enc FROM users WHERE id = :pid LIMIT 1`, { pid: providerId });
+  // Run the page query, the total count, and the provider-name lookup CONCURRENTLY.
+  // These are independent, so on a remote DB this collapses three ~round-trips
+  // into one wall-clock round-trip instead of three sequential ones.
+  const [[rows], [cnt], [me]] = await Promise.all([
+    execute(
+      `SELECT p.uuid, p.mrn, p.demographics_enc, p.facility_enc,
+          (SELECT COUNT(*) FROM encounters e WHERE e.patient_id = p.id) AS enc_count
+        FROM patients p
+        WHERE ${where}
+        ORDER BY p.id DESC
+        LIMIT ${lim} OFFSET ${off}`,
+      params,
+    ),
+    execute(`SELECT COUNT(*) AS total FROM patients p WHERE ${where}`, params),
+    execute(`SELECT full_name_enc FROM users WHERE id = :pid LIMIT 1`, { pid: providerId }),
+  ]);
   const providerName = me[0]?.full_name_enc ? decrypt(me[0].full_name_enc) : null;
   return {
     patients: rows.map((r) => {
@@ -207,21 +215,23 @@ export async function listPatientEncounters(providerId, patientUuid, { page = 1,
   const pidInt = pr[0].id;
   const lim = Math.max(1, Math.min(50, Number(pageSize) || 10));
   const off = Math.max(0, (Number(page) - 1) * lim);
-  const [rows] = await execute(
-    `SELECT e.uuid, e.encounter_no,
-        DATE_FORMAT(COALESCE(e.encounter_date, a.appt_date), '%Y-%m-%d') AS dos,
-        COALESCE(rp.full_name_enc, u.full_name_enc) AS rendering_enc,
-        ${NOTE_TYPES_SQL} AS note_types, ${NOTE_SIGNERS_SQL} AS signers
-      FROM encounters e
-      LEFT JOIN appointments a ON a.id = e.appointment_id
-      LEFT JOIN users rp ON rp.id = a.rendering_provider_id
-      LEFT JOIN users u ON u.id = e.provider_id
-      WHERE e.patient_id = :pid AND e.provider_id = :prov
-      ORDER BY COALESCE(e.encounter_date, a.appt_date) DESC, e.id DESC
-      LIMIT ${lim} OFFSET ${off}`,
-    { pid: pidInt, prov: providerId },
-  );
-  const [cnt] = await execute(`SELECT COUNT(*) AS total FROM encounters e WHERE e.patient_id = :pid AND e.provider_id = :prov`, { pid: pidInt, prov: providerId });
+  const [[rows], [cnt]] = await Promise.all([
+    execute(
+      `SELECT e.uuid, e.encounter_no,
+          DATE_FORMAT(COALESCE(e.encounter_date, a.appt_date), '%Y-%m-%d') AS dos,
+          COALESCE(rp.full_name_enc, u.full_name_enc) AS rendering_enc,
+          ${NOTE_TYPES_SQL} AS note_types, ${NOTE_SIGNERS_SQL} AS signers
+        FROM encounters e
+        LEFT JOIN appointments a ON a.id = e.appointment_id
+        LEFT JOIN users rp ON rp.id = a.rendering_provider_id
+        LEFT JOIN users u ON u.id = e.provider_id
+        WHERE e.patient_id = :pid AND e.provider_id = :prov
+        ORDER BY COALESCE(e.encounter_date, a.appt_date) DESC, e.id DESC
+        LIMIT ${lim} OFFSET ${off}`,
+      { pid: pidInt, prov: providerId },
+    ),
+    execute(`SELECT COUNT(*) AS total FROM encounters e WHERE e.patient_id = :pid AND e.provider_id = :prov`, { pid: pidInt, prov: providerId }),
+  ]);
   return {
     encounters: rows.map((r) => ({
       encounterUuid: r.uuid,

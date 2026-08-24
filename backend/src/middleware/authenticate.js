@@ -1,6 +1,6 @@
 import { verifyAccessToken } from '../utils/tokens.js';
 import { COOKIE } from '../utils/cookies.js';
-import { findRawByUuid, toPublicUser } from '../services/userService.js';
+import { findRawByUuidCached, toPublicUser } from '../services/userService.js';
 import { USER_STATUS } from '../config/env.js';
 
 /**
@@ -19,7 +19,7 @@ export async function authenticate(req, res, next) {
       return res.status(401).json({ error: 'Session expired.', code: 'TOKEN_INVALID' });
     }
 
-    const row = await findRawByUuid(claims.sub);
+    const row = await findRawByUuidCached(claims.sub);
     if (!row || row.status === USER_STATUS.DISABLED) {
       return res.status(401).json({ error: 'Session no longer valid.', code: 'USER_INVALID' });
     }
