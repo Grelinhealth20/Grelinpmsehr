@@ -81,6 +81,10 @@ export async function runMigrations() {
   // patient_id are already indexed by their foreign keys.)
   await ensureIndex('encounter_notes', 'idx_note_created', '`created_at`');
   await ensureIndex('encounter_notes', 'idx_note_provider_created', '`provider_id`, `created_at`');
+  // Front-desk check-in / check-out appointment states (idempotent MODIFY).
+  await pool.query(
+    "ALTER TABLE `appointments` MODIFY COLUMN `status` ENUM('scheduled','checked_in','checked_out','cancelled','completed') NOT NULL DEFAULT 'scheduled'",
+  );
   logger.info(`Schema ensured (${SCHEMA_STATEMENTS.length} tables)`);
 }
 

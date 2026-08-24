@@ -154,6 +154,57 @@ export async function providerFacilityIds(providerId) {
   return rows.map((r) => Number(r.facility_id));
 }
 
+/**
+ * Active PROVIDERS assigned to any facility the given user is assigned to — the
+ * rendering providers a front-desk/billing (or MD) user may schedule within their
+ * facility. Real assignments only; returns [] when the user has no facility.
+ */
+export async function listSchedulableProviders(userId) {
+  const facIds = await providerFacilityIds(userId);
+  if (!facIds.length) return [];
+  const params = {};
+  const ph = facIds.map((id, i) => { params[`f${i}`] = id; return `:f${i}`; }).join(',');
+  const [rows] = await execute(
+    `SELECT DISTINCT u.id, u.uuid, u.full_name_enc, u.credentials
+       FROM users u JOIN provider_facilities pf ON pf.provider_id = u.id
+      WHERE u.role = 'provider' AND u.status = 'active' AND pf.facility_id IN (${ph})
+      ORDER BY u.id`,
+    params,
+  );
+  return rows.map((r) => ({
+    uuid: r.uuid,
+    fullName: r.full_name_enc ? decrypt(r.full_name_enc) : '',
+    credentials: (() => { try { return Array.isArray(r.credentials) ? r.credentials : JSON.parse(r.credentials || '[]'); } catch { return []; } })(),
+  }));
+}
+
+/** True iff `providerUuid` is an active provider assigned to a facility the user shares. */
+export async function isProviderInUserFacilities(providerUuid, userId) {
+  const facIds = await providerFacilityIds(userId);
+  if (!facIds.length) return false;
+  const params = { pu: providerUuid };
+  const ph = facIds.map((id, i) => { params[`f${i}`] = id; return `:f${i}`; }).join(',');
+  const [rows] = await execute(
+    `SELECT u.id FROM users u JOIN provider_facilities pf ON pf.provider_id = u.id
+      WHERE u.uuid = :pu AND u.role = 'provider' AND u.status = 'active' AND pf.facility_id IN (${ph}) LIMIT 1`,
+    params,
+  );
+  return rows[0]?.id || false;
+}
+
+/** True iff a patient (by uuid) belongs to a facility the given user is assigned to. */
+export async function isPatientInUserFacilities(patientUuid, userId) {
+  const facIds = await providerFacilityIds(userId);
+  if (!facIds.length || !patientUuid) return false;
+  const params = { pu: patientUuid };
+  const ph = facIds.map((id, i) => { params[`f${i}`] = id; return `:f${i}`; }).join(',');
+  const [rows] = await execute(
+    `SELECT id FROM patients WHERE uuid = :pu AND facility_id IN (${ph}) LIMIT 1`,
+    params,
+  );
+  return !!rows[0];
+}
+
 /** Facilities a specific user (provider or billing) is assigned to — by uuid. */
 export async function listUserFacilities(userUuid) {
   const [u] = await execute(`SELECT id FROM users WHERE uuid = :u AND role IN ('provider','billing') LIMIT 1`, { u: userUuid });

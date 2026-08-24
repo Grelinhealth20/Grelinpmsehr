@@ -670,6 +670,8 @@
 .sch-appt-pt { font-size: 10.5px; color: var(--c-ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sch-appt-flag { font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; color: var(--c-danger); }
 .sch-appt-flag.ok { color: var(--c-success); }
+.sch-appt-flag.in { color: var(--c-blue); }
+.sch-appt-flag.out { color: var(--c-accent); }
 .sch-appt.type-consult { background: var(--c-blue-050); border-left-color: var(--c-blue); }
 .sch-appt.type-followup { background: #e7f6f0; border-left-color: var(--c-success); }
 .sch-appt.type-procedure { background: var(--c-accent-050); border-left-color: var(--c-accent); }

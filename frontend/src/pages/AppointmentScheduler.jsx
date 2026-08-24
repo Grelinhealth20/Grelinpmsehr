@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Modal from '../components/Modal.jsx';
 import PatientModal from '../components/PatientModal.jsx';
 import { useToast } from '../components/Toast.jsx';
+import { useAuth } from '../context/AuthContext.jsx';
 import { appointmentsApi, patientsApi, providersApi, toApiError } from '../lib/api.js';
 
 const providerLabel = (p) => `${p.fullName}${p.credentials?.length ? `, ${p.credentials.join(', ')}` : ''}${p.specialty ? ` · ${p.specialty.name}` : ''}`;
@@ -24,9 +25,12 @@ const TYPES = [
 ];
 const STATUSES = [
   { key: 'scheduled', label: 'Scheduled' },
+  { key: 'checked_in', label: 'Checked In' },
+  { key: 'checked_out', label: 'Checked Out' },
   { key: 'completed', label: 'Completed' },
   { key: 'cancelled', label: 'Cancelled' },
 ];
+const STATUS_LABEL = Object.fromEntries(STATUSES.map((s) => [s.key, s.label]));
 const DURATIONS = [15, 30, 45, 60, 90, 120];
 
 /* --- Date/time helpers ----------------------------------------------------- */
@@ -67,6 +71,9 @@ function withLanes(dayAppts) {
 
 export default function AppointmentScheduler() {
   const toast = useToast();
+  const { user } = useAuth();
+  // Front-desk billing users MUST assign a rendering provider (within their facility).
+  const isBilling = user?.role === 'billing';
   const [weekStart, setWeekStart] = useState(() => startOfWeek(new Date()));
   const [appts, setAppts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -84,7 +91,9 @@ export default function AppointmentScheduler() {
 
   useEffect(() => {
     let active = true;
-    providersApi.list().then(({ data }) => active && setProviders(data.providers)).catch(() => {});
+    // Facility-scoped rendering providers the caller may schedule (front-desk/MD → their
+    // facility's providers; a provider → their facility colleagues). No fallback list.
+    providersApi.schedulable().then(({ data }) => active && setProviders(data.providers || [])).catch(() => {});
     return () => { active = false; };
   }, []);
 
@@ -178,6 +187,17 @@ export default function AppointmentScheduler() {
       setModal(null);
       load();
       toast.success('Appointment deleted.');
+    } catch (e) {
+      toast.error(toApiError(e).message);
+    }
+  }
+  // Front-desk check-in / check-out — persists the status immediately.
+  async function checkAppt(status) {
+    try {
+      await appointmentsApi.setStatus(modal.uuid, status);
+      setModal(null);
+      load();
+      toast.success(status === 'checked_in' ? 'Patient checked in.' : 'Patient checked out.');
     } catch (e) {
       toast.error(toApiError(e).message);
     }
@@ -285,6 +305,8 @@ export default function AppointmentScheduler() {
                       {a.patient && <span className="sch-appt-pt">{a.patient}</span>}
                       {a.status === 'cancelled' && <span className="sch-appt-flag">Cancelled</span>}
                       {a.status === 'completed' && <span className="sch-appt-flag ok">Completed</span>}
+                      {a.status === 'checked_in' && <span className="sch-appt-flag in">Checked In</span>}
+                      {a.status === 'checked_out' && <span className="sch-appt-flag out">Checked Out</span>}
                     </button>
                   );
                 })}
@@ -312,8 +334,13 @@ export default function AppointmentScheduler() {
           footer={
             <>
               {modal.mode === 'edit' && <button className="btn danger" onClick={deleteForm} style={{ marginRight: 'auto' }}>Delete</button>}
+              {modal.mode === 'edit' && !['cancelled', 'completed', 'checked_out'].includes(modal.form.status) && (
+                modal.form.status === 'checked_in'
+                  ? <button className="btn ghost" onClick={() => checkAppt('checked_out')} title="Check out — patient has left">Check out</button>
+                  : <button className="btn ghost" onClick={() => checkAppt('checked_in')} title="Check in — patient has arrived">Check in</button>
+              )}
               <button className="btn ghost" onClick={() => setModal(null)}>Cancel</button>
-              <button className="btn" onClick={saveForm} disabled={!modal.form.title.trim()}>{modal.mode === 'edit' ? 'Save changes' : 'Book appointment'}</button>
+              <button className="btn" onClick={saveForm} disabled={!modal.form.title.trim() || (isBilling && !modal.form.renderingProviderUuid)}>{modal.mode === 'edit' ? 'Save changes' : 'Book appointment'}</button>
             </>
           }
         >
@@ -368,12 +395,14 @@ export default function AppointmentScheduler() {
               </div>
             </div>
             <div className="field">
-              <label>Rendering provider</label>
+              <label>Rendering provider{isBilling && <span className="fs-req">*</span>}</label>
               <select className="select" value={modal.form.renderingProviderUuid} onChange={(e) => setF({ renderingProviderUuid: e.target.value })}>
                 <option value="">— Select provider —</option>
                 {providers.map((p) => <option key={p.uuid} value={p.uuid}>{providerLabel(p)}</option>)}
               </select>
-              {providers.length === 0 && <span className="hint">No providers yet — create one in the Admin panel.</span>}
+              {providers.length === 0
+                ? <span className="hint">No providers are assigned to your facility yet — assign providers to a facility in the Admin panel.</span>
+                : isBilling && <span className="hint">Select the provider whose schedule this appointment belongs to.</span>}
             </div>
 
             <div className="field">

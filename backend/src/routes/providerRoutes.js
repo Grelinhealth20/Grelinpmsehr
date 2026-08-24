@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { authenticate, requirePasswordSettled } from '../middleware/authenticate.js';
 import { listProviders } from '../services/userService.js';
-import { listProviderFacilities } from '../services/facilityService.js';
+import { listProviderFacilities, listSchedulableProviders } from '../services/facilityService.js';
 
 const router = Router();
 
@@ -21,6 +21,16 @@ router.get('/', async (req, res, next) => {
 router.get('/facilities', async (req, res, next) => {
   try {
     res.json({ facilities: await listProviderFacilities(req.authUserId) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Rendering providers the caller may schedule — the active providers assigned to
+// the caller's facilities. Front-desk/billing pick from this to book an appointment.
+router.get('/schedulable', async (req, res, next) => {
+  try {
+    res.json({ providers: await listSchedulableProviders(req.authUserId) });
   } catch (err) {
     next(err);
   }

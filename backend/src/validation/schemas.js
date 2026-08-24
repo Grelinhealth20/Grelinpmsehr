@@ -82,7 +82,7 @@ export const uuidParam = z.object({ uuid: z.string().uuid() });
 
 // --- Appointments ----------------------------------------------------------
 const apptType = z.enum(['consult', 'followup', 'procedure']);
-const apptStatus = z.enum(['scheduled', 'cancelled', 'completed']);
+const apptStatus = z.enum(['scheduled', 'checked_in', 'checked_out', 'cancelled', 'completed']);
 const apptDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be YYYY-MM-DD.');
 const startMin = z.number().int().min(0).max(1439);
 const durationMin = z.number().int().min(5).max(600);

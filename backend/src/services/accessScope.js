@@ -43,6 +43,22 @@ export function isFacilityWide(scope) {
 }
 
 /**
+ * Scheduling scope for the appointment book. Front-desk **billing** users AND
+ * **MDs** manage the whole facility's schedule (facility-wide); every other
+ * provider manages only their own book. Facility-bounded — no cross-facility.
+ * @returns {Promise<{ isBilling:boolean, isMD:boolean, facilityWide:boolean, facilityIds:number[] }>}
+ */
+export async function schedulingScope(userId) {
+  const [rows] = await execute(`SELECT role, credentials FROM users WHERE id = :id LIMIT 1`, { id: userId });
+  const u = rows[0] || {};
+  const isBilling = u.role === 'billing';
+  const isMD = isMdCredentials(u.credentials);
+  const facilityRole = isBilling || isMD;
+  const facilityIds = facilityRole ? await providerFacilityIds(userId) : [];
+  return { isBilling, isMD, facilityWide: facilityRole && facilityIds.length > 0, facilityIds };
+}
+
+/**
  * WHERE fragment + params scoping a `patients` row (aliased) to the viewer.
  *  - Facility-wide MD: p.facility_id IN (assigned facilities)
  *  - Everyone else:    p.provider_id = :scopePid   (own records only)

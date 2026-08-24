@@ -103,6 +103,7 @@ export const specialtiesApi = {
 // --- Providers (picker for appointments) -----------------------------------
 export const providersApi = {
   list: () => api.get('/providers'),
+  schedulable: () => api.get('/providers/schedulable'),
   myFacilities: () => api.get('/providers/facilities'),
 };
 
@@ -173,6 +174,7 @@ export const appointmentsApi = {
   create: (payload) => api.post('/appointments', payload),
   update: (uuid, payload) => api.patch(`/appointments/${uuid}`, payload),
   cancel: (uuid) => api.patch(`/appointments/${uuid}`, { status: 'cancelled' }),
+  setStatus: (uuid, status) => api.patch(`/appointments/${uuid}`, { status }),
   reschedule: (uuid, { date, startMin, durationMin }) =>
     api.patch(`/appointments/${uuid}`, { date, startMin, durationMin }),
   remove: (uuid) => api.delete(`/appointments/${uuid}`),

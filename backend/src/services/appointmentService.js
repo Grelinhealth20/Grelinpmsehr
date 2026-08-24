@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { execute } from '../db/pool.js';
 import { encrypt, decrypt } from '../utils/crypto.js';
+import { schedulingScope } from './accessScope.js';
 
 /**
  * Appointment persistence for the EHR scheduler. Patient-identifying fields are
@@ -9,12 +10,14 @@ import { encrypt, decrypt } from '../utils/crypto.js';
  * midnight so the grid renders deterministically.
  */
 
-const SELECT = `SELECT a.id, a.uuid, a.provider_id, a.rendering_provider_id, a.title_enc, a.patient_name_enc, a.patient_uuid,
+const SELECT = `SELECT a.id, a.uuid, a.provider_id, a.rendering_provider_id, a.created_by, a.title_enc, a.patient_name_enc, a.patient_uuid,
   a.appt_type, DATE_FORMAT(a.appt_date, '%Y-%m-%d') AS appt_date,
   a.start_min, a.duration_min, a.status, a.created_at, a.updated_at,
-  rp.uuid AS rendering_provider_uuid, rp.full_name_enc AS rendering_provider_name_enc
+  rp.uuid AS rendering_provider_uuid, rp.full_name_enc AS rendering_provider_name_enc,
+  op.full_name_enc AS owner_name_enc
   FROM appointments a
-  LEFT JOIN users rp ON rp.id = a.rendering_provider_id`;
+  LEFT JOIN users rp ON rp.id = a.rendering_provider_id
+  LEFT JOIN users op ON op.id = a.provider_id`;
 
 export function toPublicAppointment(row) {
   if (!row) return null;
@@ -24,7 +27,8 @@ export function toPublicAppointment(row) {
     patient: row.patient_name_enc ? decrypt(row.patient_name_enc) : '',
     patientUuid: row.patient_uuid || null,
     renderingProviderUuid: row.rendering_provider_uuid || null,
-    renderingProvider: row.rendering_provider_name_enc ? decrypt(row.rendering_provider_name_enc) : null,
+    renderingProvider: row.rendering_provider_name_enc ? decrypt(row.rendering_provider_name_enc)
+      : (row.owner_name_enc ? decrypt(row.owner_name_enc) : null),
     type: row.appt_type,
     date: row.appt_date,
     startMin: row.start_min,
@@ -35,9 +39,24 @@ export function toPublicAppointment(row) {
   };
 }
 
+/**
+ * The schedule for a viewer. Front-desk billing users and MDs see every
+ * appointment for their assigned facilities (own book + any appointment whose
+ * linked patient is at their facility); other providers see only their own book.
+ * Strictly facility-bounded — no cross-facility leakage.
+ */
 export async function listAppointments({ providerId, from = null, to = null }) {
-  const clauses = ['a.provider_id = :pid'];
+  const scope = await schedulingScope(providerId);
   const params = { pid: providerId };
+  let scopeSql;
+  if (scope.facilityWide) {
+    const ph = scope.facilityIds.map((id, i) => { params[`sf${i}`] = id; return `:sf${i}`; }).join(',');
+    scopeSql = `(a.provider_id = :pid OR a.created_by = :pid OR EXISTS (
+        SELECT 1 FROM patients pp WHERE pp.uuid = a.patient_uuid AND pp.facility_id IN (${ph})))`;
+  } else {
+    scopeSql = 'a.provider_id = :pid';
+  }
+  const clauses = [scopeSql];
   if (from) { clauses.push('a.appt_date >= :from'); params.from = from; }
   if (to) { clauses.push('a.appt_date <= :to'); params.to = to; }
   const [rows] = await execute(
