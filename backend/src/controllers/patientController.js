@@ -10,7 +10,11 @@ import {
   s3Enabled, ensurePatientFolder, uploadPatientObject, signedGetUrl, deleteObject, deleteObjects, getObjectBytes, listPatientKeys,
 } from '../services/s3Service.js';
 import { extractDocument, ocrEnabled } from '../services/docExtractService.js';
+import { saveCheck, listChecks, mergeVerificationIntoPatient } from '../services/eligibilityService.js';
+import { verifyPatientEligibility, autoVerifyOnCreate, latestCheckForPolicy } from '../services/eligibilityWorkflow.js';
+import { stediEnabled } from '../services/stediService.js';
 import { recordAudit } from '../services/auditService.js';
+import { logger } from '../config/logger.js';
 
 const DOC_TYPES = new Set(['license_front', 'license_back', 'insurance_front', 'insurance_back', 'other']);
 const ALLOWED_MIME = {
@@ -52,7 +56,22 @@ export async function create(req, res, next) {
     const patient = await createPatient({ providerId: req.authUserId, demographics, insurance, facility, emergencyContact, emergencyContacts, createdBy: req.authUserId });
     if (s3Enabled()) { try { const s3ctx = await getPatientS3Ctx(patient.uuid); if (s3ctx) await ensurePatientFolder(s3ctx); } catch { /* folder marker is best-effort */ } }
     await recordAudit({ actorUserId: req.authUserId, action: 'patient.create', entityType: 'patient', entityId: patient.uuid, ...ctx(req), metadata: { mrn: patient.mrn } });
-    res.status(201).json({ patient });
+
+    // Auto-trigger real-time eligibility verification on creation (server-side).
+    // Non-fatal: a failed/disabled check never blocks patient creation. On success
+    // the returned patient already carries the payer-confirmed Face Sheet + benefits.
+    let finalPatient = patient;
+    try {
+      const row = await getRawByUuid(patient.uuid);
+      if (row) {
+        // Provider identity on the eligibility request = the patient's RENDERING
+        // provider's assigned facility NPI (row.provider_id, not merely the caller).
+        const r = await autoVerifyOnCreate({ patient: toPublicPatient(row), patientId: row.id, providerId: row.provider_id });
+        if (r?.patient) finalPatient = r.patient;
+        if (r?.check) await recordAudit({ actorUserId: req.authUserId, action: 'patient.eligibility.verify', entityType: 'patient', entityId: patient.uuid, ...ctx(req), metadata: { auto: true, status: r.check.status, payer: r.payer?.name } });
+      }
+    } catch (e) { logger.warn({ err: e.message }, 'auto eligibility on create failed'); }
+    res.status(201).json({ patient: finalPatient });
   } catch (err) { next(err); }
 }
 
@@ -185,6 +204,75 @@ export async function extractDoc(req, res, next) {
 
     await recordAudit({ actorUserId: req.authUserId, action: 'patient.document.extract', entityType: 'patient', entityId: row.uuid, ...ctx(req), metadata: { docType: doc.doc_type, engine: 'ppstructure+doctr' } });
     res.json({ suggestions });
+  } catch (err) { next(err); }
+}
+
+/* --- Benefits Verification (X12 271 eligibility) --------------------------- */
+export async function listEligibility(req, res, next) {
+  try {
+    const row = await ownedPatientOr404(req); // owner-only: no cross-patient benefits
+    res.json({ checks: await listChecks(row.id) });
+  } catch (err) { next(err); }
+}
+
+const SKIP_MSG = {
+  no_insurance: 'Add insurance before verifying eligibility.',
+  no_member_id: 'A member ID is required to verify eligibility.',
+  no_payer: 'A payer is required to verify eligibility.',
+  no_dob: 'Date of birth is required to verify eligibility.',
+  no_name: 'Patient first and last name are required to verify eligibility.',
+  payer_unresolved: 'Could not match this payer in the Stedi payer network.',
+  no_facility_npi: 'This provider has no assigned facility NPI — assign a facility first.',
+  stedi_disabled: 'Eligibility service is not configured.',
+};
+
+/** Live, server-side eligibility check (Stedi) — all inputs come from the Face Sheet. */
+export async function verifyNow(req, res, next) {
+  try {
+    const row = await ownedPatientOr404(req);
+    if (!stediEnabled()) return res.status(503).json({ error: 'Eligibility service is not configured. Add STEDI_API_KEY.', code: 'STEDI_DISABLED' });
+    const policyIndex = Number(req.body?.policyIndex) || 0;
+    const procedureCodes = Array.isArray(req.body?.procedureCodes) ? req.body.procedureCodes : [];
+    // provider.npi = the patient's RENDERING provider's assigned facility NPI.
+    // A procedure-specific check is a deliberate, differently-scoped query, so it
+    // bypasses the monthly de-dupe (which guards the base plan verification).
+    const r = await verifyPatientEligibility({
+      patient: toPublicPatient(row), patientId: row.id, providerId: row.provider_id,
+      policyIndex, procedureCodes, force: procedureCodes.length > 0,
+    });
+    if (r.skipped === 'duplicate_this_month') {
+      const existing = await latestCheckForPolicy(row.id, policyIndex);
+      return res.json({ check: existing, patient: toPublicPatient(await getRawByUuid(row.uuid)), skipped: 'duplicate_this_month' });
+    }
+    if (r.skipped) return res.status(422).json({ error: SKIP_MSG[r.skipped] || 'Eligibility could not be verified.', code: `ELIG_${r.skipped.toUpperCase()}` });
+    await recordAudit({
+      actorUserId: req.authUserId, action: 'patient.eligibility.verify', entityType: 'patient', entityId: row.uuid,
+      ...ctx(req), metadata: { policyIndex, payer: r.payer?.name, status: r.check?.status, live: true },
+    });
+    res.status(201).json({ check: r.check, patient: r.patient });
+  } catch (err) {
+    if (err.code && String(err.code).startsWith('STEDI')) {
+      return res.status(502).json({ error: err.message, code: err.code });
+    }
+    next(err);
+  }
+}
+
+/** Ingest a payer 271 response the caller already holds (programmatic integration). */
+export async function importEligibility(req, res, next) {
+  try {
+    const row = await ownedPatientOr404(req); // patient-scoped write
+    const { policyIndex = 0, response } = req.body;
+    const check = await saveCheck({ patientId: row.id, policyIndex, response, createdBy: req.authUserId });
+    // Payer-confirmed identity (address, group #, MBI, plan, cost-shares) corrects
+    // the Face Sheet + this insurance policy — for THIS patient only.
+    const patch = mergeVerificationIntoPatient(toPublicPatient(row), check.summary, policyIndex);
+    const patient = await updatePatient(row.uuid, patch);
+    await recordAudit({
+      actorUserId: req.authUserId, action: 'patient.eligibility.verify', entityType: 'patient', entityId: row.uuid,
+      ...ctx(req), metadata: { policyIndex, payer: check.payer, status: check.status, updated: Object.keys(patch) },
+    });
+    res.status(201).json({ check, patient });
   } catch (err) { next(err); }
 }
 

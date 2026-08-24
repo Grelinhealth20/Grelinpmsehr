@@ -81,6 +81,12 @@ export async function runMigrations() {
   // patient_id are already indexed by their foreign keys.)
   await ensureIndex('encounter_notes', 'idx_note_created', '`created_at`');
   await ensureIndex('encounter_notes', 'idx_note_provider_created', '`provider_id`, `created_at`');
+  // Procedure (CPT/HCPCS) an appointment is for — drives procedure-specific
+  // eligibility (STC targeting). Nullable so existing appointments are unaffected.
+  await ensureColumn('appointments', 'procedure_code', '`procedure_code` VARCHAR(10) NULL AFTER `appt_type`');
+  // Link an eligibility check to an appointment (appointment-level verification).
+  await ensureColumn('eligibility_checks', 'appointment_uuid', '`appointment_uuid` CHAR(36) NULL AFTER `policy_index`');
+  await ensureIndex('eligibility_checks', 'idx_elig_appointment', '`appointment_uuid`');
   // Front-desk check-in / check-out appointment states (idempotent MODIFY).
   await pool.query(
     "ALTER TABLE `appointments` MODIFY COLUMN `status` ENUM('scheduled','checked_in','checked_out','cancelled','completed') NOT NULL DEFAULT 'scheduled'",

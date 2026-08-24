@@ -155,6 +155,23 @@ export async function providerFacilityIds(providerId) {
 }
 
 /**
+ * The provider's PRIMARY assigned facility (first active) — used as the billing
+ * provider identity (NPI + organization name) on eligibility requests. Returns
+ * { npi, name } or null when the provider has no active facility assigned.
+ */
+export async function providerPrimaryFacility(providerId) {
+  const [rows] = await execute(
+    `SELECT f.npi, f.name, f.state FROM facilities f
+       JOIN provider_facilities pf ON pf.facility_id = f.id
+      WHERE pf.provider_id = :pid AND f.status = 'active'
+      ORDER BY f.name ASC LIMIT 1`,
+    { pid: providerId },
+  );
+  const r = rows[0];
+  return r ? { npi: r.npi || null, name: r.name || null, state: r.state || null } : null;
+}
+
+/**
  * Active PROVIDERS assigned to any facility the given user is assigned to — the
  * rendering providers a front-desk/billing (or MD) user may schedule within their
  * facility. Real assignments only; returns [] when the user has no facility.

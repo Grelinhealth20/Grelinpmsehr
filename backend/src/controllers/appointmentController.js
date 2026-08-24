@@ -4,13 +4,29 @@ import {
   updateAppointment,
   deleteAppointment,
   getRawByUuid,
+  toPublicAppointment,
 } from '../services/appointmentService.js';
 import { getRawByUuid as getPatientRawByUuid } from '../services/patientService.js';
 import { findProviderIdByUuid } from '../services/userService.js';
 import { ensureEncounter } from '../services/encounterService.js';
+import { verifyAppointmentEligibility } from '../services/eligibilityWorkflow.js';
+import { getAppointmentCheck } from '../services/eligibilityService.js';
 import { schedulingScope } from '../services/accessScope.js';
 import { isProviderInUserFacilities, isPatientInUserFacilities } from '../services/facilityService.js';
 import { recordAudit } from '../services/auditService.js';
+
+const ELIG_SKIP_MSG = {
+  stedi_disabled: 'Eligibility service is not configured.',
+  no_patient: 'Link a patient (with insurance) to verify eligibility.',
+  no_insurance: 'The linked patient has no insurance on file.',
+  no_member_id: 'The linked patient has no member ID.',
+  no_payer: 'The linked patient has no payer on file.',
+  no_dob: 'The linked patient has no date of birth.',
+  no_name: 'The linked patient has no name.',
+  no_facility_npi: 'The rendering provider has no assigned facility NPI.',
+  no_facility_state: 'Medicare Part B needs the assigned facility state — set it on the facility.',
+  payer_unresolved: 'Could not match the payer in the Stedi payer network.',
+};
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -60,7 +76,7 @@ export async function list(req, res, next) {
 
 export async function create(req, res, next) {
   try {
-    const { title, patient, patientUuid, renderingProviderUuid, type, date, startMin, durationMin } = req.body;
+    const { title, patient, patientUuid, renderingProviderUuid, type, procedureCode, date, startMin, durationMin } = req.body;
     const scope = await schedulingScope(req.authUserId);
     const renderingProviderId = await resolveRenderingProvider(renderingProviderUuid);
 
@@ -86,22 +102,26 @@ export async function create(req, res, next) {
       patient: patient || '',
       patientUuid: patientUuid || null,
       type,
+      procedureCode: procedureCode || null,
       date,
       startMin,
       durationMin,
       createdBy: req.authUserId,
     });
+    let apptRaw = await getRawByUuid(appt.uuid);
     // Auto-create a numbered encounter (wired to MRN + DOS) for patient bookings —
     // on the rendering provider's schedule.
     if (patientUuid) {
       const p = await getPatientRawByUuid(patientUuid);
-      const apptRaw = await getRawByUuid(appt.uuid);
       if (p && apptRaw) {
         await ensureEncounter({
           appointmentId: apptRaw.id, patientId: p.id, providerId: ownerId,
           apptDate: appt.date, mrn: p.mrn, createdBy: req.authUserId,
         });
       }
+      // Auto-trigger real-time eligibility on scheduling (non-fatal). DOS = appt date,
+      // provider = rendering provider's assigned facility, STC 30 (+ any procedure).
+      if (apptRaw) { try { await verifyAppointmentEligibility(apptRaw); } catch { /* non-fatal */ } }
     }
     await recordAudit({
       actorUserId: req.authUserId,
@@ -110,9 +130,10 @@ export async function create(req, res, next) {
       entityId: appt.uuid,
       ip: req.ip,
       userAgent: req.get('user-agent'),
-      metadata: { type, date },
+      metadata: { type, date, procedureCode: procedureCode || undefined },
     });
-    res.status(201).json({ appointment: appt });
+    // Re-read so the response carries the eligibility tag (if it resolved).
+    res.status(201).json({ appointment: toPublicAppointment(await getRawByUuid(appt.uuid)) });
   } catch (err) { next(err); }
 }
 
@@ -136,6 +157,12 @@ export async function update(req, res, next) {
     else if ((b.date !== undefined || b.startMin !== undefined) && b.title === undefined) action = 'appointment.reschedule';
 
     const appt = await updateAppointment(req.params.uuid, b);
+    // Re-run appointment eligibility when an input that changes the result moves
+    // (date/DOS, procedure, or the linked patient) and a patient is linked.
+    if (b.date !== undefined || b.procedureCode !== undefined || b.patientUuid !== undefined) {
+      const apptRaw = await getRawByUuid(req.params.uuid);
+      if (apptRaw?.patient_uuid) { try { await verifyAppointmentEligibility(apptRaw); } catch { /* non-fatal */ } }
+    }
     await recordAudit({
       actorUserId: req.authUserId,
       action,
@@ -145,7 +172,35 @@ export async function update(req, res, next) {
       userAgent: req.get('user-agent'),
       metadata: { fields: Object.keys(b) },
     });
-    res.json({ appointment: appt });
+    res.json({ appointment: toPublicAppointment(await getRawByUuid(req.params.uuid)) });
+  } catch (err) { next(err); }
+}
+
+/** Manually (re)run eligibility for an appointment. */
+export async function verifyEligibility(req, res, next) {
+  try {
+    const row = await getRawByUuid(req.params.uuid);
+    await assertCanManage(req, row);
+    const r = await verifyAppointmentEligibility(row);
+    if (r.skipped === 'stedi_disabled') return res.status(503).json({ error: 'Eligibility service is not configured. Add STEDI_API_KEY.', code: 'STEDI_DISABLED' });
+    if (r.skipped) return res.status(422).json({ error: ELIG_SKIP_MSG[r.skipped] || 'Eligibility could not be verified.', code: `ELIG_${r.skipped.toUpperCase()}` });
+    await recordAudit({
+      actorUserId: req.authUserId, action: 'appointment.eligibility.verify', entityType: 'appointment', entityId: row.uuid,
+      ip: req.ip, userAgent: req.get('user-agent'), metadata: { status: r.check?.status },
+    });
+    res.status(201).json({ appointment: toPublicAppointment(await getRawByUuid(req.params.uuid)), status: r.check?.status });
+  } catch (err) {
+    if (err.code && String(err.code).startsWith('STEDI')) return res.status(502).json({ error: err.message, code: err.code });
+    next(err);
+  }
+}
+
+/** The appointment's latest eligibility check (for the benefits popup). */
+export async function getEligibility(req, res, next) {
+  try {
+    const row = await getRawByUuid(req.params.uuid);
+    await assertCanManage(req, row);
+    res.json({ check: await getAppointmentCheck(row.uuid) });
   } catch (err) { next(err); }
 }
 

@@ -158,6 +158,49 @@ export const SCHEMA_STATEMENTS = [
     CONSTRAINT fk_pdoc_uploader FOREIGN KEY (uploaded_by) REFERENCES users(id) ON DELETE SET NULL
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 
+  // --- Benefits Verification (X12 271 eligibility; PHI, per patient+policy) ---
+  `CREATE TABLE IF NOT EXISTS eligibility_checks (
+    id             BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    uuid           CHAR(36)        NOT NULL,
+    patient_id     BIGINT UNSIGNED NOT NULL,
+    policy_index   TINYINT UNSIGNED NOT NULL DEFAULT 0,
+    payer_name     VARCHAR(160)    NULL,
+    member_id_bidx CHAR(64)        NULL,
+    status         VARCHAR(24)     NULL,
+    service_date   DATE            NULL,
+    plan_end       DATE            NULL,
+    summary_enc    MEDIUMBLOB      NULL,
+    raw_enc        MEDIUMBLOB      NULL,
+    created_by     BIGINT UNSIGNED NULL,
+    created_at     DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_elig_uuid (uuid),
+    KEY idx_elig_patient (patient_id),
+    KEY idx_elig_patient_policy (patient_id, policy_index),
+    CONSTRAINT fk_elig_patient FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE CASCADE,
+    CONSTRAINT fk_elig_created_by FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+  // --- Stedi Payer Network (public reference data; NOT PHI) -------------------
+  // Loaded from Stedi's payer export CSV. Resolves a face-sheet payer (name / ID /
+  // alias, e.g. "UHC", "Cigna", "62308") to the canonical Stedi payer ID used as
+  // tradingPartnerServiceId for eligibility. Keyed by the Stedi payer ID.
+  `CREATE TABLE IF NOT EXISTS stedi_payers (
+    stedi_id         VARCHAR(16)  NOT NULL,
+    primary_payer_id VARCHAR(32)  NULL,
+    display_name     VARCHAR(255) NOT NULL,
+    names            TEXT         NULL,
+    aliases          TEXT         NULL,
+    eligibility_supported TINYINT(1) NOT NULL DEFAULT 0,
+    coverage_types   VARCHAR(64)  NULL,
+    operating_states VARCHAR(512) NULL,
+    updated_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (stedi_id),
+    KEY idx_stedi_primary (primary_payer_id),
+    KEY idx_stedi_name (display_name),
+    KEY idx_stedi_elig (eligibility_supported)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
   // --- Encounters (worklist state layered over an appointment) ---------------
   `CREATE TABLE IF NOT EXISTS encounters (
     id             BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,

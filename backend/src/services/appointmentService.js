@@ -11,13 +11,21 @@ import { schedulingScope } from './accessScope.js';
  */
 
 const SELECT = `SELECT a.id, a.uuid, a.provider_id, a.rendering_provider_id, a.created_by, a.title_enc, a.patient_name_enc, a.patient_uuid,
-  a.appt_type, DATE_FORMAT(a.appt_date, '%Y-%m-%d') AS appt_date,
+  a.appt_type, a.procedure_code, DATE_FORMAT(a.appt_date, '%Y-%m-%d') AS appt_date,
   a.start_min, a.duration_min, a.status, a.created_at, a.updated_at,
   rp.uuid AS rendering_provider_uuid, rp.full_name_enc AS rendering_provider_name_enc,
-  op.full_name_enc AS owner_name_enc
+  op.full_name_enc AS owner_name_enc,
+  ec.elig_status AS eligibility_status
   FROM appointments a
   LEFT JOIN users rp ON rp.id = a.rendering_provider_id
-  LEFT JOIN users op ON op.id = a.provider_id`;
+  LEFT JOIN users op ON op.id = a.provider_id
+  LEFT JOIN (
+    SELECT e1.appointment_uuid, e1.status AS elig_status
+      FROM eligibility_checks e1
+      JOIN (SELECT appointment_uuid, MAX(id) AS mid FROM eligibility_checks
+             WHERE appointment_uuid IS NOT NULL GROUP BY appointment_uuid) e2
+        ON e2.mid = e1.id
+  ) ec ON ec.appointment_uuid = a.uuid`;
 
 export function toPublicAppointment(row) {
   if (!row) return null;
@@ -30,10 +38,12 @@ export function toPublicAppointment(row) {
     renderingProvider: row.rendering_provider_name_enc ? decrypt(row.rendering_provider_name_enc)
       : (row.owner_name_enc ? decrypt(row.owner_name_enc) : null),
     type: row.appt_type,
+    procedureCode: row.procedure_code || null,
     date: row.appt_date,
     startMin: row.start_min,
     durationMin: row.duration_min,
     status: row.status,
+    eligibilityStatus: row.eligibility_status || null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -71,13 +81,13 @@ export async function getRawByUuid(uuid) {
   return rows[0] || null;
 }
 
-export async function createAppointment({ providerId, renderingProviderId, title, patient, patientUuid, type, date, startMin, durationMin, createdBy }) {
+export async function createAppointment({ providerId, renderingProviderId, title, patient, patientUuid, type, procedureCode, date, startMin, durationMin, createdBy }) {
   const uuid = uuidv4();
   await execute(
     `INSERT INTO appointments
-       (uuid, provider_id, rendering_provider_id, title_enc, patient_name_enc, patient_uuid, appt_type, appt_date, start_min, duration_min, status, created_by)
+       (uuid, provider_id, rendering_provider_id, title_enc, patient_name_enc, patient_uuid, appt_type, procedure_code, appt_date, start_min, duration_min, status, created_by)
      VALUES
-       (:uuid, :pid, :rpid, :titleEnc, :patientEnc, :patientUuid, :type, :date, :startMin, :durationMin, 'scheduled', :createdBy)`,
+       (:uuid, :pid, :rpid, :titleEnc, :patientEnc, :patientUuid, :type, :proc, :date, :startMin, :durationMin, 'scheduled', :createdBy)`,
     {
       uuid,
       pid: providerId,
@@ -86,6 +96,7 @@ export async function createAppointment({ providerId, renderingProviderId, title
       patientEnc: patient ? encrypt(patient) : null,
       patientUuid: patientUuid || null,
       type,
+      proc: procedureCode || null,
       date,
       startMin,
       durationMin,
@@ -103,6 +114,7 @@ export async function updateAppointment(uuid, fields) {
   if (fields.patientUuid !== undefined) { sets.push('patient_uuid = :patientUuid'); params.patientUuid = fields.patientUuid || null; }
   if (fields.renderingProviderId !== undefined) { sets.push('rendering_provider_id = :rpid'); params.rpid = fields.renderingProviderId || null; }
   if (fields.type !== undefined) { sets.push('appt_type = :type'); params.type = fields.type; }
+  if (fields.procedureCode !== undefined) { sets.push('procedure_code = :proc'); params.proc = fields.procedureCode || null; }
   if (fields.date !== undefined) { sets.push('appt_date = :date'); params.date = fields.date; }
   if (fields.startMin !== undefined) { sets.push('start_min = :startMin'); params.startMin = fields.startMin; }
   if (fields.durationMin !== undefined) { sets.push('duration_min = :durationMin'); params.durationMin = fields.durationMin; }

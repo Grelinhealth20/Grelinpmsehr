@@ -1,9 +1,29 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Modal from '../components/Modal.jsx';
 import PatientModal from '../components/PatientModal.jsx';
+import AppointmentEligibilityModal from '../components/AppointmentEligibilityModal.jsx';
 import { useToast } from '../components/Toast.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
 import { appointmentsApi, patientsApi, providersApi, toApiError } from '../lib/api.js';
+
+// Common SNF Part B procedures for the appointment procedure picker.
+const COMMON_PROCEDURES = [
+  { code: '99306', desc: 'Initial nursing facility visit' },
+  { code: '99308', desc: 'Subsequent SNF visit (expanded)' },
+  { code: '99309', desc: 'Subsequent SNF visit (detailed)' },
+  { code: '99310', desc: 'Subsequent SNF visit (complex)' },
+  { code: '99315', desc: 'Nursing facility discharge' },
+  { code: '99497', desc: 'Advance care planning' },
+  { code: '99483', desc: 'Cognitive assessment & care plan' },
+  { code: '90792', desc: 'Psychiatric diagnostic evaluation' },
+  { code: '97110', desc: 'Therapeutic exercise (PT)' },
+  { code: '97530', desc: 'Therapeutic activities (PT)' },
+  { code: '97165', desc: 'Occupational therapy evaluation' },
+  { code: '92507', desc: 'Speech/language treatment' },
+  { code: '11042', desc: 'Wound debridement' },
+  { code: '20610', desc: 'Major joint injection/aspiration' },
+];
+const ELIG_TAG = { active: 'Active', inactive: 'Inactive', pending: 'Pending' };
 
 const providerLabel = (p) => `${p.fullName}${p.credentials?.length ? `, ${p.credentials.join(', ')}` : ''}${p.specialty ? ` · ${p.specialty.name}` : ''}`;
 
@@ -83,6 +103,7 @@ export default function AppointmentScheduler() {
   const [patients, setPatients] = useState([]); // provider's own patients (for search)
   const [patientOpen, setPatientOpen] = useState(false);
   const [patientModal, setPatientModal] = useState(null); // { uuid? } — face sheet popup
+  const [eligModal, setEligModal] = useState(null); // { uuid, title } — eligibility benefits popup
   const [providers, setProviders] = useState([]); // active providers (from DB)
 
   const refreshPatients = useCallback(() => {
@@ -137,11 +158,11 @@ export default function AppointmentScheduler() {
   /* --- Create / edit modal ------------------------------------------------- */
   function openNew(dateKey, startMin) {
     setPatientOpen(false);
-    setModal({ mode: 'new', form: { title: '', patient: '', patientUuid: '', renderingProviderUuid: '', type: 'consult', dateKey, startMin: clampStart(startMin, 30), durationMin: 30, status: 'scheduled' } });
+    setModal({ mode: 'new', form: { title: '', patient: '', patientUuid: '', renderingProviderUuid: '', type: 'consult', procedureCode: '', dateKey, startMin: clampStart(startMin, 30), durationMin: 30, status: 'scheduled' } });
   }
   function openEdit(a) {
     setPatientOpen(false);
-    setModal({ mode: 'edit', uuid: a.uuid, form: { title: a.title, patient: a.patient || '', patientUuid: a.patientUuid || '', renderingProviderUuid: a.renderingProviderUuid || '', type: a.type, dateKey: a.date, startMin: a.startMin, durationMin: a.durationMin, status: a.status } });
+    setModal({ mode: 'edit', uuid: a.uuid, form: { title: a.title, patient: a.patient || '', patientUuid: a.patientUuid || '', renderingProviderUuid: a.renderingProviderUuid || '', type: a.type, procedureCode: a.procedureCode || '', dateKey: a.date, startMin: a.startMin, durationMin: a.durationMin, status: a.status } });
   }
   function onColClick(e, dateKey) {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -164,6 +185,7 @@ export default function AppointmentScheduler() {
       patientUuid: f.patientUuid || undefined,
       renderingProviderUuid: f.renderingProviderUuid || undefined,
       type: f.type,
+      procedureCode: (f.procedureCode || '').trim(),
       date: f.dateKey,
       startMin: clampStart(f.startMin, f.durationMin),
       durationMin: f.durationMin,
@@ -176,7 +198,7 @@ export default function AppointmentScheduler() {
       }
       setModal(null);
       load();
-      toast.success(modal.mode === 'edit' ? 'Appointment updated.' : 'Appointment booked.');
+      toast.success(modal.mode === 'edit' ? 'Appointment updated.' : 'Appointment booked — eligibility verifying…');
     } catch (e) {
       toast.error(toApiError(e).message);
     }
@@ -303,6 +325,17 @@ export default function AppointmentScheduler() {
                       <span className="sch-appt-t">{a.title}</span>
                       <span className="sch-appt-time">{fmtTime(a.startMin)} – {fmtTime(a.startMin + a.durationMin)}</span>
                       {a.patient && <span className="sch-appt-pt">{a.patient}</span>}
+                      {a.eligibilityStatus && (
+                        <span
+                          className={`sch-elig ${a.eligibilityStatus}`}
+                          role="button"
+                          title="View eligibility & benefits"
+                          onPointerDown={(e) => e.stopPropagation()}
+                          onClick={(e) => { e.stopPropagation(); setEligModal({ uuid: a.uuid, title: a.title }); }}
+                        >
+                          <span className="dot" />{ELIG_TAG[a.eligibilityStatus] || a.eligibilityStatus}
+                        </span>
+                      )}
                       {a.status === 'cancelled' && <span className="sch-appt-flag">Cancelled</span>}
                       {a.status === 'completed' && <span className="sch-appt-flag ok">Completed</span>}
                       {a.status === 'checked_in' && <span className="sch-appt-flag in">Checked In</span>}
@@ -338,6 +371,9 @@ export default function AppointmentScheduler() {
                 modal.form.status === 'checked_in'
                   ? <button className="btn ghost" onClick={() => checkAppt('checked_out')} title="Check out — patient has left">Check out</button>
                   : <button className="btn ghost" onClick={() => checkAppt('checked_in')} title="Check in — patient has arrived">Check in</button>
+              )}
+              {modal.mode === 'edit' && modal.form.patientUuid && (
+                <button className="btn ghost" onClick={() => setEligModal({ uuid: modal.uuid, title: modal.form.title })} title="Real-time eligibility & benefits">Eligibility</button>
               )}
               <button className="btn ghost" onClick={() => setModal(null)}>Cancel</button>
               <button className="btn" onClick={saveForm} disabled={!modal.form.title.trim() || (isBilling && !modal.form.renderingProviderUuid)}>{modal.mode === 'edit' ? 'Save changes' : 'Book appointment'}</button>
@@ -413,6 +449,17 @@ export default function AppointmentScheduler() {
                 ))}
               </div>
             </div>
+            <div className="field">
+              <label>Procedure <span className="muted">(CPT/HCPCS — what the appointment is for; drives eligibility)</span></label>
+              <input
+                className="input" list="sch-cpt-list" value={modal.form.procedureCode}
+                placeholder="e.g. 99309 — Subsequent SNF visit"
+                onChange={(e) => setF({ procedureCode: e.target.value })}
+              />
+              <datalist id="sch-cpt-list">
+                {COMMON_PROCEDURES.map((p) => <option key={p.code} value={p.code}>{`${p.code} — ${p.desc}`}</option>)}
+              </datalist>
+            </div>
             <div className="grid-2">
               <div className="field">
                 <label>Date</label>
@@ -455,6 +502,14 @@ export default function AppointmentScheduler() {
             refreshPatients();
             setModal((c) => (c ? { ...c, form: { ...c.form, patient: patientName(p), patientUuid: p.uuid } } : c));
           }}
+        />
+      )}
+
+      {eligModal && (
+        <AppointmentEligibilityModal
+          appointment={eligModal}
+          onClose={() => setEligModal(null)}
+          onChanged={load}
         />
       )}
     </div>

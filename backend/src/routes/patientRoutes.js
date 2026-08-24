@@ -4,7 +4,7 @@ import * as ctrl from '../controllers/patientController.js';
 import { authenticate, requirePasswordSettled } from '../middleware/authenticate.js';
 import { csrfProtection } from '../middleware/csrf.js';
 import { validate } from '../middleware/validate.js';
-import { createPatientSchema, updatePatientSchema, uuidParam } from '../validation/schemas.js';
+import { createPatientSchema, updatePatientSchema, uuidParam, importEligibilitySchema, verifyEligibilitySchema } from '../validation/schemas.js';
 
 // In-memory upload; capped so a large file can never exhaust the process.
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } });
@@ -22,6 +22,13 @@ router.post('/', csrfProtection, validate(createPatientSchema), ctrl.create);
 router.get('/:uuid', validate(uuidParam, 'params'), ctrl.getOne);
 router.patch('/:uuid', csrfProtection, validate(uuidParam, 'params'), validate(updatePatientSchema), ctrl.update);
 router.delete('/:uuid', csrfProtection, validate(uuidParam, 'params'), ctrl.remove);
+
+// Benefits Verification (X12 271 eligibility) — strictly scoped to the owned patient.
+router.get('/:uuid/eligibility', validate(uuidParam, 'params'), ctrl.listEligibility);
+// Live, server-side Stedi verification (inputs pulled from the Face Sheet).
+router.post('/:uuid/eligibility/verify', csrfProtection, validate(uuidParam, 'params'), validate(verifyEligibilitySchema), ctrl.verifyNow);
+// Programmatic ingest of a 271 the caller already holds.
+router.post('/:uuid/eligibility', csrfProtection, validate(uuidParam, 'params'), validate(importEligibilitySchema), ctrl.importEligibility);
 
 // Documents (license / insurance images) — strictly scoped to the owned patient.
 router.get('/:uuid/documents', validate(uuidParam, 'params'), ctrl.listDocs);

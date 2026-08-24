@@ -91,9 +91,11 @@ const apptPatient = z.string().trim().max(200).optional();
 const apptPatientUuid = z.union([z.string().uuid(), z.literal('')]).optional();
 
 const renderingProviderUuid = z.union([z.string().uuid(), z.literal('')]).optional();
+// CPT/HCPCS the appointment is for (drives procedure-specific eligibility).
+const procedureCode = z.union([z.string().trim().min(2).max(10), z.literal('')]).optional();
 
 export const createAppointmentSchema = z
-  .object({ title: apptTitle, patient: apptPatient, patientUuid: apptPatientUuid, renderingProviderUuid, type: apptType, date: apptDate, startMin, durationMin })
+  .object({ title: apptTitle, patient: apptPatient, patientUuid: apptPatientUuid, renderingProviderUuid, procedureCode, type: apptType, date: apptDate, startMin, durationMin })
   .strict();
 
 export const updateAppointmentSchema = z
@@ -102,6 +104,7 @@ export const updateAppointmentSchema = z
     patient: apptPatient,
     patientUuid: apptPatientUuid,
     renderingProviderUuid,
+    procedureCode,
     type: apptType.optional(),
     date: apptDate.optional(),
     startMin: startMin.optional(),
@@ -132,12 +135,30 @@ const demographicsSchema = z
   })
   .strict();
 
+// Verified eligibility & benefits for one insurance policy (shown on the Benefits tab).
+const benefitsSchema = z
+  .object({
+    eligibilityStatus: z.enum(['active', 'inactive', 'pending', 'not_verified']).optional(),
+    planName: optStr(120), network: optStr(60),
+    effectiveDate: optDate, termDate: optDate,
+    copay: optStr(60), coinsurance: optStr(60),
+    deductible: optStr(60), deductibleMet: optStr(60),
+    oopMax: optStr(60), oopMet: optStr(60),
+    coverageNotes: optStr(1000),
+    verifiedDate: optDate, verifiedBy: optStr(120), referenceNo: optStr(60),
+  })
+  .strict()
+  .nullable()
+  .optional();
+
 // One or more insurance policies (primary / secondary / tertiary).
 const insuranceItemSchema = z
   .object({
     type: z.enum(['primary', 'secondary', 'tertiary']).optional(),
     payer: optStr(120), memberId: optStr(80), group: optStr(80), planType: optStr(60),
     mbi: optStr(20),
+    payerId: optStr(20), // Stedi payer ID (tradingPartnerServiceId), auto-resolved
+    benefits: benefitsSchema,
   })
   .strict();
 const insuranceSchema = z.array(insuranceItemSchema).max(5).nullable().optional();
@@ -226,6 +247,37 @@ export const updateNoteSchema = z
 
 export const signNoteSchema = z
   .object({ reason: noteReason, content: noteContentSchema })
+  .strict();
+
+// --- Benefits Verification (X12 271 eligibility ingest) ----------------------
+// `response` is the payer's real 271 payload (a large object). We validate that it
+// is an object shaped like a 271 (benefits or plan status present) and store it
+// verbatim; we never synthesize eligibility data.
+// Live verify pulls every input from the Face Sheet; body picks the policy and
+// (optionally) procedure codes to target procedure-specific benefits.
+export const verifyEligibilitySchema = z
+  .object({
+    policyIndex: z.coerce.number().int().min(0).max(4).optional(),
+    procedureCodes: z.array(z.string().trim().min(2).max(10)).max(12).optional(),
+  })
+  .strict();
+
+export const importEligibilitySchema = z
+  .object({
+    policyIndex: z.coerce.number().int().min(0).max(4).default(0),
+    response: z
+      .object({
+        benefitsInformation: z.array(z.any()).optional(),
+        planStatus: z.array(z.any()).optional(),
+        subscriber: z.record(z.any()).optional(),
+        payer: z.record(z.any()).optional(),
+      })
+      .passthrough()
+      .refine(
+        (r) => Array.isArray(r.benefitsInformation) || Array.isArray(r.planStatus),
+        { message: 'Not a valid eligibility (271) response: missing benefits/plan status.' },
+      ),
+  })
   .strict();
 
 // --- Facilities --------------------------------------------------------------

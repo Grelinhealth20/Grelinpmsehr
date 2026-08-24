@@ -149,6 +149,12 @@ export const patientsApi = {
     return api.post('/patients/extract-upload', fd, { headers: { 'Content-Type': undefined } });
   },
   removeDocument: (uuid, docUuid) => api.delete(`/patients/${uuid}/documents/${docUuid}`),
+  // Benefits Verification (real-time eligibility) — scoped to the owned patient.
+  listEligibility: (uuid) => api.get(`/patients/${uuid}/eligibility`),
+  // Live, server-side Stedi check — inputs pulled from the Face Sheet.
+  verifyEligibility: (uuid, payload) => api.post(`/patients/${uuid}/eligibility/verify`, payload),
+  // Programmatic ingest of a 271 the caller already holds.
+  importEligibility: (uuid, payload) => api.post(`/patients/${uuid}/eligibility`, payload),
 };
 
 // --- Encounters (EHR worklist) ---------------------------------------------
@@ -178,6 +184,9 @@ export const appointmentsApi = {
   reschedule: (uuid, { date, startMin, durationMin }) =>
     api.patch(`/appointments/${uuid}`, { date, startMin, durationMin }),
   remove: (uuid) => api.delete(`/appointments/${uuid}`),
+  // Appointment-level eligibility (real-time): live (re)verify + fetch benefits.
+  verifyEligibility: (uuid) => api.post(`/appointments/${uuid}/eligibility/verify`, {}),
+  eligibility: (uuid) => api.get(`/appointments/${uuid}/eligibility`),
 };
 
 export default api;

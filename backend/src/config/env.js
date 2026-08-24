@@ -100,6 +100,15 @@ export const config = {
     baseUrl: process.env.NPPES_BASE_URL || 'https://npiregistry.cms.hhs.gov/api/',
     timeoutMs: int('NPPES_TIMEOUT_MS', 8000),
   },
+
+  // Stedi — real-time eligibility (270/271) + Payer Network search. The API key is
+  // secret; add it to .env as STEDI_API_KEY. Eligibility runs entirely server-side.
+  stedi: {
+    apiKey: process.env.STEDI_API_KEY || '',
+    baseUrl: process.env.STEDI_BASE_URL || 'https://healthcare.us.stedi.com/2024-04-01',
+    timeoutMs: int('STEDI_TIMEOUT_MS', 20000),
+    enabled: !!process.env.STEDI_API_KEY,
+  },
 };
 
 /** Roles, ordered by privilege. Used for RBAC checks. */

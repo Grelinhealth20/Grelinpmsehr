@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import Modal from './Modal.jsx';
 import { useToast } from './Toast.jsx';
 import { patientsApi, toApiError } from '../lib/api.js';
+import BenefitsVerification from './BenefitsVerification.jsx';
 
 const EMPTY = {
   demographics: { firstName: '', lastName: '', dob: '', gender: 'unknown', phone: '', email: '', address: '', city: '', state: '', zip: '', ssn: '' },
@@ -12,7 +13,10 @@ const EMPTY = {
 const blankContact = () => ({ name: '', relationship: '', phone: '', email: '' });
 const INS_RANKS = ['primary', 'secondary', 'tertiary'];
 const INS_LABEL = { primary: 'Primary', secondary: 'Secondary', tertiary: 'Tertiary' };
-const blankIns = (type) => ({ type, payer: '', memberId: '', group: '', planType: '', mbi: '' });
+const blankBenefits = () => ({ eligibilityStatus: 'not_verified', planName: '', network: '', effectiveDate: '', termDate: '', copay: '', coinsurance: '', deductible: '', deductibleMet: '', oopMax: '', oopMet: '', coverageNotes: '', verifiedDate: '', verifiedBy: '', referenceNo: '' });
+const blankIns = (type) => ({ type, payer: '', memberId: '', group: '', planType: '', mbi: '', benefits: blankBenefits() });
+const ELIG_OPTS = [['not_verified', 'Not verified'], ['active', 'Active'], ['inactive', 'Inactive'], ['pending', 'Pending']];
+const ELIG_LABEL = { not_verified: 'Not verified', active: 'Active', inactive: 'Inactive', pending: 'Pending' };
 const GENDERS = [['unknown', 'Unknown'], ['male', 'Male'], ['female', 'Female'], ['other', 'Other']];
 const DOC_SLOTS = [
   { key: 'license_front', label: "Driver's License — Front" },
@@ -299,6 +303,7 @@ export default function PatientModal({ uuid = null, docMode = 'license', onClose
   const addEmg = () => setForm((f) => (f.emergencyContacts.length >= 8 ? f : { ...f, emergencyContacts: [...f.emergencyContacts, blankContact()] }));
   const removeEmg = (i) => setForm((f) => ({ ...f, emergencyContacts: f.emergencyContacts.filter((_, idx) => idx !== i) }));
   const setInsAt = (i, k, v) => setForm((f) => ({ ...f, insurance: f.insurance.map((it, idx) => (idx === i ? { ...it, [k]: v } : it)) }));
+  const setBenAt = (i, k, v) => setForm((f) => ({ ...f, insurance: f.insurance.map((it, idx) => (idx === i ? { ...it, benefits: { ...(it.benefits || {}), [k]: v } } : it)) }));
   const addIns = () => setForm((f) => (f.insurance.length >= 3 ? f : { ...f, insurance: [...f.insurance, blankIns(INS_RANKS[f.insurance.length] || 'secondary')] }));
   const removeIns = (i) => setForm((f) => ({ ...f, insurance: f.insurance.filter((_, idx) => idx !== i) }));
 
@@ -472,6 +477,31 @@ export default function PatientModal({ uuid = null, docMode = 'license', onClose
 
           <div className="fs-section">
             <div className="fs-section-h">
+              Insurance
+              <span className="spacer" />
+              {form.insurance.length < 3 && <button type="button" className="btn ghost sm" onClick={addIns}>+ Add insurance</button>}
+            </div>
+            {form.insurance.length === 0 && <div className="fs-empty" style={{ padding: '10px 0' }}>No insurance on file. Add primary insurance.</div>}
+            {form.insurance.map((ins, i) => (
+              <div className="fs-ins" key={i}>
+                <div className="fs-ins-head">
+                  <span className={`fs-ins-rank r-${ins.type || 'primary'}`}>{INS_LABEL[ins.type] || `Policy ${i + 1}`}</span>
+                  <span className="spacer" />
+                  <button type="button" className="act danger" onClick={() => removeIns(i)}>Remove</button>
+                </div>
+                <div className="fs-grid fs-grid-3">
+                  <Field label="Payer" value={ins.payer} onChange={(v) => setInsAt(i, 'payer', v)} maxLength={120} />
+                  <Field label="Member ID" value={ins.memberId} onChange={(v) => setInsAt(i, 'memberId', v)} maxLength={80} />
+                  <Field label="Group #" value={ins.group} onChange={(v) => setInsAt(i, 'group', v)} maxLength={80} />
+                  <Field label="Medicare Beneficiary ID (MBI)" value={ins.mbi} onChange={(v) => setInsAt(i, 'mbi', v)} maxLength={20} />
+                  <Field label="Plan type" value={ins.planType} onChange={(v) => setInsAt(i, 'planType', v)} maxLength={60} />
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="fs-section">
+            <div className="fs-section-h">
               Emergency Contacts
               <span className="spacer" />
               {form.emergencyContacts.length < 8 && <button type="button" className="btn ghost sm" onClick={addEmg}>+ Add contact</button>}
@@ -528,27 +558,66 @@ export default function PatientModal({ uuid = null, docMode = 'license', onClose
           {viewTab === 'benefits' && (
           <div className="fs-section" style={{ marginBottom: 0 }}>
             <div className="fs-section-h">
-              Insurance &amp; Benefits
-              <span className="spacer" />
-              {form.insurance.length < 3 && <button type="button" className="btn ghost sm" onClick={addIns}>+ Add insurance</button>}
+              Benefits Verification
+              <span className="fs-section-note"> — real-time eligibility (X12 271), per insurance policy</span>
             </div>
-            {form.insurance.length === 0 && <div className="fs-empty" style={{ padding: '10px 0' }}>No insurance on file. Add primary insurance.</div>}
-            {form.insurance.map((ins, i) => (
-              <div className="fs-ins" key={i}>
-                <div className="fs-ins-head">
-                  <span className={`fs-ins-rank r-${ins.type || 'primary'}`}>{INS_LABEL[ins.type] || `Policy ${i + 1}`}</span>
-                  <span className="spacer" />
-                  <button type="button" className="act danger" onClick={() => removeIns(i)}>Remove</button>
-                </div>
-                <div className="fs-grid fs-grid-3">
-                  <Field label="Payer" value={ins.payer} onChange={(v) => setInsAt(i, 'payer', v)} maxLength={120} />
-                  <Field label="Member ID" value={ins.memberId} onChange={(v) => setInsAt(i, 'memberId', v)} maxLength={80} />
-                  <Field label="Group #" value={ins.group} onChange={(v) => setInsAt(i, 'group', v)} maxLength={80} />
-                  <Field label="Medicare Beneficiary ID (MBI)" value={ins.mbi} onChange={(v) => setInsAt(i, 'mbi', v)} maxLength={20} />
-                  <Field label="Plan type" value={ins.planType} onChange={(v) => setInsAt(i, 'planType', v)} maxLength={60} />
-                </div>
-              </div>
-            ))}
+            {!pUuid ? (
+              <div className="fs-empty" style={{ padding: '14px 0' }}>Create the patient first, then verify eligibility here. Verified benefits are stored with this patient only.</div>
+            ) : form.insurance.length === 0 ? (
+              <div className="fs-empty" style={{ padding: '14px 0' }}>No insurance on file yet. Add insurance under the <strong>Patient Face Sheet</strong> tab, then verify eligibility here.</div>
+            ) : (
+              <BenefitsVerification
+                patientUuid={pUuid}
+                insurance={form.insurance}
+                onPatientUpdated={(p) => setForm((f) => ({
+                  ...f,
+                  demographics: { ...f.demographics, ...(p.demographics || {}) },
+                  insurance: Array.isArray(p.insurance) ? p.insurance : f.insurance,
+                }))}
+              />
+            )}
+
+            {form.insurance.length > 0 && (
+            <details className="fs-manual-ben">
+              <summary>Record benefits manually (phone verification, no 271)</summary>
+              {form.insurance.map((ins, i) => {
+                const ben = ins.benefits || {};
+                const elig = ben.eligibilityStatus || 'not_verified';
+                return (
+                  <div className="fs-ben" key={i}>
+                    <div className="fs-ben-head">
+                      <span className={`fs-ins-rank r-${ins.type || 'primary'}`}>{INS_LABEL[ins.type] || `Policy ${i + 1}`}</span>
+                      <span className="fs-ben-payer">{ins.payer || 'Payer not set'}{ins.memberId ? ` · ${ins.memberId}` : ''}</span>
+                      <span className="spacer" />
+                      <span className={`fs-elig ${elig}`}><span className="dot" />{ELIG_LABEL[elig]}</span>
+                    </div>
+                    <div className="fs-grid fs-grid-3">
+                      <Field label="Eligibility status" options={ELIG_OPTS} value={elig} onChange={(v) => setBenAt(i, 'eligibilityStatus', v)} />
+                      <Field label="Plan name" value={ben.planName} onChange={(v) => setBenAt(i, 'planName', v)} maxLength={120} />
+                      <Field label="Network" value={ben.network} onChange={(v) => setBenAt(i, 'network', v)} maxLength={60} />
+                      <Field label="Effective date" type="date" value={ben.effectiveDate} onChange={(v) => setBenAt(i, 'effectiveDate', v)} />
+                      <Field label="Termination date" type="date" value={ben.termDate} onChange={(v) => setBenAt(i, 'termDate', v)} />
+                      <Field label="Copay" value={ben.copay} onChange={(v) => setBenAt(i, 'copay', v)} maxLength={60} />
+                      <Field label="Coinsurance" value={ben.coinsurance} onChange={(v) => setBenAt(i, 'coinsurance', v)} maxLength={60} />
+                      <Field label="Deductible" value={ben.deductible} onChange={(v) => setBenAt(i, 'deductible', v)} maxLength={60} />
+                      <Field label="Deductible met" value={ben.deductibleMet} onChange={(v) => setBenAt(i, 'deductibleMet', v)} maxLength={60} />
+                      <Field label="Out-of-pocket max" value={ben.oopMax} onChange={(v) => setBenAt(i, 'oopMax', v)} maxLength={60} />
+                      <Field label="Out-of-pocket met" value={ben.oopMet} onChange={(v) => setBenAt(i, 'oopMet', v)} maxLength={60} />
+                    </div>
+                    <div className="fs-grid fs-grid-3" style={{ marginTop: 10 }}>
+                      <Field label="Verified date" type="date" value={ben.verifiedDate} onChange={(v) => setBenAt(i, 'verifiedDate', v)} />
+                      <Field label="Verified by" value={ben.verifiedBy} onChange={(v) => setBenAt(i, 'verifiedBy', v)} maxLength={120} />
+                      <Field label="Reference #" value={ben.referenceNo} onChange={(v) => setBenAt(i, 'referenceNo', v)} maxLength={60} />
+                    </div>
+                    <div className="field" style={{ marginTop: 10 }}>
+                      <label>Coverage notes</label>
+                      <input className="input" value={ben.coverageNotes || ''} maxLength={1000} placeholder="Prior auth, limitations, covered services…" onChange={(e) => setBenAt(i, 'coverageNotes', e.target.value)} />
+                    </div>
+                  </div>
+                );
+              })}
+            </details>
+            )}
           </div>
           )}
         </div>

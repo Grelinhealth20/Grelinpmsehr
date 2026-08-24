@@ -22,8 +22,11 @@ from PIL import Image
 # PP-Structure loads from disk instead of downloading from Baidu's CDN.
 _MODELS_DIR = os.environ.get("OCR_MODELS_DIR", "")
 # PP-Structure adds layout/table recovery but is ~10x slower than plain PP-OCR.
-# The deterministic parser works off PP-OCR text, so structure is optional.
-_USE_STRUCTURE = os.environ.get("OCR_USE_STRUCTURE", "true").lower() == "true"
+# The deterministic parser works off PP-OCR text, so structure is OFF by default
+# for speed; set OCR_USE_STRUCTURE=true to re-enable table recovery when needed.
+_USE_STRUCTURE = os.environ.get("OCR_USE_STRUCTURE", "false").lower() == "true"
+# CPU acceleration for PaddleOCR/PP-Structure inference on this host.
+_CPU_THREADS = max(4, (os.cpu_count() or 4))
 _MODEL_DIRS = {
     "det_model_dir": "en_PP-OCRv3_det_infer",
     "rec_model_dir": "en_PP-OCRv4_rec_infer",
@@ -34,7 +37,8 @@ _MODEL_DIRS = {
 
 
 def _pp_kwargs():
-    kw = dict(show_log=False, layout=True, table=True, ocr=True, lang="en")
+    kw = dict(show_log=False, layout=True, table=True, ocr=True, lang="en",
+              enable_mkldnn=True, cpu_threads=_CPU_THREADS)
     if _MODELS_DIR and os.path.isdir(_MODELS_DIR):
         for arg, sub in _MODEL_DIRS.items():
             path = os.path.join(_MODELS_DIR, sub)
@@ -64,7 +68,8 @@ def _get_ppocr():
     global _ppocr
     if _ppocr is None:
         from paddleocr import PaddleOCR
-        kw = dict(use_angle_cls=True, lang="en", show_log=False)
+        kw = dict(use_angle_cls=True, lang="en", show_log=False,
+                  enable_mkldnn=True, cpu_threads=_CPU_THREADS)
         if _MODELS_DIR and os.path.isdir(_MODELS_DIR):
             for arg, sub in (("det_model_dir", "en_PP-OCRv3_det_infer"),
                              ("rec_model_dir", "en_PP-OCRv4_rec_infer"),
@@ -110,7 +115,7 @@ def image_bytes_to_array(data: bytes) -> np.ndarray:
     return np.array(img)
 
 
-def pdf_to_images(data: bytes, dpi: int = 200):
+def pdf_to_images(data: bytes, dpi: int = 150):
     """Render each PDF page to an RGB numpy array (PyMuPDF, no external binaries)."""
     import fitz  # PyMuPDF
     doc = fitz.open(stream=data, filetype="pdf")

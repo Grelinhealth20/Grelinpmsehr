@@ -14,5 +14,8 @@ router.get('/', appt.list);
 router.post('/', csrfProtection, validate(createAppointmentSchema), appt.create);
 router.patch('/:uuid', csrfProtection, validate(uuidParam, 'params'), validate(updateAppointmentSchema), appt.update);
 router.delete('/:uuid', csrfProtection, validate(uuidParam, 'params'), appt.remove);
+// Appointment-level eligibility: live (re)verify + fetch benefits for the popup.
+router.post('/:uuid/eligibility/verify', csrfProtection, validate(uuidParam, 'params'), appt.verifyEligibility);
+router.get('/:uuid/eligibility', validate(uuidParam, 'params'), appt.getEligibility);
 
 export default router;
