@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { execute } from '../db/pool.js';
 import { encrypt, decrypt, blindIndex } from '../utils/crypto.js';
+import { providerFacilityIds } from './facilityService.js';
 
 /**
  * Patient records for the EHR face sheet. ALL demographics and insurance data is
@@ -53,6 +54,25 @@ export async function getRawByUuid(uuid) {
   return rows[0] || null;
 }
 
+/**
+ * Resolve a patient's S3 storage context: the uuids of the patient, their owning
+ * provider, and their (billing) facility. Drives the hierarchical S3 key space
+ * facilities/{facility}/providers/{provider}/patients/{patient}/.
+ */
+export async function getPatientS3Ctx(uuid) {
+  const [rows] = await execute(
+    `SELECT p.uuid AS patient_uuid, u.uuid AS provider_uuid, f.uuid AS facility_uuid
+       FROM patients p
+       LEFT JOIN users u ON u.id = p.provider_id
+       LEFT JOIN facilities f ON f.id = p.facility_id
+      WHERE p.uuid = :uuid LIMIT 1`,
+    { uuid },
+  );
+  const r = rows[0];
+  if (!r) return null;
+  return { patientUuid: r.patient_uuid, providerUuid: r.provider_uuid, facilityUuid: r.facility_uuid };
+}
+
 // Approved MRN format: 7-digit numeric (1000000–9999999), unique.
 async function generateMrn() {
   for (let i = 0; i < 10; i++) {
@@ -77,12 +97,18 @@ export async function createPatient({ providerId, demographics, insurance, facil
   const mrn = await generateMrn();
   const nameKey = `${demographics.lastName || ''} ${demographics.firstName || ''}`.trim().toLowerCase();
   const emg = emgValue(emergencyContacts, emergencyContact);
+  // Billing facility is derived automatically (background) from the rendering
+  // provider's assigned facility — never entered on the UI. This links the
+  // patient to a facility for billing and cross-facility isolation.
+  const facIds = await providerFacilityIds(providerId);
+  const facilityId = facIds.length ? facIds[0] : null;
   await execute(
-    `INSERT INTO patients (uuid, provider_id, mrn, name_bidx, demographics_enc, insurance_enc, facility_enc, emergency_enc, created_by)
-     VALUES (:uuid, :pid, :mrn, :nameBidx, :demoEnc, :insEnc, :facEnc, :emgEnc, :createdBy)`,
+    `INSERT INTO patients (uuid, provider_id, facility_id, mrn, name_bidx, demographics_enc, insurance_enc, facility_enc, emergency_enc, created_by)
+     VALUES (:uuid, :pid, :facilityId, :mrn, :nameBidx, :demoEnc, :insEnc, :facEnc, :emgEnc, :createdBy)`,
     {
       uuid,
       pid: providerId,
+      facilityId,
       mrn,
       nameBidx: nameKey ? blindIndex(nameKey) : null,
       demoEnc: encrypt(JSON.stringify(demographics)),

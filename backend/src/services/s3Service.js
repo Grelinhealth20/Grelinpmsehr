@@ -6,8 +6,14 @@ import { logger } from '../config/logger.js';
 /**
  * S3 access for patient documents. Credentials live only on the server; the
  * browser never sees them. Every object is stored server-side-encrypted (SSE)
- * under a strict per-patient key prefix so isolation is enforced by the key
- * space as well as by the DB scoping in the controllers.
+ * under a strict HIERARCHICAL key prefix:
+ *
+ *     facilities/{facilityUuid}/providers/{providerUuid}/patients/{patientUuid}/
+ *
+ * so isolation is enforced by the key space (facility → provider → patient) as
+ * well as by DB scoping in the controllers. A patient's records can never sit
+ * outside their provider's folder, which can never sit outside their facility's
+ * folder — preventing cross-facility / cross-provider leakage at the storage tier.
  */
 const client = config.s3.enabled
   ? new S3Client({
@@ -18,12 +24,31 @@ const client = config.s3.enabled
 
 export const s3Enabled = () => !!client;
 
-/** Master folder that contains every patient's upload subfolder. */
-export const MASTER_PREFIX = 'patients/';
+/** Root under which every facility folder lives. */
+export const MASTER_PREFIX = 'facilities/';
 
-/** All objects for a patient live under this prefix — the patient's "folder". */
-export function patientPrefix(patientUuid) {
-  return `${MASTER_PREFIX}${patientUuid}/`;
+// Sanitize a segment used as an S3 folder name (uuids are already safe; guard anyway).
+const seg = (v, fallback) => {
+  const s = String(v || '').trim().replace(/[^A-Za-z0-9._-]/g, '');
+  return s || fallback;
+};
+
+/** The facility folder prefix. */
+export function facilityPrefix(facilityUuid) {
+  return `${MASTER_PREFIX}${seg(facilityUuid, 'unassigned')}/`;
+}
+/** The provider folder prefix inside a facility. */
+export function providerPrefix({ facilityUuid, providerUuid }) {
+  return `${facilityPrefix(facilityUuid)}providers/${seg(providerUuid, 'unknown')}/`;
+}
+/**
+ * All objects for a patient live under this prefix — the patient's "folder",
+ * nested under their provider, nested under their facility.
+ * Accepts a context object { patientUuid, providerUuid, facilityUuid }.
+ */
+export function patientPrefix(ctx) {
+  const c = typeof ctx === 'string' ? { patientUuid: ctx } : (ctx || {});
+  return `${providerPrefix(c)}patients/${seg(c.patientUuid, 'unknown')}/`;
 }
 
 /**
@@ -31,37 +56,41 @@ export function patientPrefix(patientUuid) {
  * on boot so the bucket always shows the master `patients/` folder that holds
  * every patient's documents, even before the first patient is created.
  */
-export async function ensureMasterFolder() {
-  if (!client) return;
-  try {
-    await client.send(new PutObjectCommand({
-      Bucket: config.s3.bucket,
-      Key: `${MASTER_PREFIX}.keep`,
-      Body: '',
-      ServerSideEncryption: 'AES256',
-      ContentType: 'application/octet-stream',
-    }));
-  } catch (e) { logger.warn({ err: e.message }, 'Could not ensure S3 master folder'); }
-}
-
-/**
- * Create the patient's folder by writing a zero-byte marker. S3 has no real
- * folders, but the prefix + marker makes the per-patient namespace explicit.
- */
-export async function ensurePatientFolder(patientUuid) {
-  if (!client) return;
-  await client.send(new PutObjectCommand({
+async function putMarker(key) {
+  return client.send(new PutObjectCommand({
     Bucket: config.s3.bucket,
-    Key: `${patientPrefix(patientUuid)}.keep`,
+    Key: key,
     Body: '',
     ServerSideEncryption: 'AES256',
     ContentType: 'application/octet-stream',
   }));
 }
 
-export async function uploadPatientObject(patientUuid, key, buffer, contentType) {
+export async function ensureMasterFolder() {
+  if (!client) return;
+  try {
+    await putMarker(`${MASTER_PREFIX}.keep`);
+  } catch (e) { logger.warn({ err: e.message }, 'Could not ensure S3 master folder'); }
+}
+
+/**
+ * Create the full facility → provider → patient folder chain with zero-byte
+ * markers so each level is an explicit, visible namespace. S3 has no real
+ * folders; the markers make the hierarchy concrete and keep empty folders visible.
+ */
+export async function ensurePatientFolder(ctx) {
+  if (!client) return;
+  await Promise.all([
+    putMarker(`${facilityPrefix(ctx.facilityUuid)}.keep`),
+    putMarker(`${providerPrefix(ctx)}.keep`),
+    putMarker(`${providerPrefix(ctx)}patients/.keep`),
+    putMarker(`${patientPrefix(ctx)}.keep`),
+  ]);
+}
+
+export async function uploadPatientObject(ctx, key, buffer, contentType) {
   if (!client) throw new Error('S3 is not configured.');
-  const fullKey = `${patientPrefix(patientUuid)}${key}`;
+  const fullKey = `${patientPrefix(ctx)}${key}`;
   await client.send(new PutObjectCommand({
     Bucket: config.s3.bucket,
     Key: fullKey,
@@ -86,15 +115,16 @@ export async function getObjectBytes(s3Key) {
 }
 
 /** List object keys under a patient's sub-prefix (e.g. 'notes/') — scoped to the
- * patient's folder, so it can never see another patient's objects. */
-export async function listPatientKeys(patientUuid, subPrefix = '') {
+ * patient's folder, so it can never see another patient's objects. Accepts the
+ * patient context { patientUuid, providerUuid, facilityUuid }. */
+export async function listPatientKeys(ctx, subPrefix = '') {
   if (!client) return [];
   const out = [];
   let token;
   do {
     const res = await client.send(new ListObjectsV2Command({
       Bucket: config.s3.bucket,
-      Prefix: `${patientPrefix(patientUuid)}${subPrefix}`,
+      Prefix: `${patientPrefix(ctx)}${subPrefix}`,
       ContinuationToken: token,
     }));
     for (const o of res.Contents || []) out.push(o.Key);

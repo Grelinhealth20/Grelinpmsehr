@@ -15,7 +15,7 @@ function initials(name = '') {
  * may enter (derived from their Access Control grants). The switcher both shows
  * the current system and lets the user navigate to any other granted system.
  */
-export default function AppHeader({ module = 'PMS System', systems = null, active = null, onSwitch = null }) {
+export default function AppHeader({ module = 'PMS System', systems = null, active = null, onSwitch = null, switcher = false }) {
   const { user, logout } = useAuth();
   const hasSwitcher = Array.isArray(systems) && systems.length > 0;
   const currentLabel = hasSwitcher ? (systems.find((s) => s.key === active)?.label || module) : module;
@@ -48,7 +48,7 @@ export default function AppHeader({ module = 'PMS System', systems = null, activ
       </div>
 
       <div className="gh-right">
-        {hasSwitcher &&
+        {switcher && hasSwitcher &&
           systems
             .filter((s) => s.key !== active)
             .map((s) => (

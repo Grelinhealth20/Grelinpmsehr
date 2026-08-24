@@ -6,6 +6,19 @@ import { logger } from '../config/logger.js';
  * Apply the schema. Idempotent (CREATE TABLE IF NOT EXISTS) so it runs safely on
  * every boot. Can also be invoked directly: `npm run migrate`.
  */
+/** Idempotently add a non-unique index to an existing table (enterprise scale). */
+async function ensureIndex(table, indexName, columns) {
+  const [idx] = await pool.query(
+    `SELECT INDEX_NAME FROM information_schema.STATISTICS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ? LIMIT 1`,
+    [table, indexName],
+  );
+  if (idx.length === 0) {
+    await pool.query(`ALTER TABLE \`${table}\` ADD INDEX \`${indexName}\` (${columns})`);
+    logger.info({ table, indexName }, 'Added index via migration');
+  }
+}
+
 /** Idempotently add a column (and optional FK) to an existing table. */
 async function ensureColumn(table, column, definition, fkClause) {
   const [cols] = await pool.query(
@@ -55,6 +68,19 @@ export async function runMigrations() {
   await ensureColumn('encounters', 'encounter_no', '`encounter_no` VARCHAR(48) NULL AFTER `uuid`');
   // Date of service for standalone (manually created) encounters not tied to an appointment.
   await ensureColumn('encounters', 'encounter_date', '`encounter_date` DATE NULL AFTER `patient_id`');
+  // Facility a patient belongs to — governs cross-facility data isolation. Nullable
+  // so legacy patients (created before facilities existed) remain owned by their provider.
+  await ensureColumn(
+    'patients',
+    'facility_id',
+    '`facility_id` BIGINT UNSIGNED NULL AFTER `provider_id`',
+    'CONSTRAINT `fk_patient_facility` FOREIGN KEY (`facility_id`) REFERENCES `facilities`(`id`) ON DELETE SET NULL',
+  );
+  // Scale indexes (Clinical Records over 10k+ notes): keep the flat, time-ordered
+  // note list fast for both the own-scope and facility-wide paths. (facility_id and
+  // patient_id are already indexed by their foreign keys.)
+  await ensureIndex('encounter_notes', 'idx_note_created', '`created_at`');
+  await ensureIndex('encounter_notes', 'idx_note_provider_created', '`provider_id`, `created_at`');
   logger.info(`Schema ensured (${SCHEMA_STATEMENTS.length} tables)`);
 }
 

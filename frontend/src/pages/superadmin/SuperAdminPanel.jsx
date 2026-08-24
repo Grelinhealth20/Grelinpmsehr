@@ -4,10 +4,11 @@ import ConfirmDialog from '../../components/ConfirmDialog.jsx';
 import UserFormModal from './UserFormModal.jsx';
 import ResetPasswordModal from './ResetPasswordModal.jsx';
 import AccessControlModal from './AccessControlModal.jsx';
+import FacilityModal from './FacilityModal.jsx';
 import { useAuth } from '../../context/AuthContext.jsx';
 import { useToast } from '../../components/Toast.jsx';
 import { useIdleTimeout } from '../../hooks/useIdleTimeout.js';
-import { usersApi, toApiError } from '../../lib/api.js';
+import { usersApi, facilitiesApi, toApiError } from '../../lib/api.js';
 
 const TABS = [
   { key: 'super', label: 'Super Admins', roles: ['super_admin', 'master_admin'], createRole: 'super_admin', createLabel: '+ Create Super Admin' },
@@ -34,6 +35,13 @@ export default function SuperAdminPanel() {
   const [tab, setTab] = useState('super');
   const [search, setSearch] = useState('');
   const [modal, setModal] = useState(null);
+  const isFacilities = tab === 'facilities';
+
+  // Facilities state (loaded on demand when the Facilities tab is opened).
+  const [facilities, setFacilities] = useState([]);
+  const [facLoading, setFacLoading] = useState(false);
+  const [facSearch, setFacSearch] = useState('');
+  const [facModal, setFacModal] = useState(null);
 
   async function load() {
     setLoading(true);
@@ -47,10 +55,27 @@ export default function SuperAdminPanel() {
     }
   }
 
+  async function loadFacilities() {
+    setFacLoading(true);
+    try {
+      const { data } = await facilitiesApi.list();
+      setFacilities(data.facilities || []);
+    } catch (e) {
+      toast.error(toApiError(e).message);
+    } finally {
+      setFacLoading(false);
+    }
+  }
+
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (isFacilities && facilities.length === 0) loadFacilities();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isFacilities]);
 
   const counts = useMemo(() => {
     const c = {};
@@ -58,7 +83,7 @@ export default function SuperAdminPanel() {
     return c;
   }, [all]);
 
-  const activeTab = TABS.find((t) => t.key === tab);
+  const activeTab = TABS.find((t) => t.key === tab) || TABS[0];
 
   const stats = useMemo(() => {
     const scope = all.filter((u) => activeTab.roles.includes(u.role));
@@ -123,8 +148,30 @@ export default function SuperAdminPanel() {
               <span className="sa-tab-count">{counts[t.key] ?? 0}</span>
             </button>
           ))}
+          <button
+            role="tab"
+            aria-selected={isFacilities}
+            className={`sa-tab ${isFacilities ? 'active' : ''}`}
+            onClick={() => setTab('facilities')}
+          >
+            Facilities
+            <span className="sa-tab-count">{facilities.length}</span>
+          </button>
         </div>
 
+        {isFacilities ? (
+          <FacilitiesView
+            facilities={facilities}
+            loading={facLoading}
+            search={facSearch}
+            setSearch={setFacSearch}
+            onAdd={() => setFacModal({ type: 'add' })}
+            onManage={(f) => setFacModal({ type: 'manage', facility: f })}
+            onStatus={async (f, status) => { try { await facilitiesApi.setStatus(f.uuid, status); loadFacilities(); toast.success('Facility status updated.'); } catch (e) { toast.error(toApiError(e).message); } }}
+            onDelete={(f) => setFacModal({ type: 'delete', facility: f })}
+          />
+        ) : (
+        <>
         {/* KPI stat tiles */}
         <div className="sa-stats">
           <div className="sa-stat">
@@ -213,7 +260,26 @@ export default function SuperAdminPanel() {
             </table>
           </div>
         </div>
+        </>
+        )}
       </main>
+
+      {facModal?.type === 'add' && (
+        <FacilityModal onClose={() => setFacModal(null)} onSaved={loadFacilities} />
+      )}
+      {facModal?.type === 'manage' && (
+        <FacilityModal facility={facModal.facility} onClose={() => setFacModal(null)} onSaved={loadFacilities} />
+      )}
+      {facModal?.type === 'delete' && (
+        <ConfirmDialog
+          title="Delete facility"
+          message={`Delete ${facModal.facility.name}? Providers will be unassigned. This action is logged.`}
+          confirmLabel="Delete facility"
+          danger
+          onConfirm={async () => { try { await facilitiesApi.remove(facModal.facility.uuid); setFacModal(null); toast.success('Facility deleted.'); loadFacilities(); } catch (e) { toast.error(toApiError(e).message); } }}
+          onClose={() => setFacModal(null)}
+        />
+      )}
 
       {modal?.type === 'create' && (
         <UserFormModal mode="create" lockedRole={activeTab.createRole} onClose={() => setModal(null)} onSaved={(m) => { setModal(null); toast.success(m); load(); }} />
@@ -238,5 +304,83 @@ export default function SuperAdminPanel() {
         />
       )}
     </div>
+  );
+}
+
+/** Facilities management view (NPPES-verified facility records + assignments). */
+function FacilitiesView({ facilities, loading, search, setSearch, onAdd, onManage, onStatus, onDelete }) {
+  const q = search.trim().toLowerCase();
+  const rows = facilities.filter((f) => !q
+    || f.name?.toLowerCase().includes(q)
+    || f.npi?.includes(q)
+    || f.city?.toLowerCase().includes(q));
+  return (
+    <>
+      <div className="sa-stats">
+        <div className="sa-stat"><span className="sa-stat-k">Total Facilities</span><span className="sa-stat-v">{facilities.length}</span></div>
+        <div className="sa-stat"><span className="sa-stat-k">Active</span><span className="sa-stat-v"><span className="sa-stat-dot active" />{facilities.filter((f) => f.status === 'active').length}</span></div>
+        <div className="sa-stat"><span className="sa-stat-k">Inactive</span><span className="sa-stat-v"><span className="sa-stat-dot disabled" />{facilities.filter((f) => f.status !== 'active').length}</span></div>
+        <div className="sa-stat"><span className="sa-stat-k">Assigned members</span><span className="sa-stat-v">{facilities.reduce((n, f) => n + (f.providerCount || 0), 0)}</span></div>
+      </div>
+
+      <div className="sa-toolbar">
+        <input className="input search" placeholder="Search facility name, NPI or city…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <span className="spacer" />
+        <button className="btn sm" onClick={onAdd}>+ Add Facility</button>
+      </div>
+
+      <div className="card table-card">
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Facility</th>
+                <th>NPI</th>
+                <th>Location</th>
+                <th>Taxonomy</th>
+                <th>Members</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr><td colSpan={7} className="table-empty"><span className="spinner dark" /> Loading…</td></tr>
+              ) : rows.length === 0 ? (
+                <tr><td colSpan={7} className="table-empty">{q ? 'No facilities match your search.' : 'No facilities yet. Add a facility from the NPPES registry.'}</td></tr>
+              ) : (
+                rows.map((f) => (
+                  <tr key={f.uuid}>
+                    <td>
+                      <div className="fac-cell clickable" title="Manage facility" onClick={() => onManage(f)}>
+                        <div className="fac-cell-ic" aria-hidden="true" />
+                        <div className="stack">
+                          <span className="user-name">{f.name}</span>
+                          <span className="user-email">{f.address || '—'}</span>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="mono" style={{ color: 'var(--c-ink-2)', fontSize: 12 }}>{f.npi || '—'}</td>
+                    <td style={{ color: 'var(--c-ink-2)' }}>{[f.city, f.state].filter(Boolean).join(', ') || '—'}</td>
+                    <td style={{ color: 'var(--c-ink-2)', fontSize: 12.5 }}>{f.taxonomy || '—'}</td>
+                    <td><span className="fac-count">{f.providerCount || 0}</span></td>
+                    <td><span className={`badge ${f.status === 'active' ? 'active' : 'disabled'}`}><span className="dot" />{f.status === 'active' ? 'Active' : 'Inactive'}</span></td>
+                    <td>
+                      <div className="row-actions">
+                        <button className="act" title="Manage & assign" onClick={() => onManage(f)}>Manage</button>
+                        {f.status === 'active'
+                          ? <button className="act accent" title="Deactivate" onClick={() => onStatus(f, 'inactive')}>Deactivate</button>
+                          : <button className="act" title="Activate" onClick={() => onStatus(f, 'active')}>Activate</button>}
+                        <button className="act danger" title="Delete facility" onClick={() => onDelete(f)}>Delete</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </>
   );
 }

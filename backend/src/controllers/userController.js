@@ -12,8 +12,11 @@ import {
 import { hashPassword, validatePasswordPolicy } from '../utils/password.js';
 import { recordAudit } from '../services/auditService.js';
 import { findSpecialtyIdByUuid } from '../services/specialtyService.js';
+import { listUserFacilities, setUserFacilities } from '../services/facilityService.js';
 import { blindIndex } from '../utils/crypto.js';
 import { config, ROLES } from '../config/env.js';
+
+const auditCtx = (req) => ({ ip: req.ip, userAgent: req.get('user-agent') });
 
 /** The configured master-admin account — protected from demotion/deletion. */
 function isMasterAccount(row) {
@@ -46,6 +49,23 @@ function assertCanManageTarget(actor, targetRow) {
     e.code = 'FORBIDDEN';
     throw e;
   }
+}
+
+/** Facilities a provider/billing user is assigned to. */
+export async function facilities(req, res, next) {
+  try {
+    res.json({ facilities: await listUserFacilities(req.params.uuid) });
+  } catch (err) { next(err); }
+}
+
+/** Replace a provider/billing user's facility assignments. */
+export async function setFacilities(req, res, next) {
+  try {
+    const r = await setUserFacilities(req.params.uuid, req.body.facilityUuids || [], req.authUserId);
+    if (r.notFound) return res.status(404).json({ error: 'User not found or not assignable.', code: 'NOT_FOUND' });
+    await recordAudit({ actorUserId: req.authUserId, action: 'user.set_facilities', entityType: 'user', entityId: req.params.uuid, ...auditCtx(req), metadata: { count: (req.body.facilityUuids || []).length } });
+    res.json({ facilities: await listUserFacilities(req.params.uuid) });
+  } catch (err) { next(err); }
 }
 
 export async function list(req, res, next) {

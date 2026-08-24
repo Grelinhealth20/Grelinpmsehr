@@ -90,6 +90,8 @@ export const usersApi = {
   resetPassword: (uuid, temporaryPassword) =>
     api.post(`/users/${uuid}/reset-password`, { temporaryPassword }),
   remove: (uuid) => api.delete(`/users/${uuid}`),
+  facilities: (uuid) => api.get(`/users/${uuid}/facilities`),
+  setFacilities: (uuid, facilityUuids) => api.put(`/users/${uuid}/facilities`, { facilityUuids }),
 };
 
 // --- Specialties (admin) ---------------------------------------------------
@@ -101,6 +103,20 @@ export const specialtiesApi = {
 // --- Providers (picker for appointments) -----------------------------------
 export const providersApi = {
   list: () => api.get('/providers'),
+  myFacilities: () => api.get('/providers/facilities'),
+};
+
+// --- Facilities (Super/Master admin) ---------------------------------------
+export const facilitiesApi = {
+  list: (params) => api.get('/facilities', { params }),
+  nppes: (params) => api.get('/facilities/nppes', { params }),
+  get: (uuid) => api.get(`/facilities/${uuid}`),
+  create: (payload) => api.post('/facilities', payload),
+  update: (uuid, payload) => api.patch(`/facilities/${uuid}`, payload),
+  setStatus: (uuid, status) => api.post(`/facilities/${uuid}/status`, { status }),
+  remove: (uuid) => api.delete(`/facilities/${uuid}`),
+  assignProvider: (uuid, providerUuid) => api.post(`/facilities/${uuid}/providers`, { providerUuid }),
+  unassignProvider: (uuid, providerUuid) => api.delete(`/facilities/${uuid}/providers/${providerUuid}`),
 };
 
 // --- Patients (EHR face sheet) ---------------------------------------------
@@ -139,6 +155,7 @@ export const encountersApi = {
   list: () => api.get('/encounters'),
   // Server-side pagination (enterprise scale)
   listPatients: (params) => api.get('/encounters/patients', { params }),
+  clinicalRecords: (params) => api.get('/encounters/clinical-records', { params }),
   patientEncounters: (patientUuid, params) => api.get(`/encounters/patient/${patientUuid}/encounters`, { params }),
   create: (payload) => api.post('/encounters', payload),
   updateStatus: (appointmentUuid, payload) => api.patch(`/encounters/${appointmentUuid}`, payload),

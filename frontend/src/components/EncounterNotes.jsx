@@ -171,6 +171,10 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   }
 
   const signed = active?.status === 'signed';
+  // Read-only unless the viewer OWNS the note. A facility-wide MD may open another
+  // provider's note to review/sign, but only the author edits it (no silent
+  // failed saves, no cross-provider edits).
+  const readOnly = signed || active?.isOwner === false;
   const setSection = (k, v) => setContent((c) => ({ ...c, sections: { ...c.sections, [k]: v } }));
   const setVital = (k, v) => setContent((c) => ({ ...c, vitals: { ...(c.vitals || {}), [k]: v } }));
   const setRxAt = (i, k, v) => setContent((c) => ({ ...c, prescriptions: c.prescriptions.map((r, idx) => (idx === i ? { ...r, [k]: v } : r)) }));
@@ -180,7 +184,8 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   // Auto-save: debounced persistence of EVERY edit (vitals, sections, Rx, reason)
   // so nothing is ever lost. Skips signed (immutable) notes and the initial load.
   useEffect(() => {
-    if (!active || active.status === 'signed') return undefined;
+    // Never auto-save a signed note or a note the viewer does not own (read-only).
+    if (!active || active.status === 'signed' || active.isOwner === false) return undefined;
     if (skipSave.current) { skipSave.current = false; return undefined; }
     setAutoState('saving');
     const t = setTimeout(async () => {
@@ -194,7 +199,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
 
   // Flush any pending edit before closing (covers the debounce window).
   async function closeWithSave() {
-    if (active && active.status !== 'signed' && !skipSave.current) {
+    if (active && active.status !== 'signed' && active.isOwner !== false && !skipSave.current) {
       try { await encountersApi.updateNote(active.uuid, { content, reason }); } catch { /* best-effort */ }
     }
     onClose();
@@ -230,10 +235,13 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
     {picking && <NoteTypePicker busy={busy} onPick={createNote} onClose={() => setPicking(false)} />}
     <Modal size="full" title={`Encounter · ${encounter.patientName || 'Patient'}`} onClose={closeWithSave} footer={<>
       <span className="nt-foot-meta">Encounter {encNo(encounter.encounterNo)} · DOS {usDate(encounter.date)}</span>
-      {active && !signed && (
+      {active && !readOnly && (
         <span className={`nt-autosave ${autoState}`}>
           {autoState === 'saving' ? 'Saving…' : autoState === 'saved' ? 'All changes saved' : 'Auto-saves as you type'}
         </span>
+      )}
+      {active && !signed && active.isOwner === false && (
+        <span className="clr-draft-flag" style={{ marginLeft: 12 }}>Read-only · another provider's note</span>
       )}
       <span className="spacer" />
       <button className="btn ghost" onClick={closeWithSave}>Close</button>
@@ -290,7 +298,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
 
               {tab === 'note' ? (
                 <div className="nt-doc-scroll">
-                  <article className={`nt-doc-page ${signed ? 'is-signed' : 'is-editing'}`}>
+                  <article className={`nt-doc-page ${readOnly ? 'is-signed' : 'is-editing'}`}>
                     <header className="nt-page-head">
                       {encounter.facilityName && <div className="nt-page-fac">{encounter.facilityName}</div>}
                       <div className="nt-page-title">{NOTE_TYPES[active.noteType]?.label}</div>
@@ -302,10 +310,10 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
                       </div>
                     </header>
 
-                    {template.some((s) => s.key === 'vitals') && (!signed || VITALS.some((v) => content.vitals?.[v.k])) && (
-                      <section className={`nt-sec ${signed ? '' : 'nt-vitals-sec'}`}>
-                        <h4 className="nt-sec-h">{!signed && <SectionIcon k="vitals" />}Vital Signs</h4>
-                        {signed ? (
+                    {template.some((s) => s.key === 'vitals') && (!readOnly || VITALS.some((v) => content.vitals?.[v.k])) && (
+                      <section className={`nt-sec ${readOnly ? '' : 'nt-vitals-sec'}`}>
+                        <h4 className="nt-sec-h">{!readOnly && <SectionIcon k="vitals" />}Vital Signs</h4>
+                        {readOnly ? (
                           <div className="nt-sec-body"><p>{VITALS.map((v) => (content.vitals?.[v.k] ? `${v.label}: ${content.vitals[v.k]}` : null)).filter(Boolean).join('    ·    ')}</p></div>
                         ) : (
                           <div className="nt-vgrid">
@@ -320,10 +328,10 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
                       </section>
                     )}
 
-                    {template.filter((s) => s.key !== 'vitals' && (!signed || (content.sections[s.key] || '').trim())).map((s) => (
+                    {template.filter((s) => s.key !== 'vitals' && (!readOnly || (content.sections[s.key] || '').trim())).map((s) => (
                       <section className="nt-sec" key={s.key}>
-                        <h4 className="nt-sec-h">{!signed && <SectionIcon k={s.key} />}{s.label}</h4>
-                        {signed ? (
+                        <h4 className="nt-sec-h">{!readOnly && <SectionIcon k={s.key} />}{s.label}</h4>
+                        {readOnly ? (
                           <div className="nt-sec-body">
                             {(content.sections[s.key] || '').trim()
                               ? (content.sections[s.key]).split('\n').map((ln, i) => <p key={i}>{ln || ' '}</p>)
@@ -345,7 +353,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
                   </article>
                 </div>
               ) : (
-                signed ? (
+                readOnly ? (
                   <div className="nt-doc-scroll">
                     <article className="nt-doc-page">
                       <h4 className="nt-sec-h" style={{ marginBottom: 12 }}>Prescriptions</h4>
@@ -379,15 +387,15 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
                     {content.prescriptions.map((r, i) => (
                       <div className="nt-rx-item" key={i}>
                         <div className="nt-rx-grid">
-                          <Fld label="Medication" v={r.drug} on={(v) => setRxAt(i, 'drug', v)} d={signed} wide />
-                          <Fld label="Dose" v={r.dose} on={(v) => setRxAt(i, 'dose', v)} d={signed} />
-                          <Fld label="Route" v={r.route} on={(v) => setRxAt(i, 'route', v)} d={signed} />
-                          <Fld label="Frequency" v={r.frequency} on={(v) => setRxAt(i, 'frequency', v)} d={signed} />
-                          <Fld label="Quantity" v={r.quantity} on={(v) => setRxAt(i, 'quantity', v)} d={signed} />
-                          <Fld label="Refills" v={r.refills} on={(v) => setRxAt(i, 'refills', v)} d={signed} />
+                          <Fld label="Medication" v={r.drug} on={(v) => setRxAt(i, 'drug', v)} d={readOnly} wide />
+                          <Fld label="Dose" v={r.dose} on={(v) => setRxAt(i, 'dose', v)} d={readOnly} />
+                          <Fld label="Route" v={r.route} on={(v) => setRxAt(i, 'route', v)} d={readOnly} />
+                          <Fld label="Frequency" v={r.frequency} on={(v) => setRxAt(i, 'frequency', v)} d={readOnly} />
+                          <Fld label="Quantity" v={r.quantity} on={(v) => setRxAt(i, 'quantity', v)} d={readOnly} />
+                          <Fld label="Refills" v={r.refills} on={(v) => setRxAt(i, 'refills', v)} d={readOnly} />
                         </div>
                         <div className="nt-rx-sig">
-                          <Fld label="Sig / directions" v={r.sig} on={(v) => setRxAt(i, 'sig', v)} d={signed} wide />
+                          <Fld label="Sig / directions" v={r.sig} on={(v) => setRxAt(i, 'sig', v)} d={readOnly} wide />
                           <button className="act danger" onClick={() => removeRx(i)}>Remove</button>
                         </div>
                       </div>

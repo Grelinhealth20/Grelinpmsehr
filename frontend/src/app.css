@@ -308,30 +308,37 @@
    The current system stays shown in the .gh-module pill; each other system the
    user may enter appears as its own access button. */
 .gh-access-btn {
-  display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 16px; border-radius: 10px;
-  border: 1.5px solid var(--c-accent); background: #fff; cursor: pointer; font-family: inherit;
-  font-size: 12px; font-weight: 700; letter-spacing: 0.01em; color: #8a5a1f;
-  transition: color 0.18s var(--ease), border-color 0.18s var(--ease), background 0.18s var(--ease),
-    box-shadow 0.18s var(--ease), transform 0.18s var(--ease);
+  display: inline-flex; align-items: center; gap: 10px; height: 38px; padding: 0 16px; border-radius: 11px;
+  border: 1px solid rgba(9, 17, 33, 0.55); cursor: pointer; font-family: inherit;
+  font-size: 12px; font-weight: 700; letter-spacing: 0.01em; color: #fff;
+  background: linear-gradient(158deg, #1a2c4c 0%, var(--c-dark-blue) 100%);
+  box-shadow: 0 5px 16px rgba(9, 17, 33, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  transition: transform 0.18s var(--ease), box-shadow 0.18s var(--ease), background 0.18s var(--ease);
 }
 .gh-access-btn:hover {
-  color: #091121; background: var(--c-accent); border-color: var(--c-accent);
-  transform: translateY(-1px); box-shadow: 0 8px 18px rgba(207, 148, 85, 0.3);
+  transform: translateY(-1px);
+  background: linear-gradient(158deg, #21386a 0%, #0b1425 100%);
+  box-shadow: 0 12px 26px rgba(9, 17, 33, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
-.gh-access-btn:active { transform: translateY(0); box-shadow: none; }
-.gh-access-btn:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(207, 148, 85, 0.35); }
-/* Small arrow-into-panel glyph, CSS-drawn (font-independent) */
-.gh-access-ic { position: relative; width: 15px; height: 12px; flex-shrink: 0; }
-.gh-access-ic::before {
-  content: ''; position: absolute; left: 0; top: 1px; width: 9px; height: 10px; box-sizing: border-box;
-  border: 1.5px solid currentColor; border-right: none; border-radius: 2px 0 0 2px; opacity: 0.7;
+.gh-access-btn:active { transform: translateY(0); box-shadow: 0 3px 10px rgba(9, 17, 33, 0.22); }
+.gh-access-btn:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(39, 83, 179, 0.45); }
+/* Leading module glyph — a gold 2×2 app-grid (represents the target system) */
+.gh-access-ic {
+  display: block; width: 16px; height: 16px; flex-shrink: 0;
+  background:
+    radial-gradient(circle 1.7px at 4px 4px, var(--c-accent) 98%, transparent 100%),
+    radial-gradient(circle 1.7px at 12px 4px, var(--c-accent) 98%, transparent 100%),
+    radial-gradient(circle 1.7px at 4px 12px, var(--c-accent) 98%, transparent 100%),
+    radial-gradient(circle 1.7px at 12px 12px, var(--c-accent) 98%, transparent 100%);
 }
-.gh-access-ic::after {
-  content: ''; position: absolute; right: 0; top: 50%; width: 7px; height: 7px;
-  border-top: 1.5px solid currentColor; border-right: 1.5px solid currentColor;
-  transform: translateY(-50%) rotate(45deg); transition: transform 0.18s var(--ease);
+.gh-access-ic::before, .gh-access-ic::after { content: none; }
+/* Trailing arrow that slides forward on hover */
+.gh-access-btn::after {
+  content: ''; width: 6px; height: 6px; flex-shrink: 0; margin-left: 1px;
+  border-top: 1.6px solid rgba(255, 255, 255, 0.9); border-right: 1.6px solid rgba(255, 255, 255, 0.9);
+  transform: rotate(45deg); transition: transform 0.18s var(--ease);
 }
-.gh-access-btn:hover .gh-access-ic::after { transform: translateY(-50%) translateX(2px) rotate(45deg); }
+.gh-access-btn:hover::after { transform: translateX(3px) rotate(45deg); }
 
 .gh-right { margin-left: auto; display: flex; align-items: center; gap: 12px; position: relative; z-index: 2; }
 
@@ -412,7 +419,8 @@
   .gh-module { font-size: 10px; padding: 5px 9px; letter-spacing: 0.01em; }
   .gh-right { gap: 8px; }
   /* Access button collapses to an icon so it never crowds the account controls */
-  .gh-access-btn { padding: 0; width: 36px; justify-content: center; gap: 0; font-size: 0; }
+  .gh-access-btn { padding: 0; width: 38px; justify-content: center; gap: 0; font-size: 0; }
+  .gh-access-btn::after { display: none; }
   .gh-access-btn .gh-access-ic { font-size: 0; }
   .gh-logout-label { display: none; }
   .gh-logout { padding: 5px; gap: 0; }
@@ -421,6 +429,8 @@
 
 /* PMS blank canvas */
 .pms-canvas { flex: 1; background: #fff; }
+/* Blank access system inside the EHR content area (Clinical Records) — reserved. */
+.ehr-blank { flex: 1; min-height: 100%; background: #fff; border-radius: 14px; }
 
 /* ==========================================================================
    EHR SYSTEM — retractable, futuristic dark-navy sidebar + blank canvas
@@ -496,6 +506,32 @@
 .ehr-nav-label { overflow: hidden; transition: opacity 0.18s var(--ease); }
 .ehr-layout.is-collapsed .ehr-nav-item { justify-content: center; padding: 0; gap: 0; }
 .ehr-layout.is-collapsed .ehr-nav-label { opacity: 0; width: 0; }
+
+/* Sidebar footer — cross-system "Access {module}" switcher (moved from header) */
+.ehr-side-foot { flex-shrink: 0; padding: 10px; border-top: 1px solid rgba(255, 255, 255, 0.07); display: flex; flex-direction: column; gap: 6px; }
+.ehr-side-access {
+  display: flex; align-items: center; gap: 12px; width: 100%; height: 44px; padding: 0 14px;
+  border: 1px solid rgba(207, 148, 85, 0.42); border-radius: 11px; cursor: pointer; font-family: inherit;
+  font-size: 13px; font-weight: 700; color: #fff; white-space: nowrap;
+  background: linear-gradient(135deg, rgba(207, 148, 85, 0.2), rgba(207, 148, 85, 0.05));
+  transition: background 0.16s var(--ease), border-color 0.16s var(--ease), box-shadow 0.16s var(--ease), transform 0.16s var(--ease);
+}
+.ehr-side-access:hover { background: linear-gradient(135deg, rgba(207, 148, 85, 0.32), rgba(207, 148, 85, 0.1)); border-color: rgba(207, 148, 85, 0.72); box-shadow: 0 6px 16px rgba(207, 148, 85, 0.18); transform: translateY(-1px); }
+.ehr-side-access:active { transform: translateY(0); }
+.ehr-side-access:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(207, 148, 85, 0.6); }
+/* Gold 2×2 app-grid glyph (the target system) */
+.ehr-side-access-ic {
+  width: 20px; height: 20px; flex-shrink: 0;
+  background:
+    radial-gradient(circle 2px at 5px 5px, var(--c-accent) 98%, transparent 100%),
+    radial-gradient(circle 2px at 15px 5px, var(--c-accent) 98%, transparent 100%),
+    radial-gradient(circle 2px at 5px 15px, var(--c-accent) 98%, transparent 100%),
+    radial-gradient(circle 2px at 15px 15px, var(--c-accent) 98%, transparent 100%);
+}
+.ehr-side-access-arrow { margin-left: auto; width: 6px; height: 6px; flex-shrink: 0; border-top: 1.8px solid rgba(255, 255, 255, 0.88); border-right: 1.8px solid rgba(255, 255, 255, 0.88); transform: rotate(45deg); transition: transform 0.16s var(--ease); }
+.ehr-side-access:hover .ehr-side-access-arrow { transform: translateX(3px) rotate(45deg); }
+.ehr-layout.is-collapsed .ehr-side-access { justify-content: center; padding: 0; gap: 0; }
+.ehr-layout.is-collapsed .ehr-side-access-arrow { display: none; }
 
 /* Content canvas — light, enterprise. --flush holds a full-bleed module (scheduler) */
 .ehr-content {
@@ -780,6 +816,8 @@
   .ehr-sidebar .ehr-side-brand, .ehr-sidebar .ehr-nav-label { opacity: 0; width: 0; }
   .ehr-sidebar .ehr-side-top { justify-content: center; padding: 0; }
   .ehr-sidebar .ehr-nav-item { justify-content: center; padding: 0; gap: 0; }
+  .ehr-sidebar .ehr-side-access { justify-content: center; padding: 0; gap: 0; }
+  .ehr-sidebar .ehr-side-access-arrow { display: none; }
   .ehr-content { min-height: calc(100vh - 96px); }
   .sch-bar { gap: 10px; padding: 12px; }
   .sch-new { margin-left: 0; }
@@ -1141,3 +1179,83 @@
 .nt-rx-table tbody td { padding: 10px; border-bottom: 1px solid rgba(9,17,33,0.06); color: var(--c-ink); font-weight: 600; }
 .nt-rx-drug { font-weight: 800 !important; color: var(--c-dark-blue); }
 .nt-rx-sigrow td { font-style: italic; color: var(--c-ink-2); font-size: 12px; font-weight: 600 !important; padding-top: 2px !important; }
+
+/* ===== Facilities (Super Admin) — NPPES-verified records + assignment ===== */
+.fac-modal { display: flex; flex-direction: column; gap: 18px; }
+.fac-lbl { display: block; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.06em; color: var(--c-ink-3); margin-bottom: 8px; }
+.fac-search-box { position: relative; display: flex; align-items: center; }
+.fac-search-box .input { padding-left: 38px; height: 44px; font-size: 14px; }
+.fac-search-ic { position: absolute; left: 13px; width: 15px; height: 15px; border-radius: 50%; border: 2px solid var(--c-ink-3); opacity: 0.6; }
+.fac-search-ic::after { content: ''; position: absolute; right: -4px; bottom: -4px; width: 7px; height: 2px; background: var(--c-ink-3); transform: rotate(45deg); border-radius: 2px; }
+.fac-search-spin { position: absolute; right: 14px; }
+.fac-results { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; max-height: 320px; overflow-y: auto; padding: 2px; }
+.fac-result { display: flex; align-items: center; justify-content: space-between; gap: 12px; text-align: left; width: 100%; padding: 12px 14px; border: 1px solid var(--c-line); border-radius: 12px; background: #fff; cursor: pointer; font-family: inherit; transition: border-color 0.16s var(--ease), box-shadow 0.16s var(--ease), transform 0.16s var(--ease); }
+.fac-result:hover { border-color: rgba(39,83,179,0.4); box-shadow: 0 8px 20px rgba(9,17,33,0.08); transform: translateY(-1px); }
+.fac-result-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.fac-result-name { font-size: 14px; font-weight: 800; color: var(--c-dark-blue); }
+.fac-result-sub { font-size: 12px; color: var(--c-ink-3); font-weight: 600; }
+.fac-result-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex-shrink: 0; }
+.fac-result-npi { font-size: 11px; font-weight: 800; color: var(--c-blue); font-family: var(--font-mono, ui-monospace, monospace); letter-spacing: 0.02em; }
+.fac-result-tax { font-size: 10.5px; font-weight: 700; color: var(--c-ink-3); background: rgba(9,17,33,0.05); border-radius: 999px; padding: 3px 9px; white-space: nowrap; }
+.fac-empty { padding: 16px; text-align: center; color: var(--c-ink-3); font-size: 12.5px; font-weight: 600; border: 1px dashed var(--c-line); border-radius: 12px; }
+
+.fac-verify { border: 1px solid var(--c-line); border-radius: 14px; padding: 16px; background: #fbfcfe; }
+.fac-verify-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.fac-verify-title { font-size: 13px; font-weight: 800; color: var(--c-dark-blue); }
+.fac-badge { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; color: #0a7d3f; background: rgba(16,163,74,0.12); border: 1px solid rgba(16,163,74,0.3); padding: 3px 9px; border-radius: 999px; }
+.fac-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.fac-fld { display: flex; flex-direction: column; gap: 5px; }
+.fac-fld-wide { grid-column: span 2; }
+.fac-fld label { font-size: 10.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; color: var(--c-ink-3); }
+@media (max-width: 640px) { .fac-grid { grid-template-columns: 1fr 1fr; } .fac-fld-wide { grid-column: span 2; } }
+
+.fac-assign { border-top: 1px solid var(--c-line); padding-top: 16px; }
+.fac-assign-head { display: flex; flex-direction: column; gap: 3px; margin-bottom: 12px; }
+.fac-assign-hint { font-size: 12px; color: var(--c-ink-3); font-weight: 600; }
+.fac-assign-row { display: flex; gap: 10px; margin-bottom: 12px; }
+.fac-assign-row .select { flex: 1; }
+.fac-prov-list { display: flex; flex-direction: column; gap: 8px; }
+.fac-prov { display: flex; align-items: center; gap: 11px; padding: 9px 12px; border: 1px solid var(--c-line); border-radius: 11px; background: #fff; }
+.fac-prov-av { width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; font-size: 11px; font-weight: 800; color: #fff; background: linear-gradient(155deg, var(--c-dark-blue), #1d2c4d); flex-shrink: 0; }
+.fac-prov-nm { font-size: 13px; font-weight: 700; color: var(--c-dark-blue); display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.fac-role-pill { font-size: 9.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; padding: 2px 7px; border-radius: 999px; }
+.fac-role-pill.provider { color: var(--c-blue); background: rgba(39,83,179,0.1); }
+.fac-role-pill.billing { color: #8a5a1f; background: rgba(207,148,85,0.16); }
+.fac-foot { font-size: 12px; color: var(--c-ink-3); font-weight: 600; }
+
+/* Facilities table cell */
+.fac-cell { display: flex; align-items: center; gap: 11px; }
+.fac-cell.clickable { cursor: pointer; }
+.fac-cell-ic { width: 34px; height: 34px; border-radius: 9px; flex-shrink: 0; background: linear-gradient(155deg, var(--c-dark-blue), #1d2c4d); position: relative; }
+.fac-cell-ic::before { content: ''; position: absolute; inset: 9px; border-radius: 3px; border: 1.5px solid rgba(255,255,255,0.5); }
+.fac-cell-ic::after { content: ''; position: absolute; left: 12px; right: 12px; top: 16px; height: 1.5px; background: var(--c-accent); box-shadow: 0 4px 0 rgba(207,148,85,0.7); }
+.fac-count { display: inline-grid; place-items: center; min-width: 26px; height: 24px; padding: 0 8px; border-radius: 999px; background: rgba(39,83,179,0.1); color: var(--c-blue); font-size: 12px; font-weight: 800; }
+
+/* ===== Clinical Records (flat, facility-wide for MD / own for others) ===== */
+.clr { display: flex; flex-direction: column; height: 100%; padding: clamp(16px, 2.5vw, 28px); gap: 14px; }
+.clr-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.clr-title { display: flex; flex-direction: column; gap: 2px; }
+.clr-title-main { font-size: 18px; font-weight: 800; color: var(--c-dark-blue); letter-spacing: -0.01em; }
+.clr-title-sub { font-size: 12px; font-weight: 600; color: var(--c-ink-3); }
+.clr-tabs { display: inline-flex; gap: 4px; background: #eef1f6; border-radius: 10px; padding: 3px; }
+.clr-tab { border: none; background: transparent; padding: 7px 13px; font-family: inherit; font-size: 12.5px; font-weight: 700; color: var(--c-ink-2); border-radius: 8px; cursor: pointer; transition: background 0.14s var(--ease), color 0.14s var(--ease); }
+.clr-tab:hover { color: var(--c-dark-blue); }
+.clr-tab.is-on { background: #fff; color: var(--c-dark-blue); box-shadow: var(--shadow-sm); }
+.clr-table-wrap { overflow-x: auto; border-radius: 14px; border: 1.5px solid rgba(9,17,33,0.16); box-shadow: var(--shadow-md); background: #fff; }
+.clr-table { width: 100%; border-collapse: collapse; }
+.clr-table thead th { background: var(--c-dark-blue); color: #fff; font-size: 10.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.07em; padding: 12px 16px; text-align: left; white-space: nowrap; }
+.clr-table tbody td { padding: 13px 16px; font-size: 13px; font-weight: 700; color: var(--c-dark-blue); border-bottom: 1px solid rgba(39,83,179,0.1); vertical-align: middle; white-space: nowrap; }
+.clr-table tbody tr:last-child td { border-bottom: none; }
+.clr-table tbody tr:hover td { background: rgba(39,83,179,0.05); }
+.clr-table td.mono { font-family: var(--font-mono, ui-monospace, monospace); font-weight: 800; color: var(--c-blue); letter-spacing: 0.02em; }
+.clr-nm { color: var(--c-dark-blue) !important; }
+.clr-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 800; padding: 4px 10px; border-radius: 999px; }
+.clr-badge .dot { width: 7px; height: 7px; border-radius: 50%; }
+.clr-badge.signed { color: #0a7d3f; background: rgba(16,163,74,0.12); }
+.clr-badge.signed .dot { background: #10a34a; }
+.clr-badge.draft { color: #8a5a1f; background: rgba(207,148,85,0.16); }
+.clr-badge.draft .dot { background: var(--c-accent); }
+.clr-signed-flag, .clr-draft-flag { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 800; padding: 5px 12px; border-radius: 20px; margin-left: 12px; }
+.clr-signed-flag { color: #0a7d3f; background: rgba(16,163,74,0.1); border: 1px solid rgba(16,163,74,0.3); }
+.clr-signed-flag .dot { width: 8px; height: 8px; border-radius: 50%; background: #10a34a; }
+.clr-draft-flag { color: var(--c-ink-2); background: rgba(9,17,33,0.06); }

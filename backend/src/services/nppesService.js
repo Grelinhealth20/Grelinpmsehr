@@ -37,6 +37,61 @@ async function query(params) {
   } finally { clearTimeout(timer); }
 }
 
+// Extract the COMPLETE, accurate facility record from a raw NPPES result.
+function mapFacility(r) {
+  const b = r.basic || {};
+  const loc = locOf(r);
+  const mailing = (r.addresses || []).find((a) => a.address_purpose === 'MAILING') || null;
+  const primaryTax = (r.taxonomies || []).find((t) => t.primary) || (r.taxonomies || [])[0] || null;
+  const street = loc ? `${loc.address_1 || ''}${loc.address_2 ? ` ${loc.address_2}` : ''}`.trim() : '';
+  const official = [b.authorized_official_first_name, b.authorized_official_last_name].filter(Boolean).join(' ').trim();
+  return {
+    npi: String(r.number || ''),
+    name: titleCase(b.organization_name || ''),
+    address: titleCase(street),
+    city: titleCase(loc?.city || ''),
+    state: String(loc?.state || '').toUpperCase(),
+    zip: String(loc?.postal_code || '').slice(0, 5),
+    phone: loc?.telephone_number || b.authorized_official_telephone_number || '',
+    fax: loc?.fax_number || '',
+    taxonomy: primaryTax?.desc || '',
+    taxonomyCode: primaryTax?.code || '',
+    licenseState: primaryTax?.state || '',
+    authorizedOfficial: official ? `${official}${b.authorized_official_title_or_position ? `, ${b.authorized_official_title_or_position}` : ''}` : '',
+    enumerationDate: b.enumeration_date || '',
+    status: (b.status === 'A' ? 'active' : b.status === 'D' ? 'deactivated' : (b.status || '')),
+    mailingAddress: mailing ? titleCase(`${mailing.address_1 || ''}${mailing.address_2 ? ` ${mailing.address_2}` : ''}, ${mailing.city || ''}, ${(mailing.state || '').toUpperCase()} ${(mailing.postal_code || '').slice(0, 5)}`.replace(/^,\s*|,\s*,/g, '').trim()) : '',
+  };
+}
+
+/**
+ * Search the NPPES registry by NPI or organization name and return the COMPLETE
+ * details of each candidate (for a Super/Master admin to verify before saving).
+ * Triggered as soon as an NPI (10 digits) or a name is entered.
+ * @returns {Promise<Array<{npi,name,address,city,state,zip,phone,fax,taxonomy,...}>>}
+ */
+export async function searchFacilities({ q = '', npi = '', state = '', city = '', limit = 15 } = {}) {
+  if (!config.nppes.enabled) return [];
+  const cleanNpi = String(npi || '').replace(/\D/g, '');
+  const base = { version: '2.1', enumeration_type: 'NPI-2', limit: String(Math.min(50, Math.max(1, limit))) };
+
+  let results = [];
+  if (cleanNpi.length === 10) {
+    results = await query(new URLSearchParams({ ...base, number: cleanNpi }));
+  } else {
+    const cleanName = String(q || '').replace(/[.,]+$/, '').trim();
+    if (cleanName.length < 3) return [];
+    if (state) base.state = state;
+    if (city) base.city = city;
+    results = await query(new URLSearchParams({ ...base, organization_name: `${cleanName}*` }));
+    if (!results.length) {
+      const toks = normName(cleanName).split(' ').filter(Boolean).slice(0, 3).join(' ');
+      if (toks) results = await query(new URLSearchParams({ ...base, organization_name: `${toks}*` }));
+    }
+  }
+  return results.map(mapFacility).filter((f) => f.npi && f.name);
+}
+
 /**
  * @returns {Promise<null | {npi?, address?, city?, state?, zip?}>}
  */

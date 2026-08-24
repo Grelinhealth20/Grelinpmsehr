@@ -211,14 +211,33 @@ export const createEncounterSchema = z
   .object({ patientUuid: z.string().uuid(), encounterDate: isoDate })
   .strict();
 
+// Reason may be a string, empty, omitted, or null (a loaded note's reason is null).
+const noteReason = optStr(120).nullable();
+
 export const createNoteSchema = z
-  .object({ noteType: z.enum(NOTE_TYPES), reason: optStr(120), content: noteContentSchema })
+  .object({ noteType: z.enum(NOTE_TYPES), reason: noteReason, content: noteContentSchema })
   .strict();
 
 export const updateNoteSchema = z
-  .object({ noteType: z.enum(NOTE_TYPES).optional(), reason: optStr(120), content: noteContentSchema })
+  .object({ noteType: z.enum(NOTE_TYPES).optional(), reason: noteReason, content: noteContentSchema })
   .strict();
 
 export const signNoteSchema = z
-  .object({ reason: optStr(120), content: noteContentSchema })
+  .object({ reason: noteReason, content: noteContentSchema })
   .strict();
+
+// --- Facilities --------------------------------------------------------------
+const facilityBase = {
+  npi: z.union([z.string().regex(/^\d{10}$/, 'NPI must be 10 digits.'), z.literal('')]).optional(),
+  name: z.string().trim().min(1, 'Facility name is required.').max(200),
+  address: optStr(200), city: optStr(120),
+  state: z.union([z.string().trim().length(2), z.literal('')]).optional(),
+  zip: optStr(10), phone: optStr(24), taxonomy: optStr(160),
+  source: z.enum(['nppes', 'manual']).optional(),
+};
+export const createFacilitySchema = z.object(facilityBase).strict();
+export const updateFacilitySchema = z.object({ ...facilityBase, name: facilityBase.name.optional() }).partial().strict();
+export const facilityStatusSchema = z.object({ status: z.enum(['active', 'inactive']) }).strict();
+export const assignProviderSchema = z.object({ providerUuid: z.string().uuid() }).strict();
+export const providerUuidParam = z.object({ uuid: z.string().uuid(), providerUuid: z.string().uuid() });
+export const setUserFacilitiesSchema = z.object({ facilityUuids: z.array(z.string().uuid()).max(100) }).strict();

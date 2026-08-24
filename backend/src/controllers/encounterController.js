@@ -1,6 +1,6 @@
 import {
   listEncounters, updateEncounterStatus, createStandaloneEncounter,
-  listProviderPatients, listPatientEncounters,
+  listProviderPatients, listPatientEncounters, listClinicalRecords,
 } from '../services/encounterService.js';
 import {
   listNotes as listNotesSvc, createNote as createNoteSvc, getNote as getNoteSvc,
@@ -23,6 +23,17 @@ export async function listPatients(req, res, next) {
     const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize, 10) || 25));
     const q = (req.query.q || '').toString().slice(0, 80).trim();
     res.json(await listProviderPatients(req.authUserId, { page, pageSize, q }));
+  } catch (err) { next(err); }
+}
+
+/** Flat Clinical Records list (per note), scoped: MD → facility-wide; others → own. */
+export async function clinicalRecords(req, res, next) {
+  try {
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize, 10) || 25));
+    const q = (req.query.q || '').toString().slice(0, 80).trim();
+    const status = ['signed', 'draft'].includes(req.query.status) ? req.query.status : '';
+    res.json(await listClinicalRecords(req.authUserId, { page, pageSize, q, status }));
   } catch (err) { next(err); }
 }
 

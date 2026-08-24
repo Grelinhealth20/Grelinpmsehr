@@ -2,7 +2,7 @@ import {
   Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType,
   Table, TableRow, TableCell, WidthType, BorderStyle,
 } from 'docx';
-import { uploadPatientObject, s3Enabled, listPatientKeys } from './s3Service.js';
+import { uploadPatientObject, s3Enabled, listPatientKeys, ensurePatientFolder } from './s3Service.js';
 import { logger } from '../config/logger.js';
 
 /**
@@ -205,18 +205,22 @@ function safeName(patientName) {
  * the filename is de-duplicated (`_2`, `_3`, …) so a second note NEVER overwrites
  * a prior one. Best-effort: a storage failure never blocks the sign-off.
  */
-export async function storeSignedNoteDoc({ patientUuid, patientName, encounterDate, note, signerName, signedAt, patient }) {
+export async function storeSignedNoteDoc({ patientUuid, patientName, encounterDate, note, signerName, signedAt, patient, s3ctx }) {
   if (!s3Enabled() || !patientUuid) return null;
   try {
+    // The patient's hierarchical S3 folder (facility → provider → patient). Fall
+    // back to at least the patient uuid if provider/facility context is missing.
+    const ctx = s3ctx && s3ctx.patientUuid ? s3ctx : { patientUuid };
+    try { await ensurePatientFolder(ctx); } catch { /* folder markers are best-effort */ }
     // Filename: PatientName_EncounterID_MM-DD-YYYY.docx
     const encId = patient?.encounterNo ? `${String(patient.encounterNo).replace(/[^A-Za-z0-9]/g, '')}_` : '';
     const base = `${safeName(patientName)}_${encId}${usDateFile(encounterDate)}`;
-    const existing = new Set((await listPatientKeys(patientUuid, 'notes/')).map((k) => k.split('/').pop().toLowerCase()));
+    const existing = new Set((await listPatientKeys(ctx, 'notes/')).map((k) => k.split('/').pop().toLowerCase()));
     let fileName = `${base}.docx`;
     for (let n = 2; existing.has(fileName.toLowerCase()); n += 1) fileName = `${base}_${n}.docx`;
 
     const buffer = await buildNoteDocx({ patient: { ...patient, name: patientName }, encounterDate, note, signerName, signedAt });
-    const key = await uploadPatientObject(patientUuid, `notes/${fileName}`, buffer, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    const key = await uploadPatientObject(ctx, `notes/${fileName}`, buffer, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     logger.info({ key }, 'Signed note stored to patient folder');
     return key;
   } catch (e) {

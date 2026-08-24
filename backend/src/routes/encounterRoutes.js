@@ -16,6 +16,7 @@ router.post('/', csrfProtection, validate(createEncounterSchema), ctrl.createEnc
 
 // Server-side pagination (enterprise scale) — literal paths before param routes.
 router.get('/patients', ctrl.listPatients);
+router.get('/clinical-records', ctrl.clinicalRecords);
 router.get('/patient/:patientUuid/encounters', ctrl.patientEncounters);
 
 // Clinical notes. Literal `/notes/...` segments are declared before the

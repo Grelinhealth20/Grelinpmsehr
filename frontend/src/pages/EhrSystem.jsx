@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import AppointmentScheduler from './AppointmentScheduler.jsx';
 import Encounter from './Encounter.jsx';
+import ClinicalRecords from './ClinicalRecords.jsx';
 
 const CalendarIcon = (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -17,10 +18,19 @@ const EncounterIcon = (
     <circle cx="20" cy="10" r="2" />
   </svg>
 );
+// Stacked medical records — the symbol for the Clinical Records system.
+const RecordsIcon = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M7 3.5h7L18 7.5v11a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1v-14a1 1 0 0 1 1-1Z" />
+    <path d="M13.5 3.5v4h4" />
+    <path d="M12 11.5v4M10 13.5h4" />
+  </svg>
+);
 
 const NAV = [
   { key: 'appointment', label: 'Appointment', icon: CalendarIcon },
   { key: 'encounter', label: 'Patients & Encounters', icon: EncounterIcon },
+  { key: 'clinical', label: 'Clinical Records', icon: RecordsIcon },
 ];
 
 /**
@@ -28,7 +38,8 @@ const NAV = [
  * with a light, enterprise content area. First sidebar item is Appointment,
  * which opens the synced appointment scheduler.
  */
-export default function EhrSystem() {
+export default function EhrSystem({ systems = [], active = null, onSwitch = null }) {
+  const otherSystems = (systems || []).filter((s) => s.key !== active);
   const [collapsed, setCollapsed] = useState(() => {
     try { return localStorage.getItem('gh.ehr.sidebar') === '1'; } catch { return false; }
   });
@@ -70,11 +81,30 @@ export default function EhrSystem() {
             </button>
           ))}
         </nav>
+
+        {otherSystems.length > 0 && (
+          <div className="ehr-side-foot">
+            {otherSystems.map((s) => (
+              <button
+                key={s.key}
+                type="button"
+                className="ehr-side-access"
+                onClick={() => onSwitch?.(s.key)}
+                title={collapsed ? `Access ${s.label}` : undefined}
+              >
+                <span className="ehr-side-access-ic" aria-hidden="true" />
+                <span className="ehr-nav-label">Access {s.label}</span>
+                <span className="ehr-side-access-arrow" aria-hidden="true" />
+              </button>
+            ))}
+          </div>
+        )}
       </aside>
 
       <main className="ehr-content ehr-content--flush" data-view={view}>
         {view === 'appointment' && <AppointmentScheduler />}
         {view === 'encounter' && <Encounter />}
+        {view === 'clinical' && <ClinicalRecords />}
       </main>
     </div>
   );

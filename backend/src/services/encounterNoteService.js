@@ -1,8 +1,18 @@
 import { v4 as uuidv4 } from 'uuid';
 import { execute } from '../db/pool.js';
 import { encrypt, decrypt } from '../utils/crypto.js';
-import { getOwnedEncounterId } from './encounterService.js';
+import { getOwnedEncounterId, getAccessibleEncounterId } from './encounterService.js';
+import { viewerScope, isFacilityWide } from './accessScope.js';
 import { storeSignedNoteDoc } from './noteDocumentService.js';
+
+// Build the READ-access SQL condition for a note by the viewer's scope:
+// own note, OR a facility-wide MD whose facilities include the patient's facility.
+function noteAccess(scope, userId, params) {
+  params.pid = userId;
+  if (!isFacilityWide(scope)) return 'e.provider_id = :pid';
+  const ph = scope.facilityIds.map((id, i) => { params[`nf${i}`] = id; return `:nf${i}`; }).join(',');
+  return `(e.provider_id = :pid OR p.facility_id IN (${ph}))`;
+}
 
 /**
  * Clinical notes for an encounter. Body is encrypted PHI (structured JSON).
@@ -24,7 +34,8 @@ export function canSign(credentials) {
 }
 
 export async function listNotes(encounterUuid, providerId) {
-  const encId = await getOwnedEncounterId(encounterUuid, providerId);
+  // Read access: own encounter, or a facility-wide MD's facility encounter.
+  const encId = await getAccessibleEncounterId(encounterUuid, providerId);
   if (!encId) return null;
   const [rows] = await execute(
     `SELECT uuid, note_type, reason, status, billing_ready, signed_by_name,
@@ -41,12 +52,19 @@ export async function listNotes(encounterUuid, providerId) {
 }
 
 export async function getNote(noteUuid, providerId) {
+  // Read access by scope: own note, or a facility-wide MD's facility note.
+  const scope = await viewerScope(providerId);
+  const params = { u: noteUuid };
+  const access = noteAccess(scope, providerId, params);
   const [rows] = await execute(
     `SELECT n.uuid, n.note_type, n.reason, n.content_enc, n.status, n.billing_ready, n.signed_by_name,
-        DATE_FORMAT(n.signed_at, '%Y-%m-%dT%H:%i:%sZ') AS signed_at
-      FROM encounter_notes n JOIN encounters e ON e.id = n.encounter_id
-      WHERE n.uuid = :u AND e.provider_id = :pid LIMIT 1`,
-    { u: noteUuid, pid: providerId },
+        DATE_FORMAT(n.signed_at, '%Y-%m-%dT%H:%i:%sZ') AS signed_at,
+        (e.provider_id = :pid) AS is_owner
+      FROM encounter_notes n
+      JOIN encounters e ON e.id = n.encounter_id
+      LEFT JOIN patients p ON p.id = e.patient_id
+      WHERE n.uuid = :u AND ${access} LIMIT 1`,
+    params,
   );
   const r = rows[0];
   if (!r) return null;
@@ -55,6 +73,7 @@ export async function getNote(noteUuid, providerId) {
     content: r.content_enc ? (safeParse(r.content_enc) || {}) : {},
     status: r.status, billingReady: !!r.billing_ready,
     signedByName: r.signed_by_name, signedAt: r.signed_at,
+    isOwner: !!Number(r.is_owner),
   };
 }
 
@@ -92,13 +111,28 @@ export async function updateNote(noteUuid, providerId, { content, reason, noteTy
   return getNote(noteUuid, providerId);
 }
 
-/** Sign-off: MD-only. Persists final edits, locks the note, marks billing-ready. */
+/**
+ * Sign-off: MD-only. An MD may sign their own notes AND any note for a patient at
+ * a facility they are assigned to (e.g. approving another provider's note). Persists
+ * final edits, locks the note, and marks it billing-ready.
+ */
 export async function signNote(noteUuid, providerId, { content, reason } = {}) {
   const [urows] = await execute(`SELECT full_name_enc, credentials FROM users WHERE id = :id LIMIT 1`, { id: providerId });
   const u = urows[0];
   if (!u || !canSign(u.credentials)) return { forbidden: true };
 
-  const r = await findDraft(noteUuid, providerId);
+  // Resolve the note within the signer's scope (own OR facility-wide MD).
+  const scope = await viewerScope(providerId);
+  const sp = { u: noteUuid };
+  const access = noteAccess(scope, providerId, sp);
+  const [srows] = await execute(
+    `SELECT n.id, n.status FROM encounter_notes n
+       JOIN encounters e ON e.id = n.encounter_id
+       LEFT JOIN patients p ON p.id = e.patient_id
+      WHERE n.uuid = :u AND ${access} LIMIT 1`,
+    sp,
+  );
+  const r = srows[0];
   if (!r) return null;
   if (r.status === 'signed') return { locked: true };
   const signerName = u.full_name_enc ? decrypt(u.full_name_enc) : null;
@@ -112,10 +146,13 @@ export async function signNote(noteUuid, providerId, { content, reason } = {}) {
   // Auto-generate the Word document of the finalized note into the patient folder.
   const [meta] = await execute(
     `SELECT p.uuid AS patient_uuid, p.mrn, p.demographics_enc, p.facility_enc, e.encounter_no,
+        pu.uuid AS provider_uuid, f.uuid AS facility_uuid,
         DATE_FORMAT(COALESCE(e.encounter_date, a.appt_date), '%Y-%m-%d') AS dos
       FROM encounter_notes n JOIN encounters e ON e.id = n.encounter_id
       LEFT JOIN appointments a ON a.id = e.appointment_id
       LEFT JOIN patients p ON p.id = e.patient_id
+      LEFT JOIN users pu ON pu.id = p.provider_id
+      LEFT JOIN facilities f ON f.id = p.facility_id
       WHERE n.id = :id LIMIT 1`,
     { id: r.id },
   );
@@ -128,6 +165,9 @@ export async function signNote(noteUuid, providerId, { content, reason } = {}) {
       patientUuid: m.patient_uuid, patientName, encounterDate: m.dos || '',
       note: signed, signerName, signedAt: signed.signedAt || new Date().toISOString().slice(0, 19).replace('T', ' '),
       patient: { mrn: m.mrn, dob: demo.dob, facilityName: fac.facilityName, encounterNo: m.encounter_no },
+      // Patient's OWN provider + facility drive the S3 folder (not the signer's) —
+      // the document always lands in the patient's folder regardless of who signs.
+      s3ctx: { patientUuid: m.patient_uuid, providerUuid: m.provider_uuid, facilityUuid: m.facility_uuid },
     });
   }
   return signed;

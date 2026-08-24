@@ -217,4 +217,51 @@ export const SCHEMA_STATEMENTS = [
     CONSTRAINT fk_note_encounter FOREIGN KEY (encounter_id) REFERENCES encounters(id) ON DELETE CASCADE,
     CONSTRAINT fk_note_provider FOREIGN KEY (provider_id) REFERENCES users(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+  // --- Facilities ------------------------------------------------------------
+  // First-class facility records. Facility data is PUBLIC (CMS NPPES registry),
+  // NOT PHI, so it is stored in plaintext and is searchable. A Super/Master admin
+  // verifies the NPPES-fetched details before saving.
+  `CREATE TABLE IF NOT EXISTS facilities (
+    id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    uuid          CHAR(36)        NOT NULL,
+    npi           VARCHAR(10)     NULL,
+    name          VARCHAR(200)    NOT NULL,
+    address       VARCHAR(200)    NULL,
+    city          VARCHAR(120)    NULL,
+    state         VARCHAR(2)      NULL,
+    zip           VARCHAR(10)     NULL,
+    phone         VARCHAR(24)     NULL,
+    taxonomy      VARCHAR(160)    NULL,
+    status        ENUM('active','inactive') NOT NULL DEFAULT 'active',
+    source        VARCHAR(16)     NOT NULL DEFAULT 'nppes',
+    verified_by   BIGINT UNSIGNED NULL,
+    created_by    BIGINT UNSIGNED NULL,
+    created_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_fac_uuid (uuid),
+    UNIQUE KEY uq_fac_npi (npi),
+    KEY idx_fac_name (name),
+    KEY idx_fac_state (state),
+    CONSTRAINT fk_fac_verified_by FOREIGN KEY (verified_by) REFERENCES users(id) ON DELETE SET NULL,
+    CONSTRAINT fk_fac_created_by FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+  // --- Provider ⇄ Facility assignments (many-to-many) ------------------------
+  // Governs which facilities a provider may work at. Patient/encounter access is
+  // scoped through these assignments to strictly prevent cross-facility sharing.
+  `CREATE TABLE IF NOT EXISTS provider_facilities (
+    id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    provider_id   BIGINT UNSIGNED NOT NULL,
+    facility_id   BIGINT UNSIGNED NOT NULL,
+    assigned_by   BIGINT UNSIGNED NULL,
+    created_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_pf (provider_id, facility_id),
+    KEY idx_pf_facility (facility_id),
+    CONSTRAINT fk_pf_provider FOREIGN KEY (provider_id) REFERENCES users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_pf_facility FOREIGN KEY (facility_id) REFERENCES facilities(id) ON DELETE CASCADE,
+    CONSTRAINT fk_pf_assigned_by FOREIGN KEY (assigned_by) REFERENCES users(id) ON DELETE SET NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 ];

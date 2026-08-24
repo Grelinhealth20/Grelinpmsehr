@@ -86,9 +86,11 @@ export default function Workspace() {
 
   return (
     <div className="app-shell">
-      <AppHeader systems={systems} active={active} onSwitch={switchTo} />
+      {/* The system switcher lives in the EHR sidebar. The billing module has no
+          sidebar, so the header keeps the switcher there to avoid a dead-end. */}
+      <AppHeader systems={systems} active={active} onSwitch={switchTo} switcher={active !== 'ehr'} />
       {active === 'ehr' ? (
-        <EhrSystem />
+        <EhrSystem systems={systems} active={active} onSwitch={switchTo} />
       ) : (
         /* Billing Module — intentionally blank, reserved for its modules. */
         <main className="pms-canvas" data-system={active} />

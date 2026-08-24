@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { execute } from '../db/pool.js';
 import { decrypt, blindIndex } from '../utils/crypto.js';
+import { viewerScope, patientScopeWhere, isFacilityWide } from './accessScope.js';
 
 /**
  * Encounter worklist. Each of a provider's appointments is presented as an
@@ -163,8 +164,11 @@ export async function listProviderPatients(providerId, { page = 1, pageSize = 25
   // prepared statements reject placeholders in LIMIT/OFFSET.
   const lim = Math.max(1, Math.min(100, Number(pageSize) || 25));
   const off = Math.max(0, (Number(page) - 1) * lim);
-  const params = { pid: providerId };
-  let where = 'p.provider_id = :pid';
+  // Scope: MD → facility-wide (all providers at their facilities); others → own.
+  const scope = await viewerScope(providerId);
+  const sc = patientScopeWhere(scope, providerId, 'p');
+  const params = { ...sc.params };
+  let where = sc.sql;
   if (q) {
     // MRN is plaintext (partial match); name is searchable only by exact full
     // name via its blind index (PHI is encrypted — no partial name scans).
@@ -172,23 +176,19 @@ export async function listProviderPatients(providerId, { page = 1, pageSize = 25
     params.qlike = `%${q}%`;
     params.qbidx = blindIndex(q.trim().toLowerCase());
   }
-  // Run the page query, the total count, and the provider-name lookup CONCURRENTLY.
-  // These are independent, so on a remote DB this collapses three ~round-trips
-  // into one wall-clock round-trip instead of three sequential ones.
-  const [[rows], [cnt], [me]] = await Promise.all([
+  const [[rows], [cnt]] = await Promise.all([
     execute(
-      `SELECT p.uuid, p.mrn, p.demographics_enc, p.facility_enc,
+      `SELECT p.uuid, p.mrn, p.demographics_enc, p.facility_enc, u.full_name_enc AS owner_name_enc,
           (SELECT COUNT(*) FROM encounters e WHERE e.patient_id = p.id) AS enc_count
         FROM patients p
+        LEFT JOIN users u ON u.id = p.provider_id
         WHERE ${where}
         ORDER BY p.id DESC
         LIMIT ${lim} OFFSET ${off}`,
       params,
     ),
     execute(`SELECT COUNT(*) AS total FROM patients p WHERE ${where}`, params),
-    execute(`SELECT full_name_enc FROM users WHERE id = :pid LIMIT 1`, { pid: providerId }),
   ]);
-  const providerName = me[0]?.full_name_enc ? decrypt(me[0].full_name_enc) : null;
   return {
     patients: rows.map((r) => {
       const demo = jsonFromEnc(r.demographics_enc);
@@ -198,7 +198,9 @@ export async function listProviderPatients(providerId, { page = 1, pageSize = 25
         mrn: r.mrn,
         patientName: demo ? `${demo.firstName || ''} ${demo.lastName || ''}`.trim() : null,
         facilityName: fac?.facilityName || null,
-        renderingProvider: providerName,
+        // The patient's OWNING provider (rendering provider) — for the MD's
+        // facility-wide view each row may belong to a different provider.
+        renderingProvider: r.owner_name_enc ? decrypt(r.owner_name_enc) : null,
         encounterCount: Number(r.enc_count || 0),
       };
     }),
@@ -208,13 +210,20 @@ export async function listProviderPatients(providerId, { page = 1, pageSize = 25
   };
 }
 
-/** Paginated encounters for ONE of the provider's patients (10/page default). */
+/** Paginated encounters for one patient (10/page). Scope: MD → all encounters at
+ *  their facility for this patient; other providers → their own encounters only. */
 export async function listPatientEncounters(providerId, patientUuid, { page = 1, pageSize = 10 } = {}) {
-  const [pr] = await execute(`SELECT id FROM patients WHERE uuid = :u AND provider_id = :pid LIMIT 1`, { u: patientUuid, pid: providerId });
-  if (!pr[0]) return null; // not the provider's patient → 404 (strict isolation)
+  // Resolve + authorize the patient by the viewer's scope (strict isolation).
+  const scope = await viewerScope(providerId);
+  const sc = patientScopeWhere(scope, providerId, 'p');
+  const [pr] = await execute(`SELECT p.id FROM patients p WHERE p.uuid = :u AND ${sc.sql} LIMIT 1`, { u: patientUuid, ...sc.params });
+  if (!pr[0]) return null; // not visible to this viewer → 404
   const pidInt = pr[0].id;
   const lim = Math.max(1, Math.min(50, Number(pageSize) || 10));
   const off = Math.max(0, (Number(page) - 1) * lim);
+  // A facility-wide MD sees every encounter for the patient; others see only theirs.
+  const encWhere = isFacilityWide(scope) ? 'e.patient_id = :pid' : 'e.patient_id = :pid AND e.provider_id = :prov';
+  const encParams = isFacilityWide(scope) ? { pid: pidInt } : { pid: pidInt, prov: providerId };
   const [[rows], [cnt]] = await Promise.all([
     execute(
       `SELECT e.uuid, e.encounter_no,
@@ -225,12 +234,12 @@ export async function listPatientEncounters(providerId, patientUuid, { page = 1,
         LEFT JOIN appointments a ON a.id = e.appointment_id
         LEFT JOIN users rp ON rp.id = a.rendering_provider_id
         LEFT JOIN users u ON u.id = e.provider_id
-        WHERE e.patient_id = :pid AND e.provider_id = :prov
+        WHERE ${encWhere}
         ORDER BY COALESCE(e.encounter_date, a.appt_date) DESC, e.id DESC
         LIMIT ${lim} OFFSET ${off}`,
-      { pid: pidInt, prov: providerId },
+      encParams,
     ),
-    execute(`SELECT COUNT(*) AS total FROM encounters e WHERE e.patient_id = :pid AND e.provider_id = :prov`, { pid: pidInt, prov: providerId }),
+    execute(`SELECT COUNT(*) AS total FROM encounters e WHERE ${encWhere}`, encParams),
   ]);
   return {
     encounters: rows.map((r) => ({
@@ -272,6 +281,104 @@ export async function getOwnedEncounterId(encounterUuid, providerId) {
     { u: encounterUuid, pid: providerId },
   );
   return rows[0]?.id || null;
+}
+
+/**
+ * READ access to an encounter by the viewer's scope: the encounter's own provider,
+ * OR a facility-wide MD whose assigned facilities include the patient's facility.
+ * Returns the internal encounter id, or null when out of scope (strict isolation).
+ */
+export async function getAccessibleEncounterId(encounterUuid, userId, scope = null) {
+  const sc = scope || (await viewerScope(userId));
+  if (!isFacilityWide(sc)) return getOwnedEncounterId(encounterUuid, userId);
+  const params = { u: encounterUuid, pid: userId };
+  const ph = sc.facilityIds.map((id, i) => { params[`f${i}`] = id; return `:f${i}`; }).join(',');
+  const [rows] = await execute(
+    `SELECT e.id FROM encounters e LEFT JOIN patients p ON p.id = e.patient_id
+      WHERE e.uuid = :u AND (e.provider_id = :pid OR p.facility_id IN (${ph})) LIMIT 1`,
+    params,
+  );
+  return rows[0]?.id || null;
+}
+
+// Aggregates for the flat Clinical Records list — per note, not grouped.
+const NOTE_STATUS = "n.status"; // 'draft' | 'signed'
+
+/**
+ * Flat, paginated Clinical Records list (one row per clinical note).
+ * Scope: a facility-wide MD sees every note for patients at their facilities
+ * (across all providers); every other provider sees ONLY their own notes.
+ * Enterprise-grade: server-side pagination on indexed columns, no cross-facility
+ * or cross-provider leakage.
+ */
+export async function listClinicalRecords(userId, { page = 1, pageSize = 25, q = '', status = '' } = {}) {
+  const scope = await viewerScope(userId);
+  const lim = Math.max(1, Math.min(100, Number(pageSize) || 25));
+  const off = Math.max(0, (Number(page) - 1) * lim);
+  const params = {};
+  let where;
+  if (isFacilityWide(scope)) {
+    const ph = scope.facilityIds.map((id, i) => { params[`sf${i}`] = id; return `:sf${i}`; }).join(',');
+    where = `p.facility_id IN (${ph})`;
+  } else {
+    where = `n.provider_id = :uid`;
+    params.uid = userId;
+  }
+  if (status === 'signed') where += ` AND ${NOTE_STATUS} = 'signed'`;
+  else if (status === 'draft') where += ` AND ${NOTE_STATUS} = 'draft'`;
+  if (q) {
+    where += ' AND (p.mrn LIKE :qlike OR e.encounter_no LIKE :qlike OR p.name_bidx = :qbidx)';
+    params.qlike = `%${q}%`;
+    params.qbidx = blindIndex(q.trim().toLowerCase());
+  }
+  const [[rows], [cnt]] = await Promise.all([
+    execute(
+      `SELECT n.uuid AS note_uuid, n.note_type, n.status, n.signed_by_name,
+          e.uuid AS enc_uuid, e.encounter_no,
+          DATE_FORMAT(COALESCE(e.encounter_date, a.appt_date), '%Y-%m-%d') AS dos,
+          p.uuid AS patient_uuid, p.mrn, p.demographics_enc, p.facility_enc,
+          u.full_name_enc AS rendering_enc
+        FROM encounter_notes n
+        JOIN encounters e ON e.id = n.encounter_id
+        LEFT JOIN appointments a ON a.id = e.appointment_id
+        LEFT JOIN patients p ON p.id = e.patient_id
+        LEFT JOIN users u ON u.id = n.provider_id
+        WHERE ${where}
+        ORDER BY n.created_at DESC
+        LIMIT ${lim} OFFSET ${off}`,
+      params,
+    ),
+    execute(
+      `SELECT COUNT(*) AS total FROM encounter_notes n
+        JOIN encounters e ON e.id = n.encounter_id
+        LEFT JOIN patients p ON p.id = e.patient_id
+        WHERE ${where}`,
+      params,
+    ),
+  ]);
+  return {
+    records: rows.map((r) => {
+      const demo = jsonFromEnc(r.demographics_enc);
+      const fac = jsonFromEnc(r.facility_enc);
+      return {
+        noteUuid: r.note_uuid,
+        encounterUuid: r.enc_uuid,
+        encounterNo: r.encounter_no,
+        patientUuid: r.patient_uuid,
+        mrn: r.mrn || null,
+        patientName: demo ? `${demo.firstName || ''} ${demo.lastName || ''}`.trim() : null,
+        facilityName: fac?.facilityName || null,
+        renderingProvider: r.rendering_enc ? decrypt(r.rendering_enc) : null,
+        noteType: r.note_type,
+        status: r.status, // 'signed' | 'draft'
+        signedByName: r.signed_by_name || null,
+        date: r.dos || null,
+      };
+    }),
+    total: Number(cnt[0].total),
+    page: Number(page),
+    pageSize: Number(pageSize),
+  };
 }
 
 /** Upsert the editable encounter state for one of the provider's appointments. */

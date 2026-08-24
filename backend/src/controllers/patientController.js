@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import {
-  listPatients, createPatient, updatePatient, deletePatient, getRawByUuid, toPublicPatient,
+  listPatients, createPatient, updatePatient, deletePatient, getRawByUuid, toPublicPatient, getPatientS3Ctx,
 } from '../services/patientService.js';
 import {
   listDocuments, getRawDocByUuid, findDocByType,
@@ -50,7 +50,7 @@ export async function create(req, res, next) {
   try {
     const { demographics, insurance, facility, emergencyContact, emergencyContacts } = req.body;
     const patient = await createPatient({ providerId: req.authUserId, demographics, insurance, facility, emergencyContact, emergencyContacts, createdBy: req.authUserId });
-    if (s3Enabled()) { try { await ensurePatientFolder(patient.uuid); } catch { /* folder marker is best-effort */ } }
+    if (s3Enabled()) { try { const s3ctx = await getPatientS3Ctx(patient.uuid); if (s3ctx) await ensurePatientFolder(s3ctx); } catch { /* folder marker is best-effort */ } }
     await recordAudit({ actorUserId: req.authUserId, action: 'patient.create', entityType: 'patient', entityId: patient.uuid, ...ctx(req), metadata: { mrn: patient.mrn } });
     res.status(201).json({ patient });
   } catch (err) { next(err); }
@@ -78,11 +78,15 @@ export async function remove(req, res, next) {
   try {
     const row = await ownedPatientOr404(req);
     if (s3Enabled()) {
-      // Purge the patient's ENTIRE S3 folder (records, signed note documents,
-      // the .keep marker — every object under patients/{uuid}/) so no PHI is left.
+      // Purge the patient's ENTIRE S3 folder (records, signed note documents, the
+      // .keep marker — every object under the patient's hierarchical prefix) so no
+      // PHI is left behind.
       try {
-        const keys = await listPatientKeys(row.uuid);
-        if (keys.length) await deleteObjects(keys);
+        const s3ctx = await getPatientS3Ctx(row.uuid);
+        if (s3ctx) {
+          const keys = await listPatientKeys(s3ctx);
+          if (keys.length) await deleteObjects(keys);
+        }
       } catch { /* best-effort */ }
     }
     await deletePatient(row.uuid);
@@ -119,8 +123,10 @@ export async function uploadDoc(req, res, next) {
       if (existing) { try { await deleteObject(existing.s3_key); } catch { /* ignore */ } await deleteDocumentRecord(existing.uuid); }
     }
 
-    const key = `${docType}/${uuidv4()}${ext}`; // stored under patients/{patientUuid}/...
-    const s3Key = await uploadPatientObject(row.uuid, key, req.file.buffer, req.file.mimetype);
+    const key = `${docType}/${uuidv4()}${ext}`; // stored under the patient's hierarchical folder
+    const s3ctx = await getPatientS3Ctx(row.uuid);
+    if (s3ctx) { try { await ensurePatientFolder(s3ctx); } catch { /* best-effort */ } }
+    const s3Key = await uploadPatientObject(s3ctx, key, req.file.buffer, req.file.mimetype);
     const doc = await createDocumentRecord({
       patientId: row.id, docType, s3Key, fileName: req.file.originalname,
       contentType: req.file.mimetype, size: req.file.size, uploadedBy: req.authUserId,

@@ -10,6 +10,7 @@ import {
   updateUserSchema,
   statusSchema,
   adminResetPasswordSchema,
+  setUserFacilitiesSchema,
   uuidParam,
 } from '../validation/schemas.js';
 
@@ -44,5 +45,9 @@ router.post(
   userController.adminResetPassword,
 );
 router.delete('/:uuid', csrfProtection, validate(uuidParam, 'params'), userController.remove);
+
+// Facility assignments for a provider / billing user.
+router.get('/:uuid/facilities', validate(uuidParam, 'params'), userController.facilities);
+router.put('/:uuid/facilities', csrfProtection, validate(uuidParam, 'params'), validate(setUserFacilitiesSchema), userController.setFacilities);
 
 export default router;

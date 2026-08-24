@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import Modal from '../../components/Modal.jsx';
 import PasswordInput from '../../components/PasswordInput.jsx';
-import { usersApi, specialtiesApi, toApiError } from '../../lib/api.js';
+import { usersApi, specialtiesApi, facilitiesApi, toApiError } from '../../lib/api.js';
 import { evaluatePassword } from '../../lib/passwordPolicy.js';
 
 const ROLE_OPTIONS = [
@@ -56,6 +56,24 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
   const [tempPassword, setTempPassword] = useState('');
   const [err, setErr] = useState(null);
   const [busy, setBusy] = useState(false);
+
+  // Facility assignment (providers + billing users) — governs their billing
+  // facility and cross-facility isolation.
+  const roleNow = isEdit ? role : (lockedRole || role);
+  const isAssignable = roleNow === 'provider' || roleNow === 'billing';
+  const [allFacilities, setAllFacilities] = useState([]);
+  const [facilityUuids, setFacilityUuids] = useState([]);
+
+  useEffect(() => {
+    if (!isAssignable) return;
+    facilitiesApi.list({ status: 'active' }).then(({ data }) => setAllFacilities(data.facilities || [])).catch(() => {});
+    if (isEdit && user?.uuid) {
+      usersApi.facilities(user.uuid).then(({ data }) => setFacilityUuids((data.facilities || []).map((f) => f.uuid))).catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAssignable]);
+
+  const toggleFacility = (u) => setFacilityUuids((l) => (l.includes(u) ? l.filter((x) => x !== u) : [...l, u]));
 
   // Specialty (providers only)
   const isProvider = (isEdit ? role : lockedRole || role) === 'provider';
@@ -123,8 +141,9 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
         };
         if (!isMasterUser) payload.role = role; // master admin role is immutable
         await usersApi.update(user.uuid, payload);
+        if (isAssignable) await usersApi.setFacilities(user.uuid, facilityUuids);
       } else {
-        await usersApi.create({
+        const { data } = await usersApi.create({
           email: email.trim().toLowerCase(),
           fullName: fullName.trim(),
           role: lockedRole || role,
@@ -133,6 +152,10 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
           specialtyUuid: isProvider ? specialtyUuid || null : undefined,
           temporaryPassword: tempPassword,
         });
+        // Assign the selected facilities to the freshly created user.
+        if (isAssignable && data.user?.uuid && facilityUuids.length) {
+          await usersApi.setFacilities(data.user.uuid, facilityUuids);
+        }
       }
       onSaved(isEdit ? 'User updated.' : 'User created. A temporary password was set.');
     } catch (e2) {
@@ -244,6 +267,27 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
                 {addingSpec ? <span className="spinner dark" /> : '+ Add'}
               </button>
             </div>
+          </div>
+        )}
+
+        {isAssignable && (
+          <div className="field">
+            <label>Assigned facilities <span className="muted">(billing facility &amp; data isolation)</span></label>
+            <div className="spec-chips">
+              {allFacilities.map((f) => (
+                <button
+                  key={f.uuid}
+                  type="button"
+                  className={`spec-chip ${facilityUuids.includes(f.uuid) ? 'active' : ''}`}
+                  title={[f.city, f.state].filter(Boolean).join(', ')}
+                  onClick={() => toggleFacility(f.uuid)}
+                >
+                  {f.name}
+                </button>
+              ))}
+              {allFacilities.length === 0 && <span className="hint">No facilities yet — add facilities under the Facilities tab first.</span>}
+            </div>
+            {facilityUuids.length > 0 && <span className="hint">{facilityUuids.length} facilit{facilityUuids.length === 1 ? 'y' : 'ies'} assigned.</span>}
           </div>
         )}
 
