@@ -46,6 +46,31 @@ function Field({ label, value, onChange, type = 'text', required, options, place
   );
 }
 
+// Section-header icons (thin-line, enterprise).
+const SEC_ICONS = {
+  person: 'M12 12.5a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM5 20a7 7 0 0 1 14 0',
+  shield: 'M12 3l7 3v5c0 4.6-3 7.9-7 9-4-1.1-7-4.4-7-9V6l7-3Zm-3 8 2.2 2.2L15 9',
+  contact: 'M4.5 5.5h15v13h-15zM4.5 9.5h15M8 13.5h4M8 16h6',
+  building: 'M4 21V5.5A1.5 1.5 0 0 1 5.5 4h8A1.5 1.5 0 0 1 15 5.5V21M15 21V10h3.5A1.5 1.5 0 0 1 20 11.5V21M7.5 8h2M7.5 12h2M7.5 16h2',
+  file: 'M7 3.5h6.5L18 8v11.5a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1v-15a1 1 0 0 1 1-1ZM13 3.5V8h5',
+  home: 'M4 11.5 12 4l8 7.5M6 10v9.5h12V10',
+};
+function SecHead({ icon, title, note, children }) {
+  return (
+    <div className="fs-sh">
+      <span className="fs-sh-ic">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={SEC_ICONS[icon]} /></svg>
+      </span>
+      <span className="fs-sh-t">{title}</span>
+      {note && <span className="fs-sh-note">{note}</span>}
+      <span className="spacer" />
+      {children}
+    </div>
+  );
+}
+// Sub-group label inside a section (e.g. "Patient", "SNF facility").
+function SubLabel({ children }) { return <div className="fs-sub">{children}</div>; }
+
 // Provider-facing steps shown while the document is being read (clinical framing).
 const EXTRACT_STEPS = [
   'Scanning the document…',
@@ -451,7 +476,7 @@ export default function PatientModal({ uuid = null, docMode = 'license', onClose
           <>
           {docMode === 'records' && (
             <div className="fs-section">
-              <div className="fs-section-h">Face Sheets &amp; PCC Documents{!pUuid && <span className="fs-section-note"> — auto-fill now, files are saved after you create the patient</span>}</div>
+              <SecHead icon="file" title="Face sheets & PCC documents" note={!pUuid ? 'auto-fill now — files save after you create the patient' : undefined} />
               {pUuid
                 ? <RecordsUpload patientUuid={pUuid} docs={docs} onChanged={reloadDocs} onExtract={runExtract} disabled={false} />
                 : <AutofillDrop onFile={runExtractStateless} busy={extracting} />}
@@ -459,7 +484,8 @@ export default function PatientModal({ uuid = null, docMode = 'license', onClose
           )}
 
           <div className="fs-section">
-            <div className="fs-section-h">Demographics</div>
+            <SecHead icon="person" title="Demographics" note="Patient identity, address & nursing facility" />
+            <SubLabel>Patient</SubLabel>
             <div className="fs-grid fs-grid-3">
               <Field label="First name" required value={form.demographics.firstName} onChange={(v) => setD('firstName', v)} maxLength={80} />
               <Field label="Last name" required value={form.demographics.lastName} onChange={(v) => setD('lastName', v)} maxLength={80} />
@@ -468,19 +494,35 @@ export default function PatientModal({ uuid = null, docMode = 'license', onClose
               <Field label="Phone" value={form.demographics.phone} onChange={(v) => setD('phone', v)} maxLength={40} />
               <Field label="Email" type="email" value={form.demographics.email} onChange={(v) => setD('email', v)} maxLength={254} />
               <Field label="SSN" value={form.demographics.ssn} onChange={(v) => setD('ssn', v)} placeholder="###-##-####" maxLength={11} />
+            </div>
+            <SubLabel>Home address</SubLabel>
+            <div className="fs-grid fs-grid-3">
               <Field label="Address" value={form.demographics.address} onChange={(v) => setD('address', v)} maxLength={200} />
               <Field label="City" value={form.demographics.city} onChange={(v) => setD('city', v)} maxLength={80} />
               <Field label="State" value={form.demographics.state} onChange={(v) => setD('state', v)} maxLength={40} />
               <Field label="ZIP" value={form.demographics.zip} onChange={(v) => setD('zip', v)} maxLength={12} />
             </div>
+            <SubLabel>SNF facility &amp; admission</SubLabel>
+            <div className="fs-grid fs-grid-3">
+              <Field label="Facility name" value={form.facility.facilityName} onChange={(v) => setFac('facilityName', v)} maxLength={160} />
+              <Field label="Facility NPI" value={form.facility.npi} onChange={(v) => setFac('npi', v)} maxLength={20} />
+              <Field label="Resident ID" value={form.facility.residentId} onChange={(v) => setFac('residentId', v)} maxLength={40} />
+              <Field label="Unit" value={form.facility.unit} onChange={(v) => setFac('unit', v)} maxLength={40} />
+              <Field label="Room" value={form.facility.room} onChange={(v) => setFac('room', v)} maxLength={40} />
+              <Field label="Admit date" type="date" value={form.facility.admitDate} onChange={(v) => setFac('admitDate', v)} />
+              <Field label="Admitted from" value={form.facility.admittedFrom} onChange={(v) => setFac('admittedFrom', v)} maxLength={120} />
+              <Field label="Admission location" value={form.facility.admissionLocation} onChange={(v) => setFac('admissionLocation', v)} maxLength={160} />
+              <Field label="Facility address" value={form.facility.address} onChange={(v) => setFac('address', v)} maxLength={200} />
+              <Field label="Facility city" value={form.facility.city} onChange={(v) => setFac('city', v)} maxLength={80} />
+              <Field label="Facility state" value={form.facility.state} onChange={(v) => setFac('state', v)} maxLength={40} />
+              <Field label="Facility ZIP" value={form.facility.zip} onChange={(v) => setFac('zip', v)} maxLength={12} />
+            </div>
           </div>
 
           <div className="fs-section">
-            <div className="fs-section-h">
-              Insurance
-              <span className="spacer" />
+            <SecHead icon="shield" title="Insurance">
               {form.insurance.length < 3 && <button type="button" className="btn ghost sm" onClick={addIns}>+ Add insurance</button>}
-            </div>
+            </SecHead>
             {form.insurance.length === 0 && <div className="fs-empty" style={{ padding: '10px 0' }}>No insurance on file. Add primary insurance.</div>}
             {form.insurance.map((ins, i) => (
               <div className="fs-ins" key={i}>
@@ -501,11 +543,9 @@ export default function PatientModal({ uuid = null, docMode = 'license', onClose
           </div>
 
           <div className="fs-section">
-            <div className="fs-section-h">
-              Emergency Contacts
-              <span className="spacer" />
+            <SecHead icon="contact" title="Emergency contacts">
               {form.emergencyContacts.length < 8 && <button type="button" className="btn ghost sm" onClick={addEmg}>+ Add contact</button>}
-            </div>
+            </SecHead>
             {form.emergencyContacts.length === 0 && <div className="fs-empty" style={{ padding: '10px 0' }}>No emergency contacts on file. Add a contact.</div>}
             {form.emergencyContacts.map((c, i) => (
               <div className="fs-ins" key={i}>
@@ -524,27 +564,9 @@ export default function PatientModal({ uuid = null, docMode = 'license', onClose
             ))}
           </div>
 
-          <div className="fs-section">
-            <div className="fs-section-h">SNF Facility</div>
-            <div className="fs-grid fs-grid-3">
-              <Field label="Facility name" value={form.facility.facilityName} onChange={(v) => setFac('facilityName', v)} maxLength={160} />
-              <Field label="Resident ID" value={form.facility.residentId} onChange={(v) => setFac('residentId', v)} maxLength={40} />
-              <Field label="NPI" value={form.facility.npi} onChange={(v) => setFac('npi', v)} maxLength={20} />
-              <Field label="Unit" value={form.facility.unit} onChange={(v) => setFac('unit', v)} maxLength={40} />
-              <Field label="Room" value={form.facility.room} onChange={(v) => setFac('room', v)} maxLength={40} />
-              <Field label="Admit date" type="date" value={form.facility.admitDate} onChange={(v) => setFac('admitDate', v)} />
-              <Field label="Admitted from" value={form.facility.admittedFrom} onChange={(v) => setFac('admittedFrom', v)} maxLength={120} />
-              <Field label="Admission location" value={form.facility.admissionLocation} onChange={(v) => setFac('admissionLocation', v)} maxLength={160} />
-              <Field label="Facility address" value={form.facility.address} onChange={(v) => setFac('address', v)} maxLength={200} />
-              <Field label="City" value={form.facility.city} onChange={(v) => setFac('city', v)} maxLength={80} />
-              <Field label="State" value={form.facility.state} onChange={(v) => setFac('state', v)} maxLength={40} />
-              <Field label="ZIP" value={form.facility.zip} onChange={(v) => setFac('zip', v)} maxLength={12} />
-            </div>
-          </div>
-
           {docMode !== 'records' && (
             <div className="fs-section" style={{ marginBottom: 0 }}>
-              <div className="fs-section-h">Documents{!pUuid && <span className="fs-section-note"> — create the patient to enable uploads</span>}</div>
+              <SecHead icon="file" title="Documents" note={!pUuid ? 'create the patient to enable uploads' : undefined} />
               <div className="fs-docs">
                 {DOC_SLOTS.map((slot) => (
                   <DropZone key={slot.key} slot={slot} doc={docFor(slot.key)} patientUuid={pUuid} onChanged={reloadDocs} onExtract={runExtract} disabled={!pUuid} />

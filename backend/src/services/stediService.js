@@ -93,9 +93,14 @@ export async function searchPayer(queryText) {
  *   dateOfService (YYYYMMDD) }, tradingPartnerServiceId, externalPatientId.
  * Returns the raw 271 response JSON (the shape eligibilityService normalizes).
  */
+/**
+ * Single real-time eligibility call — NO automatic rechecks. If the payer is
+ * momentarily unavailable (AAA "Unable to Respond") the response is returned as-is;
+ * the normalizer marks it as an error/"Recheck" state and the provider can re-verify
+ * manually. We never silently retry or fabricate a result.
+ */
 export async function checkEligibility(input) {
-  const resp = await stediFetch('/change/medicalnetwork/eligibility/v3', { method: 'POST', body: input });
-  return resp;
+  return stediFetch('/change/medicalnetwork/eligibility/v3', { method: 'POST', body: input });
 }
 
 /** Log helper the workflow uses for observability without leaking PHI. */

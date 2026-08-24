@@ -14,6 +14,7 @@ const STATUS = {
   active: { label: 'Active Coverage', cls: 'active' },
   inactive: { label: 'Inactive', cls: 'inactive' },
   pending: { label: 'Pending', cls: 'pending' },
+  error: { label: 'Payer unavailable — recheck', cls: 'pending' },
 };
 const val = (v) => (v == null || v === '' ? '—' : v);
 const fmtDate = (d) => { if (!d) return '—'; const [y, m, day] = String(d).slice(0, 10).split('-'); return y ? `${m}/${day}/${y}` : d; };
@@ -56,7 +57,14 @@ export default function AppointmentEligibilityModal({ appointment, onClose, onCh
       footer={(
         <>
           <button className="btn ghost" onClick={onClose}>Close</button>
-          <button className="btn" onClick={verify} disabled={busy}>{busy ? 'Verifying…' : (check ? 'Re-verify' : 'Verify now')}</button>
+          {/* Opening never calls the payer — benefits are read from storage. This button
+              is the ONLY trigger: a deliberate manual re-verify (subtle when benefits
+              already exist, prominent to retry after a payer outage or first check). */}
+          {check !== undefined && (
+            <button className={`btn ${check && check.status !== 'error' ? 'ghost' : ''}`} onClick={verify} disabled={busy}>
+              {busy ? 'Verifying…' : (check?.status === 'error' ? 'Retry verification' : check ? 'Re-verify' : 'Verify now')}
+            </button>
+          )}
         </>
       )}
     >
@@ -81,7 +89,9 @@ export default function AppointmentEligibilityModal({ appointment, onClose, onCh
             {s.plan?.type && <span className="aeg-type">{s.plan.type}</span>}
           </div>
 
-          {s.requestedProcedures?.length > 0 && (
+          {s.status === 'error' ? (
+            <div className="aeg-err">The payer’s system was temporarily unavailable, so benefits couldn’t be returned. This does <b>not</b> mean the patient is uninsured — click <b>Re-verify</b> to try again.</div>
+          ) : s.requestedProcedures?.length > 0 && (
             <div className="aeg-proc">For CPT {s.requestedProcedures.map((p) => `${p.code} · ${p.label}`).join(', ')}</div>
           )}
 

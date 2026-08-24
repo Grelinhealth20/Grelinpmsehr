@@ -10,22 +10,18 @@ import { schedulingScope } from './accessScope.js';
  * midnight so the grid renders deterministically.
  */
 
+// Latest eligibility status is fetched via an INDEXED correlated subquery (idx_elig_appointment),
+// so it runs only for the rows the WHERE clause already narrowed to — scales to large tables
+// without materializing every check (no cross-appointment work).
 const SELECT = `SELECT a.id, a.uuid, a.provider_id, a.rendering_provider_id, a.created_by, a.title_enc, a.patient_name_enc, a.patient_uuid,
   a.appt_type, a.procedure_code, DATE_FORMAT(a.appt_date, '%Y-%m-%d') AS appt_date,
   a.start_min, a.duration_min, a.status, a.created_at, a.updated_at,
   rp.uuid AS rendering_provider_uuid, rp.full_name_enc AS rendering_provider_name_enc,
   op.full_name_enc AS owner_name_enc,
-  ec.elig_status AS eligibility_status
+  (SELECT e.status FROM eligibility_checks e WHERE e.appointment_uuid = a.uuid ORDER BY e.id DESC LIMIT 1) AS eligibility_status
   FROM appointments a
   LEFT JOIN users rp ON rp.id = a.rendering_provider_id
-  LEFT JOIN users op ON op.id = a.provider_id
-  LEFT JOIN (
-    SELECT e1.appointment_uuid, e1.status AS elig_status
-      FROM eligibility_checks e1
-      JOIN (SELECT appointment_uuid, MAX(id) AS mid FROM eligibility_checks
-             WHERE appointment_uuid IS NOT NULL GROUP BY appointment_uuid) e2
-        ON e2.mid = e1.id
-  ) ec ON ec.appointment_uuid = a.uuid`;
+  LEFT JOIN users op ON op.id = a.provider_id`;
 
 export function toPublicAppointment(row) {
   if (!row) return null;
@@ -81,6 +77,24 @@ export async function getRawByUuid(uuid) {
   return rows[0] || null;
 }
 
+/**
+ * Is the provider already booked in this time window? Prevents double-booking the
+ * same provider's schedule. Overlap = existing.start < newEnd AND existing.end > newStart.
+ * Cancelled visits don't count. `excludeUuid` skips the appointment being edited.
+ */
+export async function findOverlap({ providerId, date, startMin, durationMin, excludeUuid = null }) {
+  const endMin = Number(startMin) + Number(durationMin);
+  const [rows] = await execute(
+    `SELECT uuid FROM appointments
+      WHERE provider_id = :pid AND appt_date = :date AND status <> 'cancelled'
+        AND (:excl IS NULL OR uuid <> :excl)
+        AND start_min < :endMin AND (start_min + duration_min) > :startMin
+      LIMIT 1`,
+    { pid: providerId, date, excl: excludeUuid, endMin, startMin },
+  );
+  return rows[0]?.uuid || null;
+}
+
 export async function createAppointment({ providerId, renderingProviderId, title, patient, patientUuid, type, procedureCode, date, startMin, durationMin, createdBy }) {
   const uuid = uuidv4();
   await execute(
@@ -126,6 +140,9 @@ export async function updateAppointment(uuid, fields) {
 }
 
 export async function deleteAppointment(uuid) {
+  // Remove the appointment's eligibility checks too (appointment_uuid is not a FK,
+  // so this must be explicit) — no orphaned PHI benefit records left behind.
+  await execute(`DELETE FROM eligibility_checks WHERE appointment_uuid = :uuid`, { uuid });
   const [res] = await execute(`DELETE FROM appointments WHERE uuid = :uuid`, { uuid });
   return res.affectedRows > 0;
 }

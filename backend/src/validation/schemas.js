@@ -98,6 +98,11 @@ export const createAppointmentSchema = z
   .object({ title: apptTitle, patient: apptPatient, patientUuid: apptPatientUuid, renderingProviderUuid, procedureCode, type: apptType, date: apptDate, startMin, durationMin })
   .strict();
 
+// Deleting an appointment requires a reason (captured in the audit log).
+export const deleteAppointmentSchema = z
+  .object({ reason: z.string().trim().min(2, 'A reason for deletion is required.').max(300) })
+  .strict();
+
 export const updateAppointmentSchema = z
   .object({
     title: apptTitle.optional(),
@@ -247,6 +252,16 @@ export const updateNoteSchema = z
 
 export const signNoteSchema = z
   .object({ reason: noteReason, content: noteContentSchema })
+  .strict();
+
+// MD amendment of a SIGNED note: the corrected content plus a REQUIRED reason for
+// the edit (distinct from the note's clinical reason-for-visit). The reason is
+// persisted to the audit trail — a signed clinical record must never change silently.
+export const amendNoteSchema = z
+  .object({
+    content: noteContentSchema,
+    reason: z.string().trim().min(3, 'A reason for editing a signed note is required.').max(500),
+  })
   .strict();
 
 // --- Benefits Verification (X12 271 eligibility ingest) ----------------------

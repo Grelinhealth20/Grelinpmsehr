@@ -172,6 +172,7 @@ export const encountersApi = {
   getNote: (noteUuid) => api.get(`/encounters/notes/${noteUuid}`),
   updateNote: (noteUuid, payload) => api.patch(`/encounters/notes/${noteUuid}`, payload),
   signNote: (noteUuid, payload) => api.post(`/encounters/notes/${noteUuid}/sign`, payload),
+  amendNote: (noteUuid, payload) => api.post(`/encounters/notes/${noteUuid}/amend`, payload),
 };
 
 // --- Appointments (EHR scheduler) ------------------------------------------
@@ -183,7 +184,7 @@ export const appointmentsApi = {
   setStatus: (uuid, status) => api.patch(`/appointments/${uuid}`, { status }),
   reschedule: (uuid, { date, startMin, durationMin }) =>
     api.patch(`/appointments/${uuid}`, { date, startMin, durationMin }),
-  remove: (uuid) => api.delete(`/appointments/${uuid}`),
+  remove: (uuid, reason) => api.delete(`/appointments/${uuid}`, { data: { reason } }),
   // Appointment-level eligibility (real-time): live (re)verify + fetch benefits.
   verifyEligibility: (uuid) => api.post(`/appointments/${uuid}/eligibility/verify`, {}),
   eligibility: (uuid) => api.get(`/appointments/${uuid}/eligibility`),

@@ -1,6 +1,9 @@
 import { stediEnabled, searchPayer, checkEligibility, stediLog } from './stediService.js';
 import { resolvePayer, resolveMedicarePartB, isMedicarePartB, normalizeState } from './payerDirectoryService.js';
-import { saveCheck, mergeVerificationIntoPatient, hasCheckThisMonth, listChecks } from './eligibilityService.js';
+import {
+  saveCheck, mergeVerificationIntoPatient, listChecks, getAppointmentCheck,
+  insuranceBidxOf, latestBenefitsForInsurance, autoApiCountForInsurance, cloneCheckToAppointment, toPublicCheck,
+} from './eligibilityService.js';
 import { providerPrimaryFacility } from './facilityService.js';
 import { stcsForProcedures } from './procedureStc.js';
 import { updatePatient, getRawByUuid as getPatientRawByUuid, toPublicPatient } from './patientService.js';
@@ -55,7 +58,25 @@ export async function verifyPatientEligibility({ patient, patientId, providerId,
   if (!dob) return { skipped: 'no_dob' };
   if (!demo.firstName || !demo.lastName) return { skipped: 'no_name' };
 
-  if (!force && await hasCheckThisMonth(patientId, policyIndex)) return { skipped: 'duplicate_this_month' };
+  // Automatic-verification policy (bypassed by a manual `force`):
+  //  • Reuse existing benefits for the SAME patient + SAME insurance — no payer call.
+  //    (So a reschedule within the month with the same insurance never re-calls.)
+  //  • Never make more than TWO automatic payer calls per insurance.
+  //  • An insurance change (different payer / member / MBI) is a new identity → allowed.
+  const insuranceBidx = insuranceBidxOf(ins.payer, memberId);
+  if (!force) {
+    const existing = await latestBenefitsForInsurance(patientId, insuranceBidx);
+    if (existing) {
+      if (appointmentUuid) {
+        const linked = await getAppointmentCheck(appointmentUuid);
+        if (linked && linked.status !== 'error') return { skipped: 'insurance_reused', check: linked };
+        const cloned = await cloneCheckToAppointment(existing.uuid, { appointmentUuid, serviceDate: dosOverride, insuranceBidx, createdBy: providerId });
+        return { skipped: 'insurance_reused', check: cloned };
+      }
+      return { skipped: 'insurance_reused', check: toPublicCheck(existing) };
+    }
+    if (await autoApiCountForInsurance(patientId, insuranceBidx) >= 2) return { skipped: 'insurance_auto_cap' };
+  }
 
   // 1. Provider identity = the rendering provider's ASSIGNED FACILITY (NPI + state).
   const fac = await providerPrimaryFacility(providerId);
@@ -78,12 +99,14 @@ export async function verifyPatientEligibility({ patient, patientId, providerId,
   }
   if (!payer || !payer.stediId) return { skipped: 'payer_unresolved' };
 
-  // 3a. Procedure-specific targeting: map billed CPT/HCPCS -> the Service Type
-  //     Code its benefits live under, and request THAT STC alongside base "30".
-  //     (Stedi/payers, except CMS HETS, won't accept a procedure code + STC in the
-  //     same request, so we target by STC — the reliable, payer-agnostic path.)
+  // 3a. Procedure context. The billed CPT/HCPCS maps to a Service Type Code, but we
+  //     DO NOT add it to the request: a procedure-specific inquiry must never change
+  //     the plan's real benefits (and some payers error on it). We ALWAYS request the
+  //     plan (STC 30) — the payer volunteers the per-service benefits — and merely
+  //     READ the procedure's cost-share from that one authoritative response.
   const proc = stcsForProcedures(procedureCodes);
-  const serviceTypeCodes = [...new Set(['30', ...proc.stcs])];
+  const serviceTypeCodes = ['30'];        // plan coverage only — authoritative, unaffected by the procedure
+  const readStcs = [...new Set(['30', ...proc.stcs])]; // which service's cost-share to surface
 
   // 3b. Build the request entirely from the Face Sheet.
   const request = {
@@ -96,7 +119,7 @@ export async function verifyPatientEligibility({ patient, patientId, providerId,
       ...(demo.address ? { address: { address1: demo.address, city: demo.city || undefined } } : {}),
     },
     encounter: {
-      serviceTypeCodes,                    // "30" + any procedure-derived STCs
+      serviceTypeCodes,                    // ALWAYS "30" — the real plan benefits
       // DOS: appointment date when verifying an appointment, else the patient's add date.
       dateOfService: dosOverride || ymd(patient.createdAt) || ymd(new Date()),
     },
@@ -104,15 +127,15 @@ export async function verifyPatientEligibility({ patient, patientId, providerId,
     externalPatientId: memberId || patient.uuid,
   };
 
-  stediLog('eligibility.request', { patient: patient.uuid, stediId: payer.stediId, facilityNpi: fac.npi, serviceTypeCodes, appointment: appointmentUuid || undefined });
+  stediLog('eligibility.request', { patient: patient.uuid, stediId: payer.stediId, facilityNpi: fac.npi, serviceTypeCodes, procedures: proc.resolved.map((p) => p.code), appointment: appointmentUuid || undefined });
 
   // 4. Real-time 271 (no mock). Errors propagate to the caller.
   const response = await checkEligibility(request);
 
   // 5. Persist (encrypted). Appointment checks are stored against the appointment
   //    (service_date = appointment DOS) and never overwrite the Face Sheet.
-  const context = proc.resolved.length ? { requestedProcedures: proc.resolved, requestedStcs: serviceTypeCodes, unmappedProcedures: proc.unmapped } : { requestedStcs: serviceTypeCodes };
-  const check = await saveCheck({ patientId, policyIndex, response, createdBy: providerId, context, appointmentUuid, serviceDate: dosOverride || null });
+  const context = proc.resolved.length ? { requestedProcedures: proc.resolved, requestedStcs: readStcs, unmappedProcedures: proc.unmapped } : { requestedStcs: readStcs };
+  const check = await saveCheck({ patientId, policyIndex, response, createdBy: providerId, context, appointmentUuid, serviceDate: dosOverride || null, insuranceBidx, automatic: !force });
   let updated = patient;
   if (writeBack) {
     // Store the STEDI payer ID (not the primary payer ID) on the policy.
@@ -131,10 +154,17 @@ export async function verifyPatientEligibility({ patient, patientId, providerId,
  * targeting. The result is stored against the appointment (never overwrites the
  * patient) so the schedule can tag it and show basic benefits. Non-fatal.
  */
-export async function verifyAppointmentEligibility(apptRow) {
+export async function verifyAppointmentEligibility(apptRow, { force = false } = {}) {
   try {
-    if (!stediEnabled()) return { skipped: 'stedi_disabled' };
     if (!apptRow?.patient_uuid) return { skipped: 'no_patient' };
+    // IDEMPOTENT: once benefits are fetched cleanly, never call the payer again.
+    // Only (re)run when there is no check yet, the last one ERRORED (payer wasn't
+    // responding), or force is set. So a successful appointment is verified exactly once.
+    const existing = await getAppointmentCheck(apptRow.uuid);
+    if (existing && existing.status !== 'error' && !force) {
+      return { skipped: 'already_verified', check: existing };
+    }
+    if (!stediEnabled()) return { skipped: 'stedi_disabled' };
     const prow = await getPatientRawByUuid(apptRow.patient_uuid);
     if (!prow) return { skipped: 'no_patient' };
     const providerId = apptRow.rendering_provider_id || apptRow.provider_id;

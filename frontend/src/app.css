@@ -653,21 +653,25 @@
 .sch-col {
   position: relative; border-left: 1px solid var(--c-line-2); cursor: pointer;
   background-image:
-    repeating-linear-gradient(to bottom, var(--c-line-2) 0 1px, transparent 1px 46px),
-    repeating-linear-gradient(to bottom, var(--c-line) 0 1px, transparent 1px 92px);
+    repeating-linear-gradient(to bottom, var(--c-line-2) 0 1px, transparent 1px 62px),
+    repeating-linear-gradient(to bottom, var(--c-line) 0 1px, transparent 1px 124px);
 }
 .sch-col.today { background-color: rgba(39, 83, 179, 0.03); }
 .sch-appt {
-  position: absolute; text-align: left; border: none; border-left: 3px solid; cursor: grab; border-radius: 8px; padding: 5px 8px;
-  display: flex; flex-direction: column; gap: 1px; overflow: hidden; font-family: inherit; touch-action: none;
-  box-shadow: 0 2px 6px rgba(9, 17, 33, 0.12); transition: box-shadow 0.15s var(--ease);
+  position: absolute; text-align: left; border: none; border-left: 3px solid; cursor: grab; border-radius: 10px; padding: 7px 10px;
+  display: flex; flex-direction: column; gap: 2px; overflow: hidden; font-family: inherit; touch-action: none;
+  box-shadow: 0 2px 8px rgba(9, 17, 33, 0.1); transition: box-shadow 0.15s var(--ease), transform 0.12s var(--ease);
 }
-.sch-appt:hover { box-shadow: 0 6px 14px rgba(9, 17, 33, 0.2); z-index: 2; }
+.sch-appt:hover { box-shadow: 0 8px 20px rgba(9, 17, 33, 0.18); transform: translateY(-1px); z-index: 3; }
 .sch-appt:active { cursor: grabbing; }
 .sch-appt.is-dragging { opacity: 0.35; }
-.sch-appt-t { font-size: 12px; font-weight: 700; color: var(--c-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sch-appt-t { font-size: 12.5px; font-weight: 800; color: var(--c-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; letter-spacing: -0.01em; }
 .sch-appt-time { font-size: 10.5px; font-weight: 600; color: var(--c-ink-2); font-variant-numeric: tabular-nums; }
-.sch-appt-pt { font-size: 10.5px; color: var(--c-ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sch-appt-pt, .sch-appt-pr { display: flex; align-items: center; gap: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sch-appt-pt { font-size: 11px; font-weight: 700; color: var(--c-ink); margin-top: 1px; }
+.sch-appt-pr { font-size: 10.5px; font-weight: 600; color: var(--c-ink-2); }
+.sch-ic { width: 11px; height: 11px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; opacity: 0.6; }
+.sch-appt-foot { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 3px; }
 .sch-appt-flag { font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; color: var(--c-danger); }
 .sch-appt-flag.ok { color: var(--c-success); }
 .sch-appt-flag.in { color: var(--c-blue); }
@@ -732,17 +736,41 @@
 .fs-summary-mrn { margin-left: auto; font-size: 11px; font-weight: 800; letter-spacing: 0.04em; color: #8a5a1f; background: var(--c-accent-050); border: 1.5px solid rgba(207, 148, 85, 0.4); padding: 5px 12px; border-radius: 999px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* Sectioned cards */
-.fs-section { margin-bottom: 14px; border: 1.5px solid var(--c-line); border-radius: 14px; padding: 15px 16px; background: #fff; box-shadow: var(--shadow-sm); }
+.fs-section { margin-bottom: 16px; border: 1px solid var(--c-line); border-radius: 16px; padding: 18px 20px 20px; background: linear-gradient(180deg, #ffffff, #fbfcff); box-shadow: 0 1px 2px rgba(9,17,33,0.03), 0 12px 28px rgba(9,17,33,0.05); }
+.fs-section:last-child { margin-bottom: 0; }
+/* legacy header (still used by the Benefits tab) */
 .fs-section-h { display: flex; align-items: center; gap: 9px; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.08em; color: var(--c-dark-blue); padding-bottom: 12px; margin-bottom: 14px; border-bottom: 1.5px solid var(--c-line-2); }
 .fs-section-h::before { content: ''; width: 8px; height: 8px; border-radius: 3px; background: linear-gradient(135deg, var(--c-blue), var(--c-accent)); flex-shrink: 0; }
 .fs-section-note { font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--c-ink-2); }
-.fs-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px 14px; }
-.fs-grid .field label { font-size: 11.5px; font-weight: 700; color: var(--c-ink-2); }
-.fs-grid .input, .fs-grid .select { height: 40px; font-size: 13px; }
+/* redesigned section header — icon tile + title */
+.fs-sh { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+.fs-sh-ic { width: 34px; height: 34px; border-radius: 11px; display: grid; place-items: center; color: #fff; flex-shrink: 0;
+  background: linear-gradient(150deg, #263c66, var(--c-dark-blue)); box-shadow: 0 5px 14px rgba(9,17,33,0.22), inset 0 1px 0 rgba(255,255,255,0.12); }
+.fs-sh-t { font-size: 14.5px; font-weight: 800; letter-spacing: -0.01em; color: var(--c-dark-blue); }
+.fs-sh-note { font-size: 12px; font-weight: 600; color: var(--c-ink-3); }
+.fs-sh .spacer { flex: 1; }
+/* sub-group label inside a section */
+.fs-sub { display: flex; align-items: center; gap: 11px; font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.11em; color: var(--c-ink-3); margin: 2px 0 13px; }
+.fs-sub::after { content: ''; flex: 1; height: 1px; background: linear-gradient(90deg, var(--c-line), transparent); }
+.fs-grid + .fs-sub { margin-top: 22px; }
+.fs-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px 16px; }
+.fs-grid .field label { font-size: 11px; font-weight: 700; color: var(--c-ink-3); letter-spacing: 0.01em; }
+.fs-grid .input, .fs-grid .select { height: 42px; font-size: 13px; border-radius: 10px; background: #fff;
+  transition: border-color 0.16s var(--ease), box-shadow 0.16s var(--ease); }
+.fs-grid .input:hover, .fs-grid .select:hover { border-color: rgba(9,17,33,0.26); }
+.fs-grid .input:focus, .fs-grid .select:focus { border-color: var(--c-dark-blue); box-shadow: 0 0 0 3px rgba(39,83,179,0.13); }
 .fs-req { color: var(--c-danger); margin-left: 2px; }
 
 /* Multiple insurance policy cards */
-.fs-ins { border: 1.5px solid var(--c-line); border-radius: 12px; padding: 12px 14px; margin-bottom: 12px; background: #fbfcfe; }
+.fs-ins { border: 1px solid var(--c-line); border-radius: 13px; padding: 14px 16px; margin-bottom: 12px; background: linear-gradient(180deg, #fbfcff, #f6f8fc); transition: border-color 0.16s var(--ease), box-shadow 0.16s var(--ease); }
+.fs-ins:hover { border-color: #cdd9ee; box-shadow: 0 6px 18px rgba(9,17,33,0.05); }
+/* subtle staged entrance for a polished, enterprise feel */
+.modal-body .fs-section { animation: fs-rise 0.36s var(--ease) both; }
+.modal-body .fs-section:nth-child(2) { animation-delay: 0.05s; }
+.modal-body .fs-section:nth-child(3) { animation-delay: 0.10s; }
+.modal-body .fs-section:nth-child(4) { animation-delay: 0.15s; }
+@keyframes fs-rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .modal-body .fs-section { animation: none; } }
 .fs-ins:last-child { margin-bottom: 0; }
 .fs-ins-head { display: flex; align-items: center; margin-bottom: 12px; }
 .fs-ins-rank { font-size: 10.5px; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase; padding: 4px 12px; border-radius: 999px; }
@@ -1174,6 +1202,10 @@
 .nt-autosave::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .nt-autosave.saving { color: var(--c-accent); }
 .nt-autosave.saved { color: #10a34a; }
+/* MD amendment of a signed note */
+.nt-amend-flag { font-size: 12px; font-weight: 800; color: #b45309; background: rgba(217,119,6,0.12); padding: 5px 12px; border-radius: 20px; margin-left: 16px; display: inline-flex; align-items: center; gap: 6px; }
+.nt-amend-flag::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.nt-amend-note { font-size: 13px; line-height: 1.5; color: var(--c-ink-2); background: rgba(217,119,6,0.08); border: 1px solid rgba(217,119,6,0.22); border-radius: 10px; padding: 11px 13px; }
 
 /* Pagination (patient table + inner encounter table) */
 .pager { display: flex; align-items: center; gap: 6px; padding: 12px 4px 2px; }
@@ -1416,7 +1448,7 @@ input::-ms-clear, input::-ms-reveal { display: none; width: 0; height: 0; }
 .sch-elig .dot { width: 5px; height: 5px; border-radius: 50%; }
 .sch-elig.active { color: #0a7d3f; background: rgba(16,163,74,0.18); } .sch-elig.active .dot { background: #10a34a; }
 .sch-elig.inactive { color: #b42318; background: rgba(180,35,24,0.16); } .sch-elig.inactive .dot { background: #b42318; }
-.sch-elig.pending { color: #8a5a1f; background: rgba(207,148,85,0.22); } .sch-elig.pending .dot { background: var(--c-accent); }
+.sch-elig.pending, .sch-elig.error { color: #8a5a1f; background: rgba(207,148,85,0.22); } .sch-elig.pending .dot, .sch-elig.error .dot { background: var(--c-accent); }
 .sch-elig:hover { filter: brightness(0.96); }
 
 /* --- Appointment eligibility & benefits popup ------------------------------ */
@@ -1462,3 +1494,17 @@ input::-ms-clear, input::-ms-reveal { display: none; width: 0; height: 0; }
 .aeg-empty { padding: 24px 8px; text-align: center; color: var(--c-ink-2); font-size: 13px; }
 .aeg-empty .muted { font-size: 11.5px; color: var(--c-ink-3); }
 .aeg-err { margin-top: 8px; font-size: 11.5px; font-weight: 700; color: #b42318; background: rgba(180,35,24,0.08); border-radius: 8px; padding: 8px 10px; }
+
+/* --- Appointment modal: expanded two-column, sleek ------------------------- */
+.appt-form { display: flex; flex-direction: column; gap: 16px; }
+.appt-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px 28px; }
+.appt-col { display: flex; flex-direction: column; gap: 15px; min-width: 0; }
+.appt-col > .field { animation: appt-rise 0.32s var(--ease) both; }
+.appt-col > .field:nth-child(2) { animation-delay: 0.04s; }
+.appt-col > .field:nth-child(3) { animation-delay: 0.08s; }
+.appt-status { border-top: 1px dashed var(--c-line); padding-top: 15px; margin-top: 2px; }
+@keyframes appt-rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .appt-col > .field { animation: none; } }
+@media (max-width: 680px) { .appt-cols { grid-template-columns: 1fr; } }
+/* Booking button shows a soft working state */
+.btn:disabled { opacity: 0.6; cursor: default; }

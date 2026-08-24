@@ -182,8 +182,9 @@ export async function listSchedulableProviders(userId) {
   const params = {};
   const ph = facIds.map((id, i) => { params[`f${i}`] = id; return `:f${i}`; }).join(',');
   const [rows] = await execute(
-    `SELECT DISTINCT u.id, u.uuid, u.full_name_enc, u.credentials
+    `SELECT DISTINCT u.id, u.uuid, u.full_name_enc, u.credentials, s.uuid AS specialty_uuid, s.name AS specialty_name
        FROM users u JOIN provider_facilities pf ON pf.provider_id = u.id
+       LEFT JOIN specialties s ON s.id = u.specialty_id
       WHERE u.role = 'provider' AND u.status = 'active' AND pf.facility_id IN (${ph})
       ORDER BY u.id`,
     params,
@@ -192,6 +193,7 @@ export async function listSchedulableProviders(userId) {
     uuid: r.uuid,
     fullName: r.full_name_enc ? decrypt(r.full_name_enc) : '',
     credentials: (() => { try { return Array.isArray(r.credentials) ? r.credentials : JSON.parse(r.credentials || '[]'); } catch { return []; } })(),
+    specialty: r.specialty_uuid ? { uuid: r.specialty_uuid, name: r.specialty_name } : null,
   }));
 }
 

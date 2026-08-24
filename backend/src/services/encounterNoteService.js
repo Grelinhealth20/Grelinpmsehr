@@ -142,8 +142,12 @@ export async function signNote(noteUuid, providerId, { content, reason } = {}) {
   if (reason !== undefined) { sets.push('reason = :reason'); params.reason = reason || null; }
   await execute(`UPDATE encounter_notes SET ${sets.join(', ')} WHERE id = :id`, params);
   const signed = await getNote(noteUuid, providerId);
+  await generateSignedDoc(r.id, signed, signerName);
+  return signed;
+}
 
-  // Auto-generate the Word document of the finalized note into the patient folder.
+/** (Re)generate the finalized Word document for a signed note into the patient's folder. */
+async function generateSignedDoc(noteId, note, signerName) {
   const [meta] = await execute(
     `SELECT p.uuid AS patient_uuid, p.mrn, p.demographics_enc, p.facility_enc, e.encounter_no,
         pu.uuid AS provider_uuid, f.uuid AS facility_uuid,
@@ -154,21 +158,51 @@ export async function signNote(noteUuid, providerId, { content, reason } = {}) {
       LEFT JOIN users pu ON pu.id = p.provider_id
       LEFT JOIN facilities f ON f.id = p.facility_id
       WHERE n.id = :id LIMIT 1`,
-    { id: r.id },
+    { id: noteId },
   );
   const m = meta[0];
-  if (m && m.patient_uuid) {
-    const demo = safeParse(m.demographics_enc) || {};
-    const fac = safeParse(m.facility_enc) || {};
-    const patientName = `${demo.firstName || ''} ${demo.lastName || ''}`.trim() || 'Patient';
-    await storeSignedNoteDoc({
-      patientUuid: m.patient_uuid, patientName, encounterDate: m.dos || '',
-      note: signed, signerName, signedAt: signed.signedAt || new Date().toISOString().slice(0, 19).replace('T', ' '),
-      patient: { mrn: m.mrn, dob: demo.dob, facilityName: fac.facilityName, encounterNo: m.encounter_no },
-      // Patient's OWN provider + facility drive the S3 folder (not the signer's) —
-      // the document always lands in the patient's folder regardless of who signs.
-      s3ctx: { patientUuid: m.patient_uuid, providerUuid: m.provider_uuid, facilityUuid: m.facility_uuid },
-    });
-  }
-  return signed;
+  if (!m || !m.patient_uuid) return;
+  const demo = safeParse(m.demographics_enc) || {};
+  const fac = safeParse(m.facility_enc) || {};
+  const patientName = `${demo.firstName || ''} ${demo.lastName || ''}`.trim() || 'Patient';
+  await storeSignedNoteDoc({
+    patientUuid: m.patient_uuid, patientName, encounterDate: m.dos || '',
+    note, signerName, signedAt: note.signedAt || new Date().toISOString().slice(0, 19).replace('T', ' '),
+    patient: { mrn: m.mrn, dob: demo.dob, facilityName: fac.facilityName, encounterNo: m.encounter_no },
+    // Patient's OWN provider + facility drive the S3 folder (not the signer's).
+    s3ctx: { patientUuid: m.patient_uuid, providerUuid: m.provider_uuid, facilityUuid: m.facility_uuid },
+  });
+}
+
+/**
+ * AMEND a SIGNED note — MD-only. A signed note is otherwise immutable; an MD may
+ * correct/addend it, but MUST provide a reason (captured in the audit log by the
+ * caller). The note stays signed & billing-ready, re-signed by the amending MD, and
+ * its Word document is regenerated. Any provider without an MD credential is refused.
+ */
+export async function amendSignedNote(noteUuid, providerId, { content, reason } = {}) {
+  const [urows] = await execute(`SELECT full_name_enc, credentials FROM users WHERE id = :id LIMIT 1`, { id: providerId });
+  const u = urows[0];
+  if (!u || !canSign(u.credentials)) return { forbidden: true }; // MD only
+  const scope = await viewerScope(providerId);
+  const sp = { u: noteUuid };
+  const access = noteAccess(scope, providerId, sp);
+  const [srows] = await execute(
+    `SELECT n.id, n.status FROM encounter_notes n
+       JOIN encounters e ON e.id = n.encounter_id
+       LEFT JOIN patients p ON p.id = e.patient_id
+      WHERE n.uuid = :u AND ${access} LIMIT 1`,
+    sp,
+  );
+  const r = srows[0];
+  if (!r) return null;
+  if (r.status !== 'signed') return { notSigned: true }; // only signed notes are "amended"
+  const signerName = u.full_name_enc ? decrypt(u.full_name_enc) : null;
+  await execute(
+    `UPDATE encounter_notes SET content_enc = :content, signed_by = :pid, signed_by_name = :name, signed_at = NOW() WHERE id = :id`,
+    { content: content ? encrypt(JSON.stringify(content)) : null, pid: providerId, name: signerName, id: r.id },
+  );
+  const amended = await getNote(noteUuid, providerId);
+  await generateSignedDoc(r.id, amended, signerName);
+  return amended;
 }

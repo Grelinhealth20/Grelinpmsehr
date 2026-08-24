@@ -95,7 +95,7 @@ export default function ClinicalRecords() {
               <th>Patient Name</th>
               <th>SNF Facility</th>
               <th>Rendering Provider</th>
-              <th>Procedure</th>
+              <th>Notes</th>
               <th>Status</th>
               <th>Action</th>
             </tr>

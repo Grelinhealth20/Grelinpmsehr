@@ -162,7 +162,7 @@ function PatientRow({ p, open, onToggle, onView, onNotes, refreshKey }) {
                 <tr>
                   <th>Encounter ID</th>
                   <th>Date of Service</th>
-                  <th>Procedure</th>
+                  <th>Notes</th>
                   <th>Rendering Provider</th>
                   <th>Signed off Provider</th>
                   <th className="enc-sub-act">Action</th>

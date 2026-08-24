@@ -87,6 +87,12 @@ export async function runMigrations() {
   // Link an eligibility check to an appointment (appointment-level verification).
   await ensureColumn('eligibility_checks', 'appointment_uuid', '`appointment_uuid` CHAR(36) NULL AFTER `policy_index`');
   await ensureIndex('eligibility_checks', 'idx_elig_appointment', '`appointment_uuid`');
+  // Insurance identity (payer + member/MBI, blind-indexed) + whether a check was an
+  // AUTOMATIC payer call — used to cap automatic verifications per patient+insurance
+  // and to reuse existing benefits instead of re-calling the payer.
+  await ensureColumn('eligibility_checks', 'insurance_bidx', '`insurance_bidx` CHAR(64) NULL AFTER `member_id_bidx`');
+  await ensureColumn('eligibility_checks', 'automatic', '`automatic` TINYINT(1) NOT NULL DEFAULT 0 AFTER `status`');
+  await ensureIndex('eligibility_checks', 'idx_elig_patient_insurance', '`patient_id`, `insurance_bidx`');
   // Front-desk check-in / check-out appointment states (idempotent MODIFY).
   await pool.query(
     "ALTER TABLE `appointments` MODIFY COLUMN `status` ENUM('scheduled','checked_in','checked_out','cancelled','completed') NOT NULL DEFAULT 'scheduled'",

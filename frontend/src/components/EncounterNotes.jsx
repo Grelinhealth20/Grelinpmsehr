@@ -131,6 +131,9 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
   const [autoState, setAutoState] = useState('idle'); // idle | saving | saved
+  const [amending, setAmending] = useState(false); // MD editing a signed note
+  const [amendModal, setAmendModal] = useState(false); // reason prompt for amendment
+  const [amendReason, setAmendReason] = useState('');
   const skipSave = useRef(true); // skip the save that a fresh load/open would trigger
 
   async function loadNotes() {
@@ -145,6 +148,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
       const { data } = await encountersApi.getNote(uuid);
       skipSave.current = true;
       setAutoState('idle');
+      setAmending(false); setAmendReason('');
       setActive(data.note);
       setContent({ vitals: data.note.content?.vitals || {}, sections: data.note.content?.sections || {}, prescriptions: data.note.content?.prescriptions || [] });
       setReason(data.note.reason || '');
@@ -173,8 +177,9 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   const signed = active?.status === 'signed';
   // Read-only unless the viewer OWNS the note. A facility-wide MD may open another
   // provider's note to review/sign, but only the author edits it (no silent
-  // failed saves, no cross-provider edits).
-  const readOnly = signed || active?.isOwner === false;
+  // failed saves, no cross-provider edits). EXCEPTION: an MD actively amending a
+  // signed note edits it in place — the amendment is saved explicitly with a reason.
+  const readOnly = amending ? false : (signed || active?.isOwner === false);
   const setSection = (k, v) => setContent((c) => ({ ...c, sections: { ...c.sections, [k]: v } }));
   const setVital = (k, v) => setContent((c) => ({ ...c, vitals: { ...(c.vitals || {}), [k]: v } }));
   const setRxAt = (i, k, v) => setContent((c) => ({ ...c, prescriptions: c.prescriptions.map((r, idx) => (idx === i ? { ...r, [k]: v } : r)) }));
@@ -228,27 +233,99 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
     } catch (e) { toast.error(toApiError(e).message); } finally { setBusy(false); }
   }
 
+  // MD-only: unlock a signed note for editing after capturing a required reason.
+  function startAmend() {
+    setAmendReason('');
+    setAmendModal(true);
+  }
+  function confirmAmend() {
+    if (amendReason.trim().length < 3) { toast.error('Enter a reason for editing this signed note.'); return; }
+    setAmendModal(false);
+    skipSave.current = true; // amend is saved explicitly, never auto-saved
+    setAmending(true);
+  }
+  async function saveAmendment() {
+    if (!active) return;
+    setBusy(true);
+    try {
+      const { data } = await encountersApi.amendNote(active.uuid, { content, reason: amendReason.trim() });
+      setActive(data.note);
+      setAmending(false);
+      setAmendReason('');
+      toast.success('Signed note amended — reason logged and the patient document re-issued.');
+      await loadNotes();
+      onChanged?.();
+    } catch (e) { toast.error(toApiError(e).message); } finally { setBusy(false); }
+  }
+  function cancelAmend() {
+    // Discard in-progress edits by reloading the note from the server.
+    setAmending(false);
+    setAmendReason('');
+    if (active) openNote(active.uuid);
+  }
+
   const template = active ? (TEMPLATES[active.noteType] || []) : [];
 
   return (
     <>
     {picking && <NoteTypePicker busy={busy} onPick={createNote} onClose={() => setPicking(false)} />}
+    {amendModal && (
+      <Modal title="Edit signed note" onClose={() => setAmendModal(false)} footer={<>
+        <span className="spacer" />
+        <button className="btn ghost" onClick={() => setAmendModal(false)}>Cancel</button>
+        <button className="btn" onClick={confirmAmend} disabled={amendReason.trim().length < 3}>Continue editing</button>
+      </>}>
+        <div className="stack" style={{ gap: 12 }}>
+          <div className="nt-amend-note">
+            This note is signed and part of the billing record. Editing it creates an amendment.
+            A reason is required and is recorded in the audit log under your name.
+          </div>
+          <div className="field">
+            <label>Reason for editing<span className="fs-req">*</span></label>
+            <textarea
+              className="input" rows={3} autoFocus value={amendReason}
+              placeholder="e.g. Corrected medication dose documented in error."
+              onChange={(e) => setAmendReason(e.target.value)}
+            />
+          </div>
+        </div>
+      </Modal>
+    )}
     <Modal size="full" title={`Encounter · ${encounter.patientName || 'Patient'}`} onClose={closeWithSave} footer={<>
       <span className="nt-foot-meta">Encounter {encNo(encounter.encounterNo)} · DOS {usDate(encounter.date)}</span>
-      {active && !readOnly && (
+      {active && !readOnly && !amending && (
         <span className={`nt-autosave ${autoState}`}>
           {autoState === 'saving' ? 'Saving…' : autoState === 'saved' ? 'All changes saved' : 'Auto-saves as you type'}
         </span>
+      )}
+      {active && amending && (
+        <span className="nt-amend-flag">Amending signed note · save to finalize the correction</span>
       )}
       {active && !signed && active.isOwner === false && (
         <span className="clr-draft-flag" style={{ marginLeft: 12 }}>Read-only · another provider's note</span>
       )}
       <span className="spacer" />
-      <button className="btn ghost" onClick={closeWithSave}>Close</button>
-      {active && !signed && (
-        <button className="btn" onClick={sign} disabled={busy || !canSign} title={canSign ? 'Sign & finalize for billing' : 'Only an MD can sign off'}>
-          {busy ? <span className="spinner" /> : 'Sign & finalize'}
-        </button>
+      {amending ? (
+        <>
+          <button className="btn ghost" onClick={cancelAmend} disabled={busy}>Cancel edit</button>
+          <button className="btn" onClick={saveAmendment} disabled={busy}>
+            {busy ? <span className="spinner" /> : 'Save amendment'}
+          </button>
+        </>
+      ) : (
+        <>
+          <button className="btn ghost" onClick={closeWithSave}>Close</button>
+          {active && !signed && (
+            <button className="btn" onClick={sign} disabled={busy || !canSign} title={canSign ? 'Sign & finalize for billing' : 'Only an MD can sign off'}>
+              {busy ? <span className="spinner" /> : 'Sign & finalize'}
+            </button>
+          )}
+          {active && signed && canSign && (
+            <button className="btn ghost" onClick={startAmend} disabled={busy} title="Edit this signed note (reason required)">
+              Edit signed note
+            </button>
+          )}
+        </>
       )}
     </>}>
       <div className="nt2">

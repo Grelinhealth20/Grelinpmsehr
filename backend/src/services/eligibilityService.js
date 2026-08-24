@@ -131,6 +131,11 @@ export function normalize271(resp) {
   const bi = Array.isArray(resp?.benefitsInformation) ? resp.benefitsInformation : [];
   const ps = Array.isArray(resp?.planStatus) ? resp.planStatus[0] : null;
   const coverageActive = ps?.statusCode === '1' || bi.some((b) => b.code === '1');
+  // A payer/clearinghouse error (AAA rejection — e.g. "Unable to Respond at
+  // Current Time") means the payer COULD NOT answer. That is NOT "no coverage":
+  // it must read as an error/retry state, never a red "Inactive".
+  const respErrors = Array.isArray(resp?.errors) ? resp.errors : [];
+  const payerError = respErrors.length > 0 && !coverageActive && bi.length === 0 && !ps;
 
   // Subscriber / member.
   const sub = resp?.subscriber || {};
@@ -256,9 +261,11 @@ export function normalize271(resp) {
     .filter((l) => l.value);
 
   return {
-    status: coverageActive ? 'active' : 'inactive',
-    statusLabel: ps?.status || (coverageActive ? 'Active Coverage' : 'Inactive'),
+    status: payerError ? 'error' : (coverageActive ? 'active' : 'inactive'),
+    statusLabel: payerError ? (respErrors[0].description || 'Payer could not respond') : (ps?.status || (coverageActive ? 'Active Coverage' : 'Inactive')),
     coverageActive,
+    payerError,
+    errors: respErrors,
     payer: { name: resp?.payer?.name || '', id: resp?.payer?.payorIdentification || resp?.tradingPartnerServiceId || '' },
     member,
     plan,
@@ -276,7 +283,7 @@ export function normalize271(resp) {
 
 /* --- Persistence ----------------------------------------------------------- */
 
-function toPublicCheck(row) {
+export function toPublicCheck(row) {
   if (!row) return null;
   let summary = null;
   try { summary = row.summary_enc ? JSON.parse(decrypt(row.summary_enc)) : null; } catch { summary = null; }
@@ -323,8 +330,15 @@ function toDbDate(v) {
   return null;
 }
 
+/** Blind index of a patient's insurance identity (payer + member/MBI) for dedup. */
+export function insuranceBidxOf(payer, memberOrMbi) {
+  const id = String(memberOrMbi || '').trim().toUpperCase();
+  if (!id) return null;
+  return blindIndex(`${String(payer || '').trim().toLowerCase()}|${id}`);
+}
+
 /** Store one verification. `response` is the raw 271 payload (an object). */
-export async function saveCheck({ patientId, policyIndex = 0, response, createdBy = null, context = null, appointmentUuid = null, serviceDate = null }) {
+export async function saveCheck({ patientId, policyIndex = 0, response, createdBy = null, context = null, appointmentUuid = null, serviceDate = null, insuranceBidx = null, automatic = false }) {
   const summary = normalize271(response);
   summary.coverageLevels = coverageLevelSummary(response, context?.requestedStcs || ['30']);
   // Record what was asked for (procedure-specific STC targeting) alongside the result.
@@ -339,9 +353,9 @@ export async function saveCheck({ patientId, policyIndex = 0, response, createdB
   const uuid = uuidv4();
   await execute(
     `INSERT INTO eligibility_checks
-       (uuid, patient_id, policy_index, appointment_uuid, payer_name, member_id_bidx, status, service_date, plan_end, summary_enc, raw_enc, created_by)
+       (uuid, patient_id, policy_index, appointment_uuid, payer_name, member_id_bidx, insurance_bidx, status, automatic, service_date, plan_end, summary_enc, raw_enc, created_by)
      VALUES
-       (:uuid, :pid, :idx, :appt, :payer, :midx, :status, :sdate, :pend, :summ, :raw, :by)`,
+       (:uuid, :pid, :idx, :appt, :payer, :midx, :ibidx, :status, :auto, :sdate, :pend, :summ, :raw, :by)`,
     {
       uuid,
       pid: patientId,
@@ -352,7 +366,9 @@ export async function saveCheck({ patientId, policyIndex = 0, response, createdB
       // one-way HMAC blind index (never the raw value).
       payer: null,
       midx: summary.member.memberId ? blindIndex(summary.member.memberId) : null,
+      ibidx: insuranceBidx || null,
       status: summary.status,
+      auto: automatic ? 1 : 0,
       sdate,
       pend: summary.plan.end || null,
       summ: encrypt(JSON.stringify(summary)),
@@ -376,6 +392,42 @@ export async function getAppointmentCheck(appointmentUuid) {
     { au: appointmentUuid },
   );
   return rows[0] ? toPublicCheck(rows[0]) : null;
+}
+
+/** Latest SUCCESSFUL check (any source) for this patient + insurance — the raw row. */
+export async function latestBenefitsForInsurance(patientId, insuranceBidx) {
+  if (!insuranceBidx) return null;
+  const [rows] = await execute(
+    `SELECT uuid, policy_index, appointment_uuid, payer_name, status, service_date, plan_end, summary_enc, created_at
+       FROM eligibility_checks
+      WHERE patient_id = :pid AND insurance_bidx = :ib AND status <> 'error'
+      ORDER BY id DESC LIMIT 1`,
+    { pid: patientId, ib: insuranceBidx },
+  );
+  return rows[0] || null;
+}
+
+/** Count of AUTOMATIC payer calls for this patient + insurance (the cap basis). */
+export async function autoApiCountForInsurance(patientId, insuranceBidx) {
+  if (!insuranceBidx) return 0;
+  const [rows] = await execute(
+    `SELECT COUNT(*) AS n FROM eligibility_checks WHERE patient_id = :pid AND insurance_bidx = :ib AND automatic = 1`,
+    { pid: patientId, ib: insuranceBidx },
+  );
+  return Number(rows[0].n) || 0;
+}
+
+/** Reuse a stored check's benefits on an appointment (a DB copy — NO payer call). */
+export async function cloneCheckToAppointment(sourceUuid, { appointmentUuid, serviceDate = null, insuranceBidx = null, createdBy = null }) {
+  const uuid = uuidv4();
+  await execute(
+    `INSERT INTO eligibility_checks
+       (uuid, patient_id, policy_index, appointment_uuid, payer_name, member_id_bidx, insurance_bidx, status, automatic, service_date, plan_end, summary_enc, raw_enc, created_by)
+     SELECT :uuid, patient_id, policy_index, :appt, payer_name, member_id_bidx, :ib, status, 0, :sdate, plan_end, summary_enc, raw_enc, :by
+       FROM eligibility_checks WHERE uuid = :src LIMIT 1`,
+    { uuid, appt: appointmentUuid, ib: insuranceBidx, sdate: toDbDate(serviceDate), by: createdBy, src: sourceUuid },
+  );
+  return getAppointmentCheck(appointmentUuid);
 }
 
 /**

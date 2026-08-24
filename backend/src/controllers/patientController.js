@@ -234,15 +234,15 @@ export async function verifyNow(req, res, next) {
     const policyIndex = Number(req.body?.policyIndex) || 0;
     const procedureCodes = Array.isArray(req.body?.procedureCodes) ? req.body.procedureCodes : [];
     // provider.npi = the patient's RENDERING provider's assigned facility NPI.
-    // A procedure-specific check is a deliberate, differently-scoped query, so it
-    // bypasses the monthly de-dupe (which guards the base plan verification).
+    // A manual "Verify" is always a deliberate user action → force a fresh check
+    // (this is what bypasses the automatic same-insurance de-dupe / 2-call cap).
     const r = await verifyPatientEligibility({
       patient: toPublicPatient(row), patientId: row.id, providerId: row.provider_id,
-      policyIndex, procedureCodes, force: procedureCodes.length > 0,
+      policyIndex, procedureCodes, force: true,
     });
-    if (r.skipped === 'duplicate_this_month') {
+    if (r.skipped === 'insurance_reused' || r.skipped === 'duplicate_this_month') {
       const existing = await latestCheckForPolicy(row.id, policyIndex);
-      return res.json({ check: existing, patient: toPublicPatient(await getRawByUuid(row.uuid)), skipped: 'duplicate_this_month' });
+      return res.json({ check: existing, patient: toPublicPatient(await getRawByUuid(row.uuid)), skipped: r.skipped });
     }
     if (r.skipped) return res.status(422).json({ error: SKIP_MSG[r.skipped] || 'Eligibility could not be verified.', code: `ELIG_${r.skipped.toUpperCase()}` });
     await recordAudit({

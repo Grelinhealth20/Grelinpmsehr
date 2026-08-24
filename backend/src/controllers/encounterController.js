@@ -4,7 +4,7 @@ import {
 } from '../services/encounterService.js';
 import {
   listNotes as listNotesSvc, createNote as createNoteSvc, getNote as getNoteSvc,
-  updateNote as updateNoteSvc, signNote as signNoteSvc,
+  updateNote as updateNoteSvc, signNote as signNoteSvc, amendSignedNote as amendNoteSvc,
 } from '../services/encounterNoteService.js';
 import { recordAudit } from '../services/auditService.js';
 
@@ -111,6 +111,19 @@ export async function signNote(req, res, next) {
     if (!result) return res.status(404).json({ error: 'Note not found.', code: 'NOT_FOUND' });
     if (result.locked) return res.status(409).json({ error: 'This note is already signed.', code: 'NOTE_SIGNED' });
     await recordAudit({ actorUserId: req.authUserId, action: 'encounter.note.sign', entityType: 'encounter_note', entityId: req.params.noteUuid, ...ctx(req), metadata: { noteType: result.noteType } });
+    res.json({ note: result });
+  } catch (err) { next(err); }
+}
+
+/** MD-only amendment of a SIGNED note — requires a reason (logged to the audit trail). */
+export async function amendNote(req, res, next) {
+  try {
+    const { content, reason } = req.body;
+    const result = await amendNoteSvc(req.params.noteUuid, req.authUserId, { content, reason });
+    if (result && result.forbidden) return res.status(403).json({ error: 'Only an MD can edit a signed note.', code: 'AMEND_FORBIDDEN' });
+    if (!result) return res.status(404).json({ error: 'Note not found.', code: 'NOT_FOUND' });
+    if (result.notSigned) return res.status(409).json({ error: 'This note is a draft — edit it directly.', code: 'NOTE_NOT_SIGNED' });
+    await recordAudit({ actorUserId: req.authUserId, action: 'encounter.note.amend', entityType: 'encounter_note', entityId: req.params.noteUuid, ...ctx(req), metadata: { reason } });
     res.json({ note: result });
   } catch (err) { next(err); }
 }

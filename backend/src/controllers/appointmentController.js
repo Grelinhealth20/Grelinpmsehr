@@ -5,6 +5,7 @@ import {
   deleteAppointment,
   getRawByUuid,
   toPublicAppointment,
+  findOverlap,
 } from '../services/appointmentService.js';
 import { getRawByUuid as getPatientRawByUuid } from '../services/patientService.js';
 import { findProviderIdByUuid } from '../services/userService.js';
@@ -65,6 +66,32 @@ async function resolveRenderingProvider(uuid) {
   return id;
 }
 
+/**
+ * Run appointment eligibility and AUDIT the outcome — user-level, per appointment.
+ * Records what triggered it (create / reschedule / patient_change / manual), the
+ * resulting coverage status (or the skip/error), the payer, and the actor. A no-op
+ * "already_verified" (benefits already on file, no payer call) is not logged.
+ * Returns the workflow result; re-throws real payer errors (after logging them).
+ */
+async function auditedEligibility(req, apptRow, { trigger, manual = false, opts = {} }) {
+  const actorUserId = req.authUserId;
+  const ip = req.ip;
+  const userAgent = req.get('user-agent');
+  const entityId = apptRow.uuid;
+  const base = { actorUserId, action: 'appointment.eligibility.verify', entityType: 'appointment', entityId, ip, userAgent };
+  try {
+    const r = await verifyAppointmentEligibility(apptRow, opts);
+    // These outcomes make NO payer call (benefits reused / cap reached) — no audit noise.
+    if (['already_verified', 'insurance_reused', 'insurance_auto_cap'].includes(r.skipped)) return r;
+    if (r.check) await recordAudit({ ...base, metadata: { trigger, manual, status: r.check.status, payer: r.payer?.name } });
+    else await recordAudit({ ...base, outcome: 'skipped', metadata: { trigger, manual, skipped: r.skipped } });
+    return r;
+  } catch (err) {
+    await recordAudit({ ...base, outcome: 'error', metadata: { trigger, manual, error: err.message, code: err.code } });
+    throw err;
+  }
+}
+
 export async function list(req, res, next) {
   try {
     const from = DATE_RE.test(req.query.from || '') ? req.query.from : null;
@@ -95,6 +122,10 @@ export async function create(req, res, next) {
     }
 
     await assertSchedulablePatient(req, patientUuid);
+    // No double-booking: reject an overlapping visit on this provider's schedule.
+    if (await findOverlap({ providerId: ownerId, date, startMin, durationMin })) {
+      const e = new Error('That time slot is already booked for this provider.'); e.status = 409; e.code = 'SLOT_TAKEN'; throw e;
+    }
     const appt = await createAppointment({
       providerId: ownerId,
       renderingProviderId: renderingProviderId || (scope.isBilling ? ownerId : null),
@@ -108,9 +139,8 @@ export async function create(req, res, next) {
       durationMin,
       createdBy: req.authUserId,
     });
-    let apptRaw = await getRawByUuid(appt.uuid);
-    // Auto-create a numbered encounter (wired to MRN + DOS) for patient bookings —
-    // on the rendering provider's schedule.
+    const apptRaw = await getRawByUuid(appt.uuid);
+    // Auto-create a numbered encounter (wired to MRN + DOS) for patient bookings.
     if (patientUuid) {
       const p = await getPatientRawByUuid(patientUuid);
       if (p && apptRaw) {
@@ -119,21 +149,15 @@ export async function create(req, res, next) {
           apptDate: appt.date, mrn: p.mrn, createdBy: req.authUserId,
         });
       }
-      // Auto-trigger real-time eligibility on scheduling (non-fatal). DOS = appt date,
-      // provider = rendering provider's assigned facility, STC 30 (+ any procedure).
-      if (apptRaw) { try { await verifyAppointmentEligibility(apptRaw); } catch { /* non-fatal */ } }
+      // Eligibility runs in the BACKGROUND — booking returns immediately (no waiting
+      // on the payer). The tag appears on the next refresh. Audited; never blocks create.
+      if (apptRaw) auditedEligibility(req, apptRaw, { trigger: 'create' }).catch(() => {});
     }
     await recordAudit({
-      actorUserId: req.authUserId,
-      action: 'appointment.create',
-      entityType: 'appointment',
-      entityId: appt.uuid,
-      ip: req.ip,
-      userAgent: req.get('user-agent'),
-      metadata: { type, date, procedureCode: procedureCode || undefined },
+      actorUserId: req.authUserId, action: 'appointment.create', entityType: 'appointment', entityId: appt.uuid,
+      ip: req.ip, userAgent: req.get('user-agent'), metadata: { type, date, procedureCode: procedureCode || undefined },
     });
-    // Re-read so the response carries the eligibility tag (if it resolved).
-    res.status(201).json({ appointment: toPublicAppointment(await getRawByUuid(appt.uuid)) });
+    res.status(201).json({ appointment: appt }); // immediate — no eligibility wait
   } catch (err) { next(err); }
 }
 
@@ -156,40 +180,46 @@ export async function update(req, res, next) {
     else if (b.status === 'checked_out') action = 'appointment.check_out';
     else if ((b.date !== undefined || b.startMin !== undefined) && b.title === undefined) action = 'appointment.reschedule';
 
+    // No double-booking when moving the visit (date/time/duration change).
+    if (b.date !== undefined || b.startMin !== undefined || b.durationMin !== undefined) {
+      const date = b.date ?? row.appt_date;
+      const startMin = b.startMin ?? row.start_min;
+      const durationMin = b.durationMin ?? row.duration_min;
+      if (b.status !== 'cancelled' && await findOverlap({ providerId: row.provider_id, date, startMin, durationMin, excludeUuid: row.uuid })) {
+        const e = new Error('That time slot is already booked for this provider.'); e.status = 409; e.code = 'SLOT_TAKEN'; throw e;
+      }
+    }
     const appt = await updateAppointment(req.params.uuid, b);
-    // Re-run appointment eligibility when an input that changes the result moves
-    // (date/DOS, procedure, or the linked patient) and a patient is linked.
+    // Eligibility on update: idempotent by default (won't re-call if benefits exist),
+    // but a CHANGE OF PATIENT (insurance may differ) forces a fresh check. Background.
     if (b.date !== undefined || b.procedureCode !== undefined || b.patientUuid !== undefined) {
       const apptRaw = await getRawByUuid(req.params.uuid);
-      if (apptRaw?.patient_uuid) { try { await verifyAppointmentEligibility(apptRaw); } catch { /* non-fatal */ } }
+      if (apptRaw?.patient_uuid) {
+        const patientChanged = b.patientUuid !== undefined;
+        auditedEligibility(req, apptRaw, { trigger: patientChanged ? 'patient_change' : (b.date !== undefined ? 'reschedule' : 'procedure_change'), opts: { force: patientChanged } }).catch(() => {});
+      }
     }
     await recordAudit({
-      actorUserId: req.authUserId,
-      action,
-      entityType: 'appointment',
-      entityId: appt.uuid,
-      ip: req.ip,
-      userAgent: req.get('user-agent'),
-      metadata: { fields: Object.keys(b) },
+      actorUserId: req.authUserId, action, entityType: 'appointment', entityId: appt.uuid,
+      ip: req.ip, userAgent: req.get('user-agent'), metadata: { fields: Object.keys(b) },
     });
-    res.json({ appointment: toPublicAppointment(await getRawByUuid(req.params.uuid)) });
+    res.json({ appointment: appt }); // immediate
   } catch (err) { next(err); }
 }
 
-/** Manually (re)run eligibility for an appointment. */
+/** Manually (re)run eligibility for an appointment. Every attempt is audited. */
 export async function verifyEligibility(req, res, next) {
   try {
     const row = await getRawByUuid(req.params.uuid);
     await assertCanManage(req, row);
-    const r = await verifyAppointmentEligibility(row);
+    // A manual click is a deliberate user action → force a fresh check (this is the
+    // ONLY way a with-benefits appointment re-calls the payer; automatic paths never do).
+    const r = await auditedEligibility(req, row, { trigger: 'manual', manual: true, opts: { force: true } });
     if (r.skipped === 'stedi_disabled') return res.status(503).json({ error: 'Eligibility service is not configured. Add STEDI_API_KEY.', code: 'STEDI_DISABLED' });
     if (r.skipped) return res.status(422).json({ error: ELIG_SKIP_MSG[r.skipped] || 'Eligibility could not be verified.', code: `ELIG_${r.skipped.toUpperCase()}` });
-    await recordAudit({
-      actorUserId: req.authUserId, action: 'appointment.eligibility.verify', entityType: 'appointment', entityId: row.uuid,
-      ip: req.ip, userAgent: req.get('user-agent'), metadata: { status: r.check?.status },
-    });
     res.status(201).json({ appointment: toPublicAppointment(await getRawByUuid(req.params.uuid)), status: r.check?.status });
   } catch (err) {
+    // Payer/clearinghouse error — already audited as outcome:'error' by the helper.
     if (err.code && String(err.code).startsWith('STEDI')) return res.status(502).json({ error: err.message, code: err.code });
     next(err);
   }
@@ -208,7 +238,8 @@ export async function remove(req, res, next) {
   try {
     const row = await getRawByUuid(req.params.uuid);
     await assertCanManage(req, row);
-    await deleteAppointment(req.params.uuid);
+    const reason = String(req.body?.reason || '').trim();
+    await deleteAppointment(req.params.uuid); // also purges the appointment's eligibility checks
     await recordAudit({
       actorUserId: req.authUserId,
       action: 'appointment.delete',
@@ -216,6 +247,8 @@ export async function remove(req, res, next) {
       entityId: req.params.uuid,
       ip: req.ip,
       userAgent: req.get('user-agent'),
+      // Reason + non-PHI context (never the encrypted title/patient name).
+      metadata: { reason, date: row.appt_date, patientLinked: !!row.patient_uuid },
     });
     res.json({ ok: true });
   } catch (err) { next(err); }

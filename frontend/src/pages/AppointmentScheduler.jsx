@@ -5,25 +5,9 @@ import AppointmentEligibilityModal from '../components/AppointmentEligibilityMod
 import { useToast } from '../components/Toast.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
 import { appointmentsApi, patientsApi, providersApi, toApiError } from '../lib/api.js';
+import { specialtyProcedures } from '../lib/procedureCatalog.js';
 
-// Common SNF Part B procedures for the appointment procedure picker.
-const COMMON_PROCEDURES = [
-  { code: '99306', desc: 'Initial nursing facility visit' },
-  { code: '99308', desc: 'Subsequent SNF visit (expanded)' },
-  { code: '99309', desc: 'Subsequent SNF visit (detailed)' },
-  { code: '99310', desc: 'Subsequent SNF visit (complex)' },
-  { code: '99315', desc: 'Nursing facility discharge' },
-  { code: '99497', desc: 'Advance care planning' },
-  { code: '99483', desc: 'Cognitive assessment & care plan' },
-  { code: '90792', desc: 'Psychiatric diagnostic evaluation' },
-  { code: '97110', desc: 'Therapeutic exercise (PT)' },
-  { code: '97530', desc: 'Therapeutic activities (PT)' },
-  { code: '97165', desc: 'Occupational therapy evaluation' },
-  { code: '92507', desc: 'Speech/language treatment' },
-  { code: '11042', desc: 'Wound debridement' },
-  { code: '20610', desc: 'Major joint injection/aspiration' },
-];
-const ELIG_TAG = { active: 'Active', inactive: 'Inactive', pending: 'Pending' };
+const ELIG_TAG = { active: 'Active', inactive: 'Inactive', pending: 'Pending', error: 'Recheck' };
 
 const providerLabel = (p) => `${p.fullName}${p.credentials?.length ? `, ${p.credentials.join(', ')}` : ''}${p.specialty ? ` · ${p.specialty.name}` : ''}`;
 
@@ -33,10 +17,10 @@ const patientName = (p) => `${p?.demographics?.firstName || ''} ${p?.demographic
 const DAY_START = 7 * 60; // 07:00
 const DAY_END = 19 * 60; // 19:00
 const STEP = 30; // minutes per row
-const SLOT_H = 46; // px per row
+const SLOT_H = 62; // px per row (roomier, enterprise)
 const SLOTS = (DAY_END - DAY_START) / STEP; // 24 rows
 const BODY_H = SLOTS * SLOT_H;
-const COL_W = 132;
+const COL_W = 172;
 
 const TYPES = [
   { key: 'consult', label: 'Consultation' },
@@ -98,6 +82,9 @@ export default function AppointmentScheduler() {
   const [appts, setAppts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState(null);
+  const [delModal, setDelModal] = useState(null); // { uuid, title } — delete-reason prompt
+  const [delReason, setDelReason] = useState('');
+  const [busy, setBusy] = useState(false); // guards actions so each runs only once
   const [drag, setDrag] = useState(null); // live drag ghost { appt, x, y, w }
   const dragRef = useRef(null); // { appt, offsetY, startX, startY, moved }
   const [patients, setPatients] = useState([]); // provider's own patients (for search)
@@ -176,9 +163,13 @@ export default function AppointmentScheduler() {
   }
   const setF = (patch) => setModal((c) => ({ ...c, form: { ...c.form, ...patch } }));
 
+  // Refresh once shortly after a booking so the background eligibility tag appears.
+  const refreshForTag = () => { window.setTimeout(() => load(), 3500); };
+
   async function saveForm() {
     const f = modal.form;
-    if (!f.title.trim()) return;
+    if (!f.title.trim() || busy) return;          // guard: only once
+    setBusy(true);
     const payload = {
       title: f.title.trim(),
       patient: f.patient.trim() || undefined,
@@ -190,39 +181,40 @@ export default function AppointmentScheduler() {
       startMin: clampStart(f.startMin, f.durationMin),
       durationMin: f.durationMin,
     };
+    const wasEdit = modal.mode === 'edit';
+    const hadPatient = !!f.patientUuid;
     try {
-      if (modal.mode === 'edit') {
-        await appointmentsApi.update(modal.uuid, { ...payload, status: f.status });
-      } else {
-        await appointmentsApi.create(payload);
-      }
-      setModal(null);
+      if (wasEdit) await appointmentsApi.update(modal.uuid, { ...payload, status: f.status });
+      else await appointmentsApi.create(payload);
+      setModal(null);                              // close immediately
       load();
-      toast.success(modal.mode === 'edit' ? 'Appointment updated.' : 'Appointment booked — eligibility verifying…');
+      if (hadPatient) refreshForTag();             // eligibility runs in the background
+      toast.success(wasEdit ? 'Appointment updated.' : 'Appointment booked.');
     } catch (e) {
-      toast.error(toApiError(e).message);
-    }
+      toast.error(toApiError(e).message);          // e.g. "That time slot is already booked"
+    } finally { setBusy(false); }
   }
-  async function deleteForm() {
+  async function deleteForm(reason) {
+    if (busy || !delModal) return;
+    if (!reason || reason.trim().length < 2) { toast.error('Please record a reason for deletion.'); return; }
+    setBusy(true);
     try {
-      await appointmentsApi.remove(modal.uuid);
-      setModal(null);
-      load();
+      await appointmentsApi.remove(delModal.uuid, reason.trim());
+      setDelModal(null); setModal(null); load();
       toast.success('Appointment deleted.');
-    } catch (e) {
-      toast.error(toApiError(e).message);
-    }
+    } catch (e) { toast.error(toApiError(e).message); }
+    finally { setBusy(false); }
   }
   // Front-desk check-in / check-out — persists the status immediately.
   async function checkAppt(status) {
+    if (busy) return;
+    setBusy(true);
     try {
       await appointmentsApi.setStatus(modal.uuid, status);
-      setModal(null);
-      load();
+      setModal(null); load();
       toast.success(status === 'checked_in' ? 'Patient checked in.' : 'Patient checked out.');
-    } catch (e) {
-      toast.error(toApiError(e).message);
-    }
+    } catch (e) { toast.error(toApiError(e).message); }
+    finally { setBusy(false); }
   }
 
   /* --- Drag to reschedule -------------------------------------------------- */
@@ -269,6 +261,11 @@ export default function AppointmentScheduler() {
       load(); // reconcile on failure
     }
   };
+
+  // Real-time specialty-focused procedures for the picker — from the selected
+  // rendering provider's specialty (else the current user's).
+  const selProvider = modal ? providers.find((p) => p.uuid === modal.form.renderingProviderUuid) : null;
+  const procCat = specialtyProcedures(selProvider?.specialty?.name || user?.specialty?.name || '');
 
   return (
     <div className="sch">
@@ -324,22 +321,35 @@ export default function AppointmentScheduler() {
                     >
                       <span className="sch-appt-t">{a.title}</span>
                       <span className="sch-appt-time">{fmtTime(a.startMin)} – {fmtTime(a.startMin + a.durationMin)}</span>
-                      {a.patient && <span className="sch-appt-pt">{a.patient}</span>}
-                      {a.eligibilityStatus && (
-                        <span
-                          className={`sch-elig ${a.eligibilityStatus}`}
-                          role="button"
-                          title="View eligibility & benefits"
-                          onPointerDown={(e) => e.stopPropagation()}
-                          onClick={(e) => { e.stopPropagation(); setEligModal({ uuid: a.uuid, title: a.title }); }}
-                        >
-                          <span className="dot" />{ELIG_TAG[a.eligibilityStatus] || a.eligibilityStatus}
+                      {a.patient && (
+                        <span className="sch-appt-pt" title={`Patient: ${a.patient}`}>
+                          <svg className="sch-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM5 20a7 7 0 0 1 14 0" /></svg>
+                          {a.patient}
                         </span>
                       )}
-                      {a.status === 'cancelled' && <span className="sch-appt-flag">Cancelled</span>}
-                      {a.status === 'completed' && <span className="sch-appt-flag ok">Completed</span>}
-                      {a.status === 'checked_in' && <span className="sch-appt-flag in">Checked In</span>}
-                      {a.status === 'checked_out' && <span className="sch-appt-flag out">Checked Out</span>}
+                      {a.renderingProvider && (
+                        <span className="sch-appt-pr" title={`Rendering provider: ${a.renderingProvider}`}>
+                          <svg className="sch-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3v5a4 4 0 0 0 8 0V3M10 12.5V15a4 4 0 0 0 8 0v-.5M18 11.5a1.6 1.6 0 1 0 0 3.2 1.6 1.6 0 0 0 0-3.2Z" /></svg>
+                          {a.renderingProvider}
+                        </span>
+                      )}
+                      <span className="sch-appt-foot">
+                        {a.eligibilityStatus && (
+                          <span
+                            className={`sch-elig ${a.eligibilityStatus}`}
+                            role="button"
+                            title="View eligibility & benefits"
+                            onPointerDown={(e) => e.stopPropagation()}
+                            onClick={(e) => { e.stopPropagation(); setEligModal({ uuid: a.uuid, title: a.title }); }}
+                          >
+                            <span className="dot" />{ELIG_TAG[a.eligibilityStatus] || a.eligibilityStatus}
+                          </span>
+                        )}
+                        {a.status === 'cancelled' && <span className="sch-appt-flag">Cancelled</span>}
+                        {a.status === 'completed' && <span className="sch-appt-flag ok">Completed</span>}
+                        {a.status === 'checked_in' && <span className="sch-appt-flag in">Checked In</span>}
+                        {a.status === 'checked_out' && <span className="sch-appt-flag out">Checked Out</span>}
+                      </span>
                     </button>
                   );
                 })}
@@ -362,25 +372,29 @@ export default function AppointmentScheduler() {
       {modal && (
         <Modal
           title={modal.mode === 'edit' ? 'Edit appointment' : 'New appointment'}
-          width={480}
+          width={760}
           onClose={() => setModal(null)}
           footer={
             <>
-              {modal.mode === 'edit' && <button className="btn danger" onClick={deleteForm} style={{ marginRight: 'auto' }}>Delete</button>}
+              {modal.mode === 'edit' && <button className="btn danger" onClick={() => { setDelReason(''); setDelModal({ uuid: modal.uuid, title: modal.form.title }); }} disabled={busy} style={{ marginRight: 'auto' }}>Delete</button>}
               {modal.mode === 'edit' && !['cancelled', 'completed', 'checked_out'].includes(modal.form.status) && (
                 modal.form.status === 'checked_in'
-                  ? <button className="btn ghost" onClick={() => checkAppt('checked_out')} title="Check out — patient has left">Check out</button>
-                  : <button className="btn ghost" onClick={() => checkAppt('checked_in')} title="Check in — patient has arrived">Check in</button>
+                  ? <button className="btn ghost" onClick={() => checkAppt('checked_out')} disabled={busy} title="Check out — patient has left">Check out</button>
+                  : <button className="btn ghost" onClick={() => checkAppt('checked_in')} disabled={busy} title="Check in — patient has arrived">Check in</button>
               )}
               {modal.mode === 'edit' && modal.form.patientUuid && (
                 <button className="btn ghost" onClick={() => setEligModal({ uuid: modal.uuid, title: modal.form.title })} title="Real-time eligibility & benefits">Eligibility</button>
               )}
-              <button className="btn ghost" onClick={() => setModal(null)}>Cancel</button>
-              <button className="btn" onClick={saveForm} disabled={!modal.form.title.trim() || (isBilling && !modal.form.renderingProviderUuid)}>{modal.mode === 'edit' ? 'Save changes' : 'Book appointment'}</button>
+              <button className="btn ghost" onClick={() => setModal(null)} disabled={busy}>Cancel</button>
+              <button className="btn" onClick={saveForm} disabled={busy || !modal.form.title.trim() || (isBilling && !modal.form.renderingProviderUuid)}>
+                {busy ? (modal.mode === 'edit' ? 'Saving…' : 'Booking…') : (modal.mode === 'edit' ? 'Save changes' : 'Book appointment')}
+              </button>
             </>
           }
         >
-          <form className="stack" style={{ gap: 14 }} onSubmit={(e) => { e.preventDefault(); if (modal.form.title.trim()) saveForm(); }}>
+          <form className="appt-form" onSubmit={(e) => { e.preventDefault(); if (modal.form.title.trim()) saveForm(); }}>
+            <div className="appt-cols">
+            <div className="appt-col">
             <div className="field">
               <label>Title</label>
               <input className="input" value={modal.form.title} autoFocus placeholder="e.g. New patient consult" onChange={(e) => setF({ title: e.target.value })} />
@@ -440,7 +454,9 @@ export default function AppointmentScheduler() {
                 ? <span className="hint">No providers are assigned to your facility yet — assign providers to a facility in the Admin panel.</span>
                 : isBilling && <span className="hint">Select the provider whose schedule this appointment belongs to.</span>}
             </div>
+            </div>
 
+            <div className="appt-col">
             <div className="field">
               <label>Type</label>
               <div className="seg-ctrl">
@@ -453,12 +469,17 @@ export default function AppointmentScheduler() {
               <label>Procedure <span className="muted">(CPT/HCPCS — what the appointment is for; drives eligibility)</span></label>
               <input
                 className="input" list="sch-cpt-list" value={modal.form.procedureCode}
-                placeholder="e.g. 99309 — Subsequent SNF visit"
+                placeholder={procCat.procedures[0] ? `e.g. ${procCat.procedures[0].code} — ${procCat.procedures[0].desc}` : 'e.g. 99309'}
                 onChange={(e) => setF({ procedureCode: e.target.value })}
               />
               <datalist id="sch-cpt-list">
-                {COMMON_PROCEDURES.map((p) => <option key={p.code} value={p.code}>{`${p.code} — ${p.desc}`}</option>)}
+                {procCat.procedures.map((p) => <option key={p.code} value={p.code}>{`${p.code} — ${p.desc}`}</option>)}
               </datalist>
+              <span className="hint">
+                {procCat.matched
+                  ? `Showing ${procCat.label} procedures`
+                  : 'General SNF Part B — select a rendering provider for specialty-specific codes'}
+              </span>
             </div>
             <div className="grid-2">
               <div className="field">
@@ -480,8 +501,10 @@ export default function AppointmentScheduler() {
                 ))}
               </div>
             </div>
+            </div>
+            </div>
             {modal.mode === 'edit' && (
-              <div className="field">
+              <div className="field appt-status">
                 <label>Status</label>
                 <div className="seg-ctrl">
                   {STATUSES.map((s) => (
@@ -511,6 +534,36 @@ export default function AppointmentScheduler() {
           onClose={() => setEligModal(null)}
           onChanged={load}
         />
+      )}
+
+      {delModal && (
+        <Modal
+          title="Delete appointment"
+          width={460}
+          onClose={() => setDelModal(null)}
+          footer={(
+            <>
+              <button className="btn ghost" onClick={() => setDelModal(null)} disabled={busy}>Cancel</button>
+              <button className="btn danger" onClick={() => deleteForm(delReason)} disabled={busy || delReason.trim().length < 2}>
+                {busy ? 'Deleting…' : 'Delete appointment'}
+              </button>
+            </>
+          )}
+        >
+          <div className="stack" style={{ gap: 12 }}>
+            <p className="muted" style={{ margin: 0 }}>
+              Deleting <strong>{delModal.title || 'this appointment'}</strong> is permanent and removes its eligibility record. Please record a reason — it is saved to the audit log.
+            </p>
+            <div className="field">
+              <label>Reason for deletion <span className="fs-req">*</span></label>
+              <textarea
+                className="input" rows={3} value={delReason} autoFocus
+                placeholder="e.g. Duplicate booking · patient cancelled · entered in error"
+                onChange={(e) => setDelReason(e.target.value)}
+              />
+            </div>
+          </div>
+        </Modal>
       )}
     </div>
   );
