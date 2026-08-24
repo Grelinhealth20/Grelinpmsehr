@@ -269,6 +269,7 @@ export default function PatientModal({ uuid = null, docMode = 'license', onClose
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(!!uuid);
   const [extracting, setExtracting] = useState(false);
+  const [viewTab, setViewTab] = useState('facesheet'); // 'facesheet' | 'benefits'
 
   useEffect(() => {
     let active = true;
@@ -426,6 +427,23 @@ export default function PatientModal({ uuid = null, docMode = 'license', onClose
             {mrn && <span className="fs-summary-mrn">MRN {mrn}</span>}
           </div>
 
+          <div className="fs-vtabs" role="tablist">
+            <button type="button" role="tab" aria-selected={viewTab === 'facesheet'} className={`fs-vtab ${viewTab === 'facesheet' ? 'is-on' : ''}`} onClick={() => setViewTab('facesheet')}>
+              <svg className="fs-vtab-ic" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M7 3h7l4 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z" /><path d="M14 3v4h4M9 13h6M9 16.5h4" />
+              </svg>
+              Patient Face Sheet
+            </button>
+            <button type="button" role="tab" aria-selected={viewTab === 'benefits'} className={`fs-vtab ${viewTab === 'benefits' ? 'is-on' : ''}`} onClick={() => setViewTab('benefits')}>
+              <svg className="fs-vtab-ic" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M12 3l7.5 3.2v5.3c0 4.8-3.2 8.3-7.5 10.2-4.3-1.9-7.5-5.4-7.5-10.2V6.2z" /><path d="M9 12l2 2 4-4" />
+              </svg>
+              Benefits Information
+            </button>
+          </div>
+
+          {viewTab === 'facesheet' && (
+          <>
           {docMode === 'records' && (
             <div className="fs-section">
               <div className="fs-section-h">Face Sheets &amp; PCC Documents{!pUuid && <span className="fs-section-note"> — auto-fill now, files are saved after you create the patient</span>}</div>
@@ -450,31 +468,6 @@ export default function PatientModal({ uuid = null, docMode = 'license', onClose
               <Field label="State" value={form.demographics.state} onChange={(v) => setD('state', v)} maxLength={40} />
               <Field label="ZIP" value={form.demographics.zip} onChange={(v) => setD('zip', v)} maxLength={12} />
             </div>
-          </div>
-
-          <div className="fs-section">
-            <div className="fs-section-h">
-              Insurance
-              <span className="spacer" />
-              {form.insurance.length < 3 && <button type="button" className="btn ghost sm" onClick={addIns}>+ Add insurance</button>}
-            </div>
-            {form.insurance.length === 0 && <div className="fs-empty" style={{ padding: '10px 0' }}>No insurance on file. Add primary insurance.</div>}
-            {form.insurance.map((ins, i) => (
-              <div className="fs-ins" key={i}>
-                <div className="fs-ins-head">
-                  <span className={`fs-ins-rank r-${ins.type || 'primary'}`}>{INS_LABEL[ins.type] || `Policy ${i + 1}`}</span>
-                  <span className="spacer" />
-                  <button type="button" className="act danger" onClick={() => removeIns(i)}>Remove</button>
-                </div>
-                <div className="fs-grid fs-grid-3">
-                  <Field label="Payer" value={ins.payer} onChange={(v) => setInsAt(i, 'payer', v)} maxLength={120} />
-                  <Field label="Member ID" value={ins.memberId} onChange={(v) => setInsAt(i, 'memberId', v)} maxLength={80} />
-                  <Field label="Group #" value={ins.group} onChange={(v) => setInsAt(i, 'group', v)} maxLength={80} />
-                  <Field label="Medicare Beneficiary ID (MBI)" value={ins.mbi} onChange={(v) => setInsAt(i, 'mbi', v)} maxLength={20} />
-                  <Field label="Plan type" value={ins.planType} onChange={(v) => setInsAt(i, 'planType', v)} maxLength={60} />
-                </div>
-              </div>
-            ))}
           </div>
 
           <div className="fs-section">
@@ -528,6 +521,35 @@ export default function PatientModal({ uuid = null, docMode = 'license', onClose
                 ))}
               </div>
             </div>
+          )}
+          </>
+          )}
+
+          {viewTab === 'benefits' && (
+          <div className="fs-section" style={{ marginBottom: 0 }}>
+            <div className="fs-section-h">
+              Insurance &amp; Benefits
+              <span className="spacer" />
+              {form.insurance.length < 3 && <button type="button" className="btn ghost sm" onClick={addIns}>+ Add insurance</button>}
+            </div>
+            {form.insurance.length === 0 && <div className="fs-empty" style={{ padding: '10px 0' }}>No insurance on file. Add primary insurance.</div>}
+            {form.insurance.map((ins, i) => (
+              <div className="fs-ins" key={i}>
+                <div className="fs-ins-head">
+                  <span className={`fs-ins-rank r-${ins.type || 'primary'}`}>{INS_LABEL[ins.type] || `Policy ${i + 1}`}</span>
+                  <span className="spacer" />
+                  <button type="button" className="act danger" onClick={() => removeIns(i)}>Remove</button>
+                </div>
+                <div className="fs-grid fs-grid-3">
+                  <Field label="Payer" value={ins.payer} onChange={(v) => setInsAt(i, 'payer', v)} maxLength={120} />
+                  <Field label="Member ID" value={ins.memberId} onChange={(v) => setInsAt(i, 'memberId', v)} maxLength={80} />
+                  <Field label="Group #" value={ins.group} onChange={(v) => setInsAt(i, 'group', v)} maxLength={80} />
+                  <Field label="Medicare Beneficiary ID (MBI)" value={ins.mbi} onChange={(v) => setInsAt(i, 'mbi', v)} maxLength={20} />
+                  <Field label="Plan type" value={ins.planType} onChange={(v) => setInsAt(i, 'planType', v)} maxLength={60} />
+                </div>
+              </div>
+            ))}
+          </div>
           )}
         </div>
       )}

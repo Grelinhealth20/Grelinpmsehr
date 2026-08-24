@@ -18,12 +18,16 @@ export const NOTE_TYPES = {
   wound_care: { label: 'Wound Care Note', category: 'Subsequent / Specialized service', cpt: '99307–99310' },
   advance_care: { label: 'Advance Care Planning Note', category: 'Separately reportable (ACP)', cpt: '99497–99498' },
   discharge: { label: 'Discharge Summary', category: 'Nursing Facility Discharge', cpt: '99315–99316' },
+  // Non-E/M Part B physician services in the SNF.
+  procedure_note: { label: 'Procedure Note', category: 'Part B Procedure', cpt: 'Per procedure (11042–11047 · 20610 · 97597…)' },
+  behavioral_health: { label: 'Behavioral Health / Psychiatric Note', category: 'Behavioral Health (Part B)', cpt: '90792 · 99307–99310 (+90833/90836)' },
+  cognitive_care: { label: 'Cognitive Assessment & Care Planning', category: 'Cognitive Care Planning (Part B)', cpt: '99483' },
   death: { label: 'Death / Expiration Note', category: 'As applicable', cpt: '—' },
 };
 
 // Simplified provider menu (primary choices) + the rest under "More".
 export const NOTE_MENU = ['hp_admission', 'progress', 'acute_visit', 'regulatory', 'post_hospital', 'wound_care', 'discharge'];
-export const NOTE_MENU_MORE = ['change_in_condition', 'follow_up', 'medication', 'lab_imaging', 'advance_care', 'death'];
+export const NOTE_MENU_MORE = ['change_in_condition', 'follow_up', 'medication', 'lab_imaging', 'procedure_note', 'behavioral_health', 'cognitive_care', 'advance_care', 'death'];
 
 // Reason-for-encounter options for a Progress Note (structured coding data).
 export const PROGRESS_REASONS = [
@@ -78,6 +82,26 @@ export const SECTION_LABELS = {
   regulatoryAttestation: 'Regulatory Attestation',
   timeSpent: 'Total Time & Attestation',
   addendum: 'Additional Notes',
+  // Procedure note
+  procedureName: 'Procedure Performed',
+  indication: 'Indication',
+  consent: 'Informed Consent',
+  procTechnique: 'Technique / Description of Procedure',
+  procFindings: 'Findings',
+  specimen: 'Specimens / Cultures Sent',
+  ebl: 'Estimated Blood Loss',
+  complications: 'Complications',
+  postProcedure: 'Post-Procedure Condition & Plan',
+  // Behavioral health / psychiatric
+  psychHistory: 'Psychiatric History',
+  mentalStatus: 'Mental Status Examination',
+  riskAssessment: 'Risk Assessment (SI / HI / Safety)',
+  // Cognitive assessment & care planning (99483)
+  cognitiveAssessment: 'Cognitive Assessment (Standardized Instrument)',
+  neuroPsych: 'Neuropsychiatric & Behavioral Symptoms',
+  safetyEval: 'Safety Evaluation',
+  caregiver: 'Caregiver Assessment & Support',
+  dementiaPlan: 'Care Plan (Cognitive / Dementia)',
 };
 
 export const SECTION_PROMPTS = {
@@ -126,10 +150,31 @@ export const SECTION_PROMPTS = {
   regulatoryAttestation: 'This required periodic physician evaluation was personally performed on this date…',
   timeSpent: 'Total time spent on the date of the encounter (for time-based billing) and attestation of personal performance…',
   addendum: 'Any additional clinically relevant information…',
+  // Procedure note
+  procedureName: 'Exact procedure(s) performed (e.g. selective debridement, joint aspiration/injection, I&D, laceration repair) with CPT…',
+  indication: 'Clinical indication and medical necessity for the procedure…',
+  consent: 'Informed consent obtained — risks, benefits, alternatives discussed; patient/surrogate agreement; time-out performed…',
+  procTechnique: 'Site prep and anesthesia; step-by-step technique; instruments/materials; for debridement: tissue type, depth, and surface area (cm²) removed…',
+  procFindings: 'Intra-procedure findings (wound bed, fluid, joint, mass, etc.)…',
+  specimen: 'Specimens, cultures, or pathology sent (and to where)…',
+  ebl: 'Estimated blood loss…',
+  complications: 'Complications encountered, or “none”…',
+  postProcedure: 'Patient tolerance and condition; dressing/immobilization; post-procedure orders, monitoring, and follow-up…',
+  // Behavioral health / psychiatric
+  psychHistory: 'Psychiatric diagnoses, prior hospitalizations, substance use, trauma, and relevant history…',
+  mentalStatus: 'Appearance, behavior, speech, mood/affect, thought process/content, perception, cognition, insight, judgment…',
+  riskAssessment: 'Suicidal / homicidal ideation, plan, intent; self-harm; elopement; and the safety plan / precautions ordered…',
+  // Cognitive assessment & care planning (99483)
+  cognitiveAssessment: 'Standardized cognitive instrument used and score (e.g. MoCA, MMSE, Mini-Cog); staging of impairment…',
+  neuroPsych: 'Neuropsychiatric and behavioral symptoms (agitation, psychosis, depression, sleep) and validated severity where used…',
+  safetyEval: 'Safety concerns — wandering/elopement, falls, driving, home/room hazards, medication self-administration…',
+  caregiver: 'Caregiver identity, knowledge, willingness, and needs; caregiver strain and support resources…',
+  dementiaPlan: 'Individualized care plan: interventions, referrals, non-pharmacologic strategies, medication plan, and goals shared with patient/caregiver…',
 };
 
 // Sections that benefit from a larger text area.
-const BIG = new Set(['hpi', 'interval', 'ros', 'exam', 'assessment', 'plan', 'hospitalCourse', 'mdm', 'wound', 'results', 'medications', 'dischargeMeds', 'goals', 'carePlanReview']);
+const BIG = new Set(['hpi', 'interval', 'ros', 'exam', 'assessment', 'plan', 'hospitalCourse', 'mdm', 'wound', 'results', 'medications', 'dischargeMeds', 'goals', 'carePlanReview',
+  'procTechnique', 'procFindings', 'mentalStatus', 'riskAssessment', 'cognitiveAssessment', 'neuroPsych', 'dementiaPlan', 'caregiver']);
 
 // Build a template. `over` provides note-type-specific section labels/prompts so
 // each template reads correctly for its clinical purpose (e.g. "Reason for
@@ -206,6 +251,21 @@ export const TEMPLATES = {
   discharge: T(
     ['dischargeDiagnoses', 'hospitalCourse', 'procedures', 'functionalStatus', 'dischargeMeds', 'disposition', 'followUp', 'dischargeInstructions', 'timeSpent'],
     { hospitalCourseLabel: 'Summary of SNF Stay', functionalStatusLabel: 'Functional Status at Discharge' },
+  ),
+  // Bedside procedure (Part B) — procedure-note documentation, not E/M.
+  procedure_note: T(
+    ['procedureName', 'indication', 'consent', 'procTechnique', 'procFindings', 'specimen', 'ebl', 'complications', 'postProcedure', 'timeSpent'],
+    { timeSpentLabel: 'Total Procedure Time & Attestation' },
+  ),
+  // Behavioral health / psychiatric visit (Part B) — psych-specific documentation.
+  behavioral_health: T(
+    ['chiefComplaint', 'psychHistory', 'interval', 'medications', 'mentalStatus', 'riskAssessment', 'assessment', 'mdm', 'plan', 'timeSpent'],
+    { chiefComplaintLabel: 'Reason for Psychiatric Visit', intervalLabel: 'Interval / Symptom Status', medicationsLabel: 'Current Psychotropic Medications', assessmentLabel: 'Psychiatric Assessment (DSM-5 / ICD-10)' },
+  ),
+  // Cognitive assessment & care planning (99483) — CMS-required elements.
+  cognitive_care: T(
+    ['chiefComplaint', 'cognitiveAssessment', 'functionalStatus', 'medications', 'neuroPsych', 'safetyEval', 'caregiver', 'advanceDirective', 'dementiaPlan', 'timeSpent'],
+    { chiefComplaintLabel: 'Reason for Cognitive Assessment', functionalStatusLabel: 'Functional Assessment (ADL / IADL)', medicationsLabel: 'Medication Reconciliation (High-Risk Medications)', timeSpentLabel: 'Total Time (99483 is time-based) & Attestation' },
   ),
   // Death / expiration documentation.
   death: T(

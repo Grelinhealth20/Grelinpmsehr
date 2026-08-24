@@ -183,6 +183,8 @@ export const NOTE_TYPES = [
   'hp_admission', 'progress', 'acute_visit', 'change_in_condition', 'follow_up',
   'regulatory', 'post_hospital', 'medication', 'lab_imaging', 'wound_care',
   'advance_care', 'discharge', 'death',
+  // Non-E/M Part B physician services
+  'procedure_note', 'behavioral_health', 'cognitive_care',
 ];
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be YYYY-MM-DD');
 // Structured note body (PHI, encrypted at rest): narrative sections + Rx list.

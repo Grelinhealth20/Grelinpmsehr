@@ -24,6 +24,9 @@ export const NOTE_TITLES = {
   wound_care: 'Wound Care Note',
   advance_care: 'Advance Care Planning Note',
   discharge: 'Discharge Summary',
+  procedure_note: 'Procedure Note',
+  behavioral_health: 'Behavioral Health / Psychiatric Note',
+  cognitive_care: 'Cognitive Assessment & Care Planning Note',
   death: 'Death / Expiration Note',
 };
 
@@ -74,12 +77,36 @@ export const SECTION_LABELS = {
   regulatoryAttestation: 'Regulatory Attestation',
   timeSpent: 'Total Time & Attestation',
   addendum: 'Additional Notes',
+  // Procedure note
+  procedureName: 'Procedure Performed',
+  indication: 'Indication',
+  consent: 'Informed Consent',
+  procTechnique: 'Technique / Description of Procedure',
+  procFindings: 'Findings',
+  specimen: 'Specimens / Cultures Sent',
+  ebl: 'Estimated Blood Loss',
+  complications: 'Complications',
+  postProcedure: 'Post-Procedure Condition & Plan',
+  // Behavioral health / psychiatric
+  psychHistory: 'Psychiatric History',
+  mentalStatus: 'Mental Status Examination',
+  riskAssessment: 'Risk Assessment (SI / HI / Safety)',
+  // Cognitive assessment & care planning (99483)
+  cognitiveAssessment: 'Cognitive Assessment (Standardized Instrument)',
+  neuroPsych: 'Neuropsychiatric & Behavioral Symptoms',
+  safetyEval: 'Safety Evaluation',
+  caregiver: 'Caregiver Assessment & Support',
+  dementiaPlan: 'Care Plan (Cognitive / Dementia)',
 };
 const SECTION_ORDER = [
   'chiefComplaint', 'changeDescription', 'hpi', 'interval', 'hospitalCourse', 'ros',
-  'pmh', 'psh', 'familyHistory', 'socialHistory', 'medications', 'medChanges',
-  'allergies', 'adverseEffects', 'vitals', 'exam', 'wound', 'treatment', 'results',
-  'carePlanReview', 'assessment', 'mdm', 'plan', 'orders', 'notifications', 'prognosis',
+  'pmh', 'psh', 'familyHistory', 'socialHistory', 'psychHistory',
+  'medications', 'medChanges', 'allergies', 'adverseEffects', 'vitals', 'exam',
+  'mentalStatus', 'cognitiveAssessment', 'neuroPsych', 'wound', 'treatment', 'results',
+  // Procedure body (kept together, in operative-note order)
+  'procedureName', 'indication', 'consent', 'procTechnique', 'procFindings', 'specimen', 'ebl', 'complications', 'postProcedure',
+  'carePlanReview', 'riskAssessment', 'safetyEval', 'caregiver', 'assessment', 'mdm', 'plan', 'dementiaPlan',
+  'orders', 'notifications', 'prognosis',
   'goals', 'participants', 'decisionsMade', 'codeStatus', 'advanceDirective',
   'dischargeDiagnoses', 'procedures', 'functionalStatus', 'dischargeMeds', 'disposition',
   'followUp', 'dischargeInstructions', 'careCoordination', 'pronouncement', 'circumstances',
@@ -101,6 +128,9 @@ const NOTE_LABEL_OVERRIDES = {
   wound_care: { chiefComplaint: 'Reason for Wound Care', interval: 'Wound Progress Since Last Visit', exam: 'Relevant Physical Examination' },
   advance_care: { chiefComplaint: 'Reason for Advance Care Planning Discussion', timeSpent: 'Total Time Spent (required for 99497/99498)' },
   discharge: { hospitalCourse: 'Summary of SNF Stay', functionalStatus: 'Functional Status at Discharge' },
+  procedure_note: { timeSpent: 'Total Procedure Time & Attestation' },
+  behavioral_health: { chiefComplaint: 'Reason for Psychiatric Visit', interval: 'Interval / Symptom Status', medications: 'Current Psychotropic Medications', assessment: 'Psychiatric Assessment (DSM-5 / ICD-10)' },
+  cognitive_care: { chiefComplaint: 'Reason for Cognitive Assessment', functionalStatus: 'Functional Assessment (ADL / IADL)', medications: 'Medication Reconciliation (High-Risk Medications)', timeSpent: 'Total Time (99483 is time-based) & Attestation' },
   death: { exam: 'Examination Findings at Time of Death', notifications: 'Notifications (Family / Attending / Medical Examiner)' },
 };
 
