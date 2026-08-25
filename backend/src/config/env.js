@@ -63,6 +63,10 @@ export const config = {
     refreshSecret: required('JWT_REFRESH_SECRET'),
     accessTtl: int('ACCESS_TOKEN_TTL', 1800),
     refreshTtl: int('REFRESH_TOKEN_TTL', 28800),
+    // Automatic secret rotation cadence (default 40 min). New tokens are signed
+    // with the newest secret; recent prior secrets stay valid until their tokens
+    // expire, so rotation never disrupts a live session.
+    rotateSeconds: int('KEY_ROTATION_SECONDS', 2400),
   },
 
   policy: {
@@ -73,8 +77,10 @@ export const config = {
   },
 
   masterAdmin: {
-    email: process.env.MASTER_ADMIN_EMAIL || 'git@grelinhealth.com',
-    password: process.env.MASTER_ADMIN_PASSWORD || 'Grelin@2026!!',
+    // Required, fail-fast — never fall back to a source literal. A committed default
+    // would seed the top-privilege account with a password that is public in git.
+    email: required('MASTER_ADMIN_EMAIL'),
+    password: required('MASTER_ADMIN_PASSWORD'),
     name: process.env.MASTER_ADMIN_NAME || 'Master Administrator',
   },
 

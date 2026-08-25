@@ -3,7 +3,7 @@ import Modal from '../../components/Modal.jsx';
 import { useToast } from '../../components/Toast.jsx';
 import { facilitiesApi, usersApi, toApiError } from '../../lib/api.js';
 
-const BLANK = { npi: '', name: '', address: '', city: '', state: '', zip: '', phone: '', taxonomy: '' };
+const BLANK = { npi: '', name: '', address: '', city: '', state: '', zip: '', phone: '', taxonomy: '', logo: '' };
 const initials = (n = '') => n.split(' ').filter(Boolean).slice(0, 2).map((w) => w[0]?.toUpperCase()).join('') || '·';
 
 /**
@@ -25,6 +25,21 @@ export default function FacilityModal({ facility = null, onClose, onSaved }) {
   const [form, setForm] = useState(editing ? { ...BLANK, ...facility } : BLANK);
   const [verified, setVerified] = useState(editing); // a facility is chosen/verified
   const [saving, setSaving] = useState(false);
+  // Logo: null = unchanged, a data URI = new upload, '' = remove. The existing logo
+  // (form.logo) is a signed URL for display only and is never sent back.
+  const [logoData, setLogoData] = useState(null);
+
+  function onLogoFile(e) {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('image/')) { toast.error('Please choose an image file (PNG, JPG, SVG…).'); return; }
+    if (file.size > 500 * 1024) { toast.error('Logo must be under 500 KB.'); return; }
+    const reader = new FileReader();
+    reader.onload = () => setLogoData(reader.result);
+    reader.readAsDataURL(file);
+  }
+  const logoSrc = logoData !== null ? (logoData || null) : (form.logo || null);
 
   // --- provider assignment (manage mode) ---
   const [providers, setProviders] = useState(facility?.providers || []);
@@ -80,14 +95,21 @@ export default function FacilityModal({ facility = null, onClose, onSaved }) {
     if (!form.name.trim()) { toast.error('Facility name is required.'); return; }
     setSaving(true);
     try {
+      const { logo: _display, ...rest } = form; // drop the display-only signed URL
+      const payload = { ...rest };
+      if (logoData !== null) payload.logo = logoData; // new upload (data URI) or '' to clear
       if (uuid) {
-        const { data } = await facilitiesApi.update(uuid, form);
+        const { data } = await facilitiesApi.update(uuid, payload);
+        setForm((f) => ({ ...f, logo: data.facility.logo || '' }));
+        setLogoData(null);
         setProviders(data.facility.providers || providers);
         toast.success('Facility updated.');
         onSaved?.();
       } else {
-        const { data } = await facilitiesApi.create({ ...form, source: 'nppes' });
+        const { data } = await facilitiesApi.create({ ...payload, source: 'nppes' });
         setUuid(data.facility.uuid);
+        setForm((f) => ({ ...f, logo: data.facility.logo || '' }));
+        setLogoData(null);
         setProviders(data.facility.providers || []);
         toast.success(data.duplicate ? 'Facility already existed — opened for assignment.' : 'Facility saved.');
         onSaved?.();
@@ -175,6 +197,22 @@ export default function FacilityModal({ facility = null, onClose, onSaved }) {
             <div className="fac-verify-head">
               <span className="fac-badge">{form.npi ? 'NPPES verified' : 'Manual entry'}</span>
               <span className="fac-verify-title">Review the facility details</span>
+            </div>
+            <div className="fac-logo">
+              <div className="fac-logo-preview">
+                {logoSrc ? <img src={logoSrc} alt="Facility logo" /> : <span className="fac-logo-ph">{initials(form.name)}</span>}
+              </div>
+              <div className="fac-logo-side">
+                <span className="fac-logo-title">Facility logo</span>
+                <span className="fac-logo-hint">PNG, JPG, SVG or WEBP · under 500 KB · stored in the facility's secure folder.</span>
+                <div className="fac-logo-actions">
+                  <label className="btn ghost sm">
+                    {logoSrc ? 'Change logo' : 'Upload logo'}
+                    <input type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml" hidden onChange={onLogoFile} />
+                  </label>
+                  {logoSrc ? <button type="button" className="act danger" onClick={() => setLogoData('')}>Remove</button> : null}
+                </div>
+              </div>
             </div>
             <div className="fac-grid">
               <Fld label="Facility name" v={form.name} on={(v) => setF('name', v)} wide />

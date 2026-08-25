@@ -6,9 +6,10 @@ import cookieParser from 'cookie-parser';
 import pinoHttp from 'pino-http';
 import { logger } from './config/logger.js';
 import { config } from './config/env.js';
-import { requireGateway } from './middleware/requireGateway.js';
+import { requireGateway, acceptsInternalKey } from './middleware/requireGateway.js';
 import { globalLimiter } from './middleware/rateLimiters.js';
 import { notFound, errorHandler } from './middleware/errorHandler.js';
+import { activeInternalKey } from './services/keyRotationService.js';
 import apiRoutes from './routes/index.js';
 
 export function createApp() {
@@ -51,6 +52,16 @@ export function createApp() {
   app.use(compression());
   app.use(express.json({ limit: '100kb' })); // small body cap (DoS resistance)
   app.use(cookieParser());
+
+  // Loopback bootstrap: the gateway pulls the current (rotating) internal key from
+  // here, presenting a key already in the ring (its env key bootstraps this). Not
+  // under /api, not client-reachable (API binds to loopback); prod requires a ring key.
+  app.get('/internal/gateway-key', (req, res) => {
+    if (config.isProd && !acceptsInternalKey(req.get('x-internal-api-key'))) {
+      return res.status(403).json({ error: 'Forbidden.', code: 'GATEWAY_ONLY' });
+    }
+    res.json({ key: activeInternalKey() });
+  });
 
   // Enforce the proxy layer + global rate limit before any route runs.
   app.use('/api', requireGateway, globalLimiter, apiRoutes);

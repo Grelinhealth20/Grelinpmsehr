@@ -60,6 +60,26 @@ api.interceptors.response.use(
   },
 );
 
+/**
+ * Fetch a binary document (PDF) through the same authenticated `/api` proxy and
+ * hand the browser a Save dialog. The blob is fully in-memory and revoked right
+ * after — nothing is cached and no direct API URL is ever exposed to the page.
+ */
+export async function downloadPdf(path, fallbackName = 'document.pdf') {
+  const res = await api.get(path, { responseType: 'blob' });
+  const disp = res.headers['content-disposition'] || '';
+  const m = /filename="?([^"]+)"?/i.exec(disp);
+  const name = m ? m[1] : fallbackName;
+  const url = window.URL.createObjectURL(res.data);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.URL.revokeObjectURL(url);
+}
+
 /** Normalize server errors into a friendly shape for the UI. */
 export function toApiError(err) {
   const data = err?.response?.data;
@@ -120,6 +140,11 @@ export const facilitiesApi = {
   unassignProvider: (uuid, providerUuid) => api.delete(`/facilities/${uuid}/providers/${providerUuid}`),
 };
 
+// --- Audit logs (super admin) ----------------------------------------------
+export const auditApi = {
+  list: (params) => api.get('/audit', { params }),
+};
+
 // --- Payer directory (Stedi network) search --------------------------------
 export const payersApi = {
   search: (q) => api.get('/payers/search', { params: { q } }),
@@ -156,6 +181,10 @@ export const patientsApi = {
   removeDocument: (uuid, docUuid) => api.delete(`/patients/${uuid}/documents/${docUuid}`),
   // Benefits Verification (real-time eligibility) — scoped to the owned patient.
   listEligibility: (uuid) => api.get(`/patients/${uuid}/eligibility`),
+  // Downloadable records (real vector-text PDFs, facility-branded, grayscale).
+  downloadFaceSheet: (uuid, name) => downloadPdf(`/patients/${uuid}/facesheet/pdf`, name || 'face-sheet.pdf'),
+  downloadBenefits: (uuid, policyIndex, name) =>
+    downloadPdf(`/patients/${uuid}/benefits/pdf${policyIndex != null ? `?policyIndex=${policyIndex}` : ''}`, name || 'benefits.pdf'),
   // Live, server-side Stedi check — inputs pulled from the Face Sheet.
   verifyEligibility: (uuid, payload) => api.post(`/patients/${uuid}/eligibility/verify`, payload),
   // Programmatic ingest of a 271 the caller already holds.
@@ -175,6 +204,9 @@ export const encountersApi = {
   listNotes: (encounterUuid) => api.get(`/encounters/${encounterUuid}/notes`),
   createNote: (encounterUuid, payload) => api.post(`/encounters/${encounterUuid}/notes`, payload),
   getNote: (noteUuid) => api.get(`/encounters/notes/${noteUuid}`),
+  // Download a signed note as a real, non-editable medical-record PDF. Drafts are
+  // downloadable only by an MD (enforced server-side).
+  downloadNote: (noteUuid, name) => downloadPdf(`/encounters/notes/${noteUuid}/pdf`, name || 'medical-record.pdf'),
   updateNote: (noteUuid, payload) => api.patch(`/encounters/notes/${noteUuid}`, payload),
   signNote: (noteUuid, payload) => api.post(`/encounters/notes/${noteUuid}/sign`, payload),
   amendNote: (noteUuid, payload) => api.post(`/encounters/notes/${noteUuid}/amend`, payload),

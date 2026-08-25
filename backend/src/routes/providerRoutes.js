@@ -5,12 +5,18 @@ import { listProviderFacilities, listSchedulableProviders } from '../services/fa
 
 const router = Router();
 
-// Any authenticated, settled user may list active providers (for pickers).
 router.use(authenticate, requirePasswordSettled);
 
+// List active providers for pickers. Admins see the whole directory; a provider or
+// billing user sees ONLY providers in their own facilities — never the full
+// cross-facility staff roster (which would leak other tenants' personnel).
 router.get('/', async (req, res, next) => {
   try {
-    res.json({ providers: await listProviders() });
+    const isAdmin = req.user.role === 'master_admin' || req.user.role === 'super_admin';
+    const providers = isAdmin
+      ? await listProviders()
+      : await listSchedulableProviders(req.authUserId);
+    res.json({ providers });
   } catch (err) {
     next(err);
   }

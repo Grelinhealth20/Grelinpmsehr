@@ -168,6 +168,16 @@ function ClinicalNoteModal({ record, canSign, onClose, onSigned }) {
   }, [record.noteUuid]);
 
   const signed = note?.status === 'signed';
+  // Only signed records download; a draft is downloadable only by an MD (also
+  // enforced server-side). Hide the control entirely when neither applies.
+  const canDownload = !loading && !!note && (signed || canSign);
+
+  async function download() {
+    setBusy(true);
+    try {
+      await encountersApi.downloadNote(record.noteUuid, `medical-record-${record.mrn || 'record'}.pdf`);
+    } catch (e) { toast.error(toApiError(e).message); } finally { setBusy(false); }
+  }
 
   async function sign() {
     setBusy(true);
@@ -190,6 +200,11 @@ function ClinicalNoteModal({ record, canSign, onClose, onSigned }) {
           : <span className="clr-draft-flag">Yet to Sign</span>}
         <span className="spacer" />
         <button className="btn ghost" onClick={onClose} disabled={busy}>Close</button>
+        {canDownload && (
+          <button className="btn ghost" onClick={download} disabled={busy} title="Download this record as a PDF">
+            {busy ? <span className="spinner" /> : 'Download PDF'}
+          </button>
+        )}
         {canSign && !signed && (
           <button className="btn" onClick={sign} disabled={busy || loading} title="Approve & sign off for billing">
             {busy ? <span className="spinner" /> : 'Sign & finalize'}

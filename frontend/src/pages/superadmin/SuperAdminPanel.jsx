@@ -9,6 +9,7 @@ import { useAuth } from '../../context/AuthContext.jsx';
 import { useToast } from '../../components/Toast.jsx';
 import { useIdleTimeout } from '../../hooks/useIdleTimeout.js';
 import { usersApi, facilitiesApi, toApiError } from '../../lib/api.js';
+import AuditLogs from './AuditLogs.jsx';
 
 const TABS = [
   { key: 'super', label: 'Super Admins', roles: ['super_admin', 'master_admin'], createRole: 'super_admin', createLabel: '+ Create Super Admin' },
@@ -36,6 +37,7 @@ export default function SuperAdminPanel() {
   const [search, setSearch] = useState('');
   const [modal, setModal] = useState(null);
   const isFacilities = tab === 'facilities';
+  const isLogs = tab === 'logs';
 
   // Facilities state (loaded on demand when the Facilities tab is opened).
   const [facilities, setFacilities] = useState([]);
@@ -73,9 +75,10 @@ export default function SuperAdminPanel() {
   }, []);
 
   useEffect(() => {
-    if (isFacilities && facilities.length === 0) loadFacilities();
+    // Facilities power the Facilities tab AND the audit-log facility filter.
+    if ((isFacilities || isLogs) && facilities.length === 0) loadFacilities();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isFacilities]);
+  }, [isFacilities, isLogs]);
 
   const counts = useMemo(() => {
     const c = {};
@@ -129,9 +132,9 @@ export default function SuperAdminPanel() {
 
       <main className="admin-main">
         <div className="admin-head">
-          <span className="admin-eyebrow">// USER MANAGEMENT CONSOLE</span>
-          <h1>User Management</h1>
-          <p>Create and govern accounts across roles.</p>
+          <span className="admin-eyebrow">// {isLogs ? 'AUDIT & COMPLIANCE CONSOLE' : isFacilities ? 'FACILITY MANAGEMENT CONSOLE' : 'USER MANAGEMENT CONSOLE'}</span>
+          <h1>{isLogs ? 'Audit Logs' : isFacilities ? 'Facilities' : 'User Management'}</h1>
+          <p>{isLogs ? 'Monitor, filter, and download the activity trail across every account, role, and facility.' : isFacilities ? 'Manage facilities and provider assignments.' : 'Create and govern accounts across roles.'}</p>
         </div>
 
         {/* Centered role tabs */}
@@ -157,9 +160,19 @@ export default function SuperAdminPanel() {
             Facilities
             <span className="sa-tab-count">{facilities.length}</span>
           </button>
+          <button
+            role="tab"
+            aria-selected={isLogs}
+            className={`sa-tab ${isLogs ? 'active' : ''}`}
+            onClick={() => setTab('logs')}
+          >
+            Audit Logs
+          </button>
         </div>
 
-        {isFacilities ? (
+        {isLogs ? (
+          <AuditLogs users={all} facilities={facilities} />
+        ) : isFacilities ? (
           <FacilitiesView
             facilities={facilities}
             loading={facLoading}

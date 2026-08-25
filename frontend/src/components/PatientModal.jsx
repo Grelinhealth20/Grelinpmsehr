@@ -441,6 +441,18 @@ export default function PatientModal({ uuid = null, docMode = 'license', onClose
   const [loading, setLoading] = useState(!!uuid);
   const [extracting, setExtracting] = useState(false);
   const [viewTab, setViewTab] = useState('facesheet'); // 'facesheet' | 'benefits'
+  const [downloading, setDownloading] = useState(false);
+
+  // Download the record that matches the tab in view — the Face Sheet, or the
+  // benefits/eligibility document. Both are facility-branded, grayscale PDFs.
+  async function downloadDoc() {
+    if (!pUuid) return;
+    setDownloading(true);
+    try {
+      if (viewTab === 'benefits') await patientsApi.downloadBenefits(pUuid, undefined, `benefits-${mrn || pUuid}.pdf`);
+      else await patientsApi.downloadFaceSheet(pUuid, `face-sheet-${mrn || pUuid}.pdf`);
+    } catch (e) { toast.error(toApiError(e).message); } finally { setDownloading(false); }
+  }
 
   useEffect(() => {
     let active = true;
@@ -578,6 +590,12 @@ export default function PatientModal({ uuid = null, docMode = 'license', onClose
         <>
           <span className="fs-modal-mrn">{mrn ? `MRN ${mrn}` : 'Complete the required fields to create'}</span>
           <span className="spacer" />
+          {pUuid && (
+            <button className="btn ghost" onClick={downloadDoc} disabled={downloading || saving}
+              title={viewTab === 'benefits' ? 'Download the benefits document (PDF)' : 'Download the Face Sheet (PDF)'}>
+              {downloading ? <span className="spinner" /> : viewTab === 'benefits' ? 'Download benefits' : 'Download Face Sheet'}
+            </button>
+          )}
           <button className="btn ghost" onClick={onClose} disabled={saving}>Close</button>
           <button className="btn" onClick={save} disabled={saving}>{saving ? <span className="spinner" /> : pUuid ? 'Save' : 'Create patient'}</button>
         </>

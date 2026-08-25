@@ -103,11 +103,18 @@ export async function updateNote(noteUuid, providerId, { content, reason, noteTy
   const r = await findDraft(noteUuid, providerId);
   if (!r) return null;
   if (r.status === 'signed') return { locked: true }; // signed notes are immutable
-  const sets = ['content_enc = :content'];
-  const params = { id: r.id, content: content ? encrypt(JSON.stringify(content)) : null };
+  const sets = [];
+  const params = { id: r.id };
+  // Only overwrite content when the caller actually sends it — a metadata-only
+  // PATCH (e.g. reason/noteType) must NOT wipe the existing draft body (PHI loss).
+  if (content !== undefined) { sets.push('content_enc = :content'); params.content = content ? encrypt(JSON.stringify(content)) : null; }
   if (reason !== undefined) { sets.push('reason = :reason'); params.reason = reason || null; }
   if (noteType !== undefined) { sets.push('note_type = :type'); params.type = noteType; }
-  await execute(`UPDATE encounter_notes SET ${sets.join(', ')} WHERE id = :id`, params);
+  if (!sets.length) return getNote(noteUuid, providerId); // nothing to change
+  // `AND status = 'draft'` makes the DB the arbiter: if a concurrent sign/amend
+  // flipped this note to signed between our read and write, this update no-ops.
+  const [res] = await execute(`UPDATE encounter_notes SET ${sets.join(', ')} WHERE id = :id AND status = 'draft'`, params);
+  if (res.affectedRows === 0) return { locked: true }; // raced into signed — immutable
   return getNote(noteUuid, providerId);
 }
 
@@ -140,7 +147,9 @@ export async function signNote(noteUuid, providerId, { content, reason } = {}) {
   const params = { id: r.id, pid: providerId, name: signerName };
   if (content !== undefined) { sets.push('content_enc = :content'); params.content = content ? encrypt(JSON.stringify(content)) : null; }
   if (reason !== undefined) { sets.push('reason = :reason'); params.reason = reason || null; }
-  await execute(`UPDATE encounter_notes SET ${sets.join(', ')} WHERE id = :id`, params);
+  // Guard against a double-sign race: only a still-draft row transitions to signed.
+  const [res] = await execute(`UPDATE encounter_notes SET ${sets.join(', ')} WHERE id = :id AND status = 'draft'`, params);
+  if (res.affectedRows === 0) return { locked: true }; // already signed by a concurrent request
   const signed = await getNote(noteUuid, providerId);
   await generateSignedDoc(r.id, signed, signerName);
   return signed;
@@ -198,10 +207,13 @@ export async function amendSignedNote(noteUuid, providerId, { content, reason } 
   if (!r) return null;
   if (r.status !== 'signed') return { notSigned: true }; // only signed notes are "amended"
   const signerName = u.full_name_enc ? decrypt(u.full_name_enc) : null;
-  await execute(
-    `UPDATE encounter_notes SET content_enc = :content, signed_by = :pid, signed_by_name = :name, signed_at = NOW() WHERE id = :id`,
-    { content: content ? encrypt(JSON.stringify(content)) : null, pid: providerId, name: signerName, id: r.id },
-  );
+  const sets = ['signed_by = :pid', 'signed_by_name = :name', 'signed_at = NOW()'];
+  const params = { pid: providerId, name: signerName, id: r.id };
+  // Never null the clinical content on a metadata-only amendment — that would
+  // destroy a finalized, billing-ready medical record. Only replace it when sent.
+  if (content !== undefined) { sets.push('content_enc = :content'); params.content = content ? encrypt(JSON.stringify(content)) : null; }
+  const [res] = await execute(`UPDATE encounter_notes SET ${sets.join(', ')} WHERE id = :id AND status = 'signed'`, params);
+  if (res.affectedRows === 0) return null;
   const amended = await getNote(noteUuid, providerId);
   await generateSignedDoc(r.id, amended, signerName);
   return amended;

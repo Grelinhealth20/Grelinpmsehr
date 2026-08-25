@@ -233,6 +233,14 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
     } catch (e) { toast.error(toApiError(e).message); } finally { setBusy(false); }
   }
 
+  async function downloadPdf() {
+    if (!active) return;
+    setBusy(true);
+    try {
+      await encountersApi.downloadNote(active.uuid, `medical-record-${encounter.mrn || 'record'}.pdf`);
+    } catch (e) { toast.error(toApiError(e).message); } finally { setBusy(false); }
+  }
+
   // MD-only: unlock a signed note for editing after capturing a required reason.
   function startAmend() {
     setAmendReason('');
@@ -315,6 +323,11 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
       ) : (
         <>
           <button className="btn ghost" onClick={closeWithSave}>Close</button>
+          {active && (signed || canSign) && (
+            <button className="btn ghost" onClick={downloadPdf} disabled={busy} title="Download this record as a PDF">
+              {busy ? <span className="spinner" /> : 'Download PDF'}
+            </button>
+          )}
           {active && !signed && (
             <button className="btn" onClick={sign} disabled={busy || !canSign} title={canSign ? 'Sign & finalize for billing' : 'Only an MD can sign off'}>
               {busy ? <span className="spinner" /> : 'Sign & finalize'}

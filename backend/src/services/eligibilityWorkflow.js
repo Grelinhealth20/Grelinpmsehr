@@ -6,7 +6,7 @@ import {
 } from './eligibilityService.js';
 import { providerPrimaryFacility } from './facilityService.js';
 import { stcsForProcedures } from './procedureStc.js';
-import { updatePatient, getRawByUuid as getPatientRawByUuid, toPublicPatient } from './patientService.js';
+import { updatePatient, applyPatientUpdateLocked, getRawByUuid as getPatientRawByUuid, toPublicPatient } from './patientService.js';
 import { logger } from '../config/logger.js';
 
 /**
@@ -155,9 +155,12 @@ export async function verifyPatientEligibility({ patient, patientId, providerId,
   const check = await saveCheck({ patientId, policyIndex, response, createdBy: providerId, context, appointmentUuid, serviceDate: dosOverride || null, insuranceBidx, automatic: !force });
   let updated = patient;
   if (writeBack) {
-    // Store the STEDI payer ID (not the primary payer ID) on the policy.
-    const patch = mergeVerificationIntoPatient(patient, check.summary, policyIndex, { canonicalPayer: payer.name, payerId: payer.stediId });
-    updated = await updatePatient(patient.uuid, patch);
+    // Store the STEDI payer ID (not the primary payer ID) on the policy. Merge under
+    // a row lock against the FRESHEST record so this never clobbers a concurrent edit.
+    updated = await applyPatientUpdateLocked(
+      patient.uuid,
+      (cur) => mergeVerificationIntoPatient(cur, check.summary, policyIndex, { canonicalPayer: payer.name, payerId: payer.stediId }),
+    ) || updated;
   }
 
   stediLog('eligibility.saved', { patient: patient.uuid, status: check.status, appointment: appointmentUuid || undefined });

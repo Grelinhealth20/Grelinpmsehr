@@ -5,12 +5,14 @@ import { pool, assertDbConnection } from './db/pool.js';
 import { runMigrations } from './db/migrate.js';
 import { seedMasterAdmin } from './db/seed.js';
 import { seedSpecialties } from './services/specialtyService.js';
+import { initKeyRotation } from './services/keyRotationService.js';
 
 async function bootstrap() {
   await assertDbConnection();
   await runMigrations(); // auto-create tables (idempotent)
   await seedMasterAdmin(); // ensure master admin exists (forced reset on first login)
   await seedSpecialties(); // ensure default specialties (SNFs, Pain Management, TCM)
+  await initKeyRotation(); // load/seed the rotating key ring; start the 40-min timer
 
   const app = createApp();
 

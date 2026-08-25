@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { v4 as uuidv4 } from 'uuid';
-import { execute } from '../db/pool.js';
+import { execute, withTransaction } from '../db/pool.js';
 import { encrypt, decrypt, blindIndex } from '../utils/crypto.js';
 import { providerFacilityIds } from './facilityService.js';
 
@@ -121,9 +121,10 @@ export async function createPatient({ providerId, demographics, insurance, facil
   return toPublicPatient(await getRawByUuid(uuid));
 }
 
-export async function updatePatient(uuid, { demographics, insurance, facility, emergencyContact, emergencyContacts }) {
+/** Encode a partial patient patch into SQL SET fragments + bound params. */
+function buildPatientSets({ demographics, insurance, facility, emergencyContact, emergencyContacts }) {
   const sets = [];
-  const params = { uuid };
+  const params = {};
   if (demographics !== undefined) {
     sets.push('demographics_enc = :demoEnc', 'name_bidx = :nameBidx');
     params.demoEnc = encrypt(JSON.stringify(demographics));
@@ -143,8 +144,31 @@ export async function updatePatient(uuid, { demographics, insurance, facility, e
     sets.push('emergency_enc = :emgEnc');
     params.emgEnc = emg;
   }
-  if (sets.length) await execute(`UPDATE patients SET ${sets.join(', ')} WHERE uuid = :uuid`, params);
+  return { sets, params };
+}
+
+export async function updatePatient(uuid, fields) {
+  const { sets, params } = buildPatientSets(fields);
+  if (sets.length) await execute(`UPDATE patients SET ${sets.join(', ')} WHERE uuid = :uuid`, { ...params, uuid });
   return toPublicPatient(await getRawByUuid(uuid));
+}
+
+/**
+ * Serialized read-modify-write for the eligibility merge. Locks the patient row
+ * (SELECT … FOR UPDATE), rebuilds the patch from the FRESHEST data via `mergeFn`,
+ * applies it, and commits — so a background/async verify can never clobber a
+ * concurrent user edit with a stale in-memory snapshot (lost-update fix).
+ */
+export async function applyPatientUpdateLocked(uuid, mergeFn) {
+  return withTransaction(async (exec) => {
+    const [rows] = await exec('SELECT * FROM patients WHERE uuid = :uuid FOR UPDATE', { uuid });
+    if (!rows[0]) return null;
+    const patch = mergeFn(toPublicPatient(rows[0])) || {};
+    const { sets, params } = buildPatientSets(patch);
+    if (sets.length) await exec(`UPDATE patients SET ${sets.join(', ')} WHERE uuid = :uuid`, { ...params, uuid });
+    const [after] = await exec(`${SELECT} WHERE p.uuid = :uuid LIMIT 1`, { uuid });
+    return toPublicPatient(after[0]);
+  });
 }
 
 export async function deletePatient(uuid) {

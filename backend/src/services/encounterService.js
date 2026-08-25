@@ -36,6 +36,34 @@ async function nextEncounterNo(patientId) {
   return String(m[0].nxt);
 }
 
+const isDupKey = (e) => e && (e.errno === 1062 || e.code === 'ER_DUP_ENTRY');
+
+/**
+ * Assign a per-patient encounter number and run `write(no)`. Two concurrent
+ * requests can compute the same next number; the DB unique key (uq_enc_patient_no)
+ * rejects the loser, and we retry with a freshly-recomputed number. This makes the
+ * whole "read max → write" sequence safe under concurrency without a table lock.
+ */
+async function withEncounterNo(patientId, write) {
+  const MAX_ATTEMPTS = 20;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+    const no = await nextEncounterNo(patientId);
+    try {
+      await write(no);
+      return no;
+    } catch (err) {
+      if (isDupKey(err) && attempt < MAX_ATTEMPTS - 1) {
+        // Lost the race. Jitter before recomputing so a burst of simultaneous
+        // inserts desynchronizes instead of colliding in lockstep every round.
+        await new Promise((r) => { setTimeout(r, 3 + Math.floor(Math.random() * 25)); });
+        continue;
+      }
+      throw err;
+    }
+  }
+  return null;
+}
+
 /**
  * Ensure an encounter row exists for an appointment (idempotent on appointment_id)
  * and assign its per-patient encounter number.
@@ -47,16 +75,18 @@ export async function ensureEncounter({ appointmentId, patientId, providerId, cr
   );
   if (existing[0]) {
     if (!existing[0].encounter_no && patientId) {
-      await execute(`UPDATE encounters SET encounter_no = :no WHERE id = :id`,
-        { no: await nextEncounterNo(patientId), id: existing[0].id });
+      await withEncounterNo(patientId, (no) => execute(
+        `UPDATE encounters SET encounter_no = :no WHERE id = :id`, { no, id: existing[0].id },
+      ));
     }
     return;
   }
-  await execute(
+  const uuid = uuidv4();
+  await withEncounterNo(patientId, (no) => execute(
     `INSERT INTO encounters (uuid, encounter_no, provider_id, appointment_id, patient_id, eligibility_status, chart_status, created_by)
      VALUES (:uuid, :no, :pid, :aid, :patientId, 'not_verified', 'not_seen', :createdBy)`,
-    { uuid: uuidv4(), no: await nextEncounterNo(patientId), pid: providerId, aid: appointmentId, patientId: patientId || null, createdBy },
-  );
+    { uuid, no, pid: providerId, aid: appointmentId, patientId: patientId || null, createdBy },
+  ));
 }
 
 const NOTE_AGG = `(SELECT COUNT(*) FROM encounter_notes n WHERE n.encounter_id = e.id)`;
@@ -265,12 +295,11 @@ export async function createStandaloneEncounter({ providerId, patientUuid, encou
   const patient = pr[0];
   if (!patient) return null; // not the provider's patient → caller 404s (no cross-patient)
   const uuid = uuidv4();
-  const encounterNo = await nextEncounterNo(patient.id);
-  await execute(
+  const encounterNo = await withEncounterNo(patient.id, (no) => execute(
     `INSERT INTO encounters (uuid, encounter_no, provider_id, appointment_id, patient_id, encounter_date, eligibility_status, chart_status, created_by)
      VALUES (:uuid, :no, :pid, NULL, :patientId, :dos, 'not_verified', 'not_seen', :createdBy)`,
-    { uuid, no: encounterNo, pid: providerId, patientId: patient.id, dos: encounterDate, createdBy },
-  );
+    { uuid, no, pid: providerId, patientId: patient.id, dos: encounterDate, createdBy },
+  ));
   return { uuid, encounterNo };
 }
 

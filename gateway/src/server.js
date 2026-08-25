@@ -35,6 +35,12 @@ const HOST = process.env.GATEWAY_HOST || '0.0.0.0';
 const PORT = Number.parseInt(process.env.GATEWAY_PORT || '8080', 10);
 const INTERNAL_API_URL = process.env.INTERNAL_API_URL || 'http://127.0.0.1:4000';
 const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY || '';
+// The backend rotates the internal key ~every 40 min. We start with the env key
+// (which the backend keeps permanently valid) and refresh to the current key from
+// the backend's loopback bootstrap endpoint. Kept in a mutable so rotation never
+// interrupts proxying.
+let currentInternalKey = INTERNAL_API_KEY;
+const KEY_REFRESH_MS = Number.parseInt(process.env.INTERNAL_KEY_REFRESH_MS || '60000', 10);
 const FRONTEND_DIST = path.resolve(
   __dirname,
   '..',
@@ -277,8 +283,9 @@ const apiProxy = createProxyMiddleware({
   pathRewrite: (_path, req) => req.originalUrl,
   on: {
     proxyReq: (proxyReq, req) => {
-      // Prove to the backend that the request came through the trusted gateway.
-      if (INTERNAL_API_KEY) proxyReq.setHeader('x-internal-api-key', INTERNAL_API_KEY);
+      // Prove to the backend that the request came through the trusted gateway,
+      // using the current (rotating) internal key.
+      if (currentInternalKey) proxyReq.setHeader('x-internal-api-key', currentInternalKey);
       // Re-emit the body the JSON parser consumed — but NEVER for multipart
       // uploads (those stream raw; re-emitting would corrupt the file body).
       if (!isMultipart(req)) fixRequestBody(proxyReq, req);
@@ -291,6 +298,26 @@ const apiProxy = createProxyMiddleware({
     },
   },
 });
+
+// Keep the internal key current. Present the key we currently hold (env key
+// bootstraps this after a restart); the backend returns the newest key, which we
+// adopt. Failures are non-fatal — we simply keep using the last good key.
+async function refreshInternalKey() {
+  try {
+    const r = await fetch(`${INTERNAL_API_URL}/internal/gateway-key`, {
+      headers: currentInternalKey ? { 'x-internal-api-key': currentInternalKey } : {},
+    });
+    if (r.ok) {
+      const d = await r.json();
+      if (d && typeof d.key === 'string' && d.key && d.key !== currentInternalKey) {
+        currentInternalKey = d.key;
+        logger.info('Adopted rotated internal key');
+      }
+    }
+  } catch { /* keep the last good key */ }
+}
+setInterval(refreshInternalKey, Math.max(5000, KEY_REFRESH_MS)).unref?.();
+refreshInternalKey();
 
 app.use('/api/auth', authEdgeLimiter);
 app.use('/api', edgeLimiter, skipForUploads(jsonParser), skipForUploads(waf), apiProxy);
@@ -320,8 +347,19 @@ app.get('*', (req, res, next) => {
 app.use((req, res) => res.status(404).json({ error: 'Not found.', code: 'NOT_FOUND' }));
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
-  logger.error({ err: err.message }, 'Gateway error');
   if (res.headersSent) return;
+  // Body-parser / request-stream errors (oversized body, malformed JSON, bad
+  // encoding) carry a client status + type — return a clean 4xx, not a 500.
+  if (err && typeof err.type === 'string') {
+    const s = err.status || err.statusCode || 400;
+    if (s < 500) {
+      const msg = err.type === 'entity.too.large' ? 'Request body is too large.'
+        : err.type === 'entity.parse.failed' ? 'Request body is not valid JSON.'
+        : 'Invalid request.';
+      return res.status(s).json({ error: msg, code: 'BAD_REQUEST' });
+    }
+  }
+  logger.error({ err: err.message }, 'Gateway error');
   res.status(500).json({ error: 'Internal error.', code: 'GATEWAY_ERROR' });
 });
 

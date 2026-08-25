@@ -25,6 +25,8 @@ router.delete('/:uuid', csrfProtection, validate(uuidParam, 'params'), ctrl.remo
 
 // Benefits Verification (X12 271 eligibility) — strictly scoped to the owned patient.
 router.get('/:uuid/eligibility', validate(uuidParam, 'params'), ctrl.listEligibility);
+router.get('/:uuid/facesheet/pdf', validate(uuidParam, 'params'), ctrl.downloadFaceSheet);
+router.get('/:uuid/benefits/pdf', validate(uuidParam, 'params'), ctrl.downloadBenefits);
 // Live, server-side Stedi verification (inputs pulled from the Face Sheet).
 router.post('/:uuid/eligibility/verify', csrfProtection, validate(uuidParam, 'params'), validate(verifyEligibilitySchema), ctrl.verifyNow);
 // Programmatic ingest of a 271 the caller already holds.

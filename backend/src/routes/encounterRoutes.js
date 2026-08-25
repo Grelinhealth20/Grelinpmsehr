@@ -23,6 +23,7 @@ router.get('/patient/:patientUuid/encounters', ctrl.patientEncounters);
 // `/:appointmentUuid` param route so they never collide. (UUIDs are bound query
 // params — an invalid one simply resolves to 404.)
 router.get('/notes/:noteUuid', ctrl.getNote);
+router.get('/notes/:noteUuid/pdf', ctrl.downloadNote);
 router.patch('/notes/:noteUuid', csrfProtection, validate(updateNoteSchema), ctrl.updateNote);
 router.post('/notes/:noteUuid/sign', csrfProtection, validate(signNoteSchema), ctrl.signNote);
 router.post('/notes/:noteUuid/amend', csrfProtection, validate(amendNoteSchema), ctrl.amendNote);

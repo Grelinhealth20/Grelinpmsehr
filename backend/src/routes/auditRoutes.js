@@ -10,8 +10,8 @@ router.use(authenticate, requirePasswordSettled, authorize(ROLES.SUPER_ADMIN));
 
 router.get('/', async (req, res, next) => {
   try {
-    const { limit, offset } = req.query;
-    const entries = await listAudit({ limit, offset });
+    const { limit, offset, action, role, actorUuid, facilityUuid, dateFrom, dateTo, q } = req.query;
+    const entries = await listAudit({ limit, offset, action, role, actorUuid, facilityUuid, dateFrom, dateTo, q });
     res.json({ entries });
   } catch (err) {
     next(err);

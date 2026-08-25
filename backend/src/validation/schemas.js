@@ -303,6 +303,11 @@ const facilityBase = {
   address: optStr(200), city: optStr(120),
   state: z.union([z.string().trim().length(2), z.literal('')]).optional(),
   zip: optStr(10), phone: optStr(24), taxonomy: optStr(160),
+  // Facility logo as a data URI (base64 image) or empty to clear. ~700 KB cap.
+  logo: z.union([
+    z.string().regex(/^data:image\/(png|jpe?g|gif|webp|svg\+xml);base64,/, 'Logo must be a PNG, JPG, GIF, WEBP, or SVG image.').max(700000),
+    z.literal(''),
+  ]).nullable().optional(),
   source: z.enum(['nppes', 'manual']).optional(),
 };
 export const createFacilitySchema = z.object(facilityBase).strict();

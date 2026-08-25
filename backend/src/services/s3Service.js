@@ -101,6 +101,20 @@ export async function uploadPatientObject(ctx, key, buffer, contentType) {
   return fullKey;
 }
 
+/** Upload a facility logo into that facility's S3 folder → returns the object key. */
+export async function uploadFacilityLogo(facilityUuid, buffer, contentType, ext) {
+  if (!client) throw new Error('S3 is not configured.');
+  const key = `${facilityPrefix(facilityUuid)}branding/logo.${ext || 'png'}`;
+  await client.send(new PutObjectCommand({
+    Bucket: config.s3.bucket,
+    Key: key,
+    Body: buffer,
+    ContentType: contentType || 'image/png',
+    ServerSideEncryption: 'AES256',
+  }));
+  return key;
+}
+
 /** Short-lived, read-only URL to view/download a single object. */
 export async function signedGetUrl(s3Key, expiresIn = 300) {
   if (!client) throw new Error('S3 is not configured.');

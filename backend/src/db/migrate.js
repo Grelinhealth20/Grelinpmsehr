@@ -19,6 +19,26 @@ async function ensureIndex(table, indexName, columns) {
   }
 }
 
+/**
+ * Idempotently add a UNIQUE index. Tolerant: if existing duplicate rows prevent
+ * creation, it logs and continues (the app-level retry still guards inserts) so a
+ * legacy dataset never blocks boot.
+ */
+async function ensureUniqueIndex(table, indexName, columns) {
+  const [idx] = await pool.query(
+    `SELECT INDEX_NAME FROM information_schema.STATISTICS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ? LIMIT 1`,
+    [table, indexName],
+  );
+  if (idx.length) return;
+  try {
+    await pool.query(`ALTER TABLE \`${table}\` ADD UNIQUE INDEX \`${indexName}\` (${columns})`);
+    logger.info({ table, indexName }, 'Added unique index via migration');
+  } catch (err) {
+    logger.warn({ table, indexName, err: err.message }, 'Unique index not added (existing duplicates?) — app-level retry still guards inserts');
+  }
+}
+
 /** Idempotently add a column (and optional FK) to an existing table. */
 async function ensureColumn(table, column, definition, fkClause) {
   const [cols] = await pool.query(
@@ -55,6 +75,8 @@ export async function runMigrations() {
   );
   // Provider credential tags (MD, DO, NP, APRN, ASNP, PA, …) — staff metadata, not PHI.
   await ensureColumn('users', 'credentials', '`credentials` JSON NULL AFTER `specialty_id`');
+  // Facility logo — a data URI (base64 image), not PHI; shown across the app.
+  await ensureColumn('facilities', 'logo', '`logo` MEDIUMTEXT NULL AFTER `taxonomy`');
   // Rendering provider selected for an appointment (may differ from the owner).
   await ensureColumn(
     'appointments',
@@ -81,6 +103,10 @@ export async function runMigrations() {
   // patient_id are already indexed by their foreign keys.)
   await ensureIndex('encounter_notes', 'idx_note_created', '`created_at`');
   await ensureIndex('encounter_notes', 'idx_note_provider_created', '`provider_id`, `created_at`');
+  // Per-patient visit numbers must be unique. NULLs are allowed to repeat, so an
+  // appointment encounter awaiting its number never collides. Backed by app-level
+  // retry so concurrent inserts resolve to distinct numbers instead of duplicates.
+  await ensureUniqueIndex('encounters', 'uq_enc_patient_no', '`patient_id`, `encounter_no`');
   // Procedure (CPT/HCPCS) an appointment is for — drives procedure-specific
   // eligibility (STC targeting). Nullable so existing appointments are unaffected.
   await ensureColumn('appointments', 'procedure_code', '`procedure_code` VARCHAR(10) NULL AFTER `appt_type`');
@@ -96,6 +122,18 @@ export async function runMigrations() {
   // Front-desk check-in / check-out appointment states (idempotent MODIFY).
   await pool.query(
     "ALTER TABLE `appointments` MODIFY COLUMN `status` ENUM('scheduled','checked_in','checked_out','cancelled','completed') NOT NULL DEFAULT 'scheduled'",
+  );
+  // Rotating key material (JWT signing secrets + gateway internal key). A single
+  // persisted row so automatic rotation survives restarts without invalidating any
+  // live session or breaking gateway↔API proxying. Not PHI; secrets only.
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS \`security_keyring\` (
+       \`id\` TINYINT UNSIGNED NOT NULL PRIMARY KEY,
+       \`access_ring\` JSON NOT NULL,
+       \`refresh_ring\` JSON NOT NULL,
+       \`internal_ring\` JSON NOT NULL,
+       \`rotated_at\` DATETIME NOT NULL
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
   );
   logger.info(`Schema ensured (${SCHEMA_STATEMENTS.length} tables)`);
 }

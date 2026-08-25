@@ -46,26 +46,50 @@ export async function recordAudit({
  * and decrypted via join). Orphaned entries (actor since deleted) fall back to a
  * safe label so the trail is never misattributed.
  */
-export async function listAudit({ limit = 100, offset = 0, action = null } = {}) {
-  const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 500);
+export async function listAudit({
+  limit = 100, offset = 0, action = null, role = null, actorUuid = null,
+  facilityUuid = null, dateFrom = null, dateTo = null, q = null,
+} = {}) {
+  const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 2000);
   const safeOffset = Math.max(Number(offset) || 0, 0);
-  const where = action ? 'WHERE al.action = ?' : '';
-  const args = action ? [action, safeLimit, safeOffset] : [safeLimit, safeOffset];
-  const [rows] = await pool.query(
+  const where = [];
+  const params = {};
+  if (action) { where.push('al.action = :action'); params.action = action; }
+  if (role) { where.push('u.role = :role'); params.role = role; }
+  if (actorUuid) { where.push('u.uuid = :actorUuid'); params.actorUuid = actorUuid; }
+  if (facilityUuid) {
+    where.push(`EXISTS (SELECT 1 FROM provider_facilities pf JOIN facilities f ON f.id = pf.facility_id
+                 WHERE pf.provider_id = al.actor_user_id AND f.uuid = :facilityUuid)`);
+    params.facilityUuid = facilityUuid;
+  }
+  if (dateFrom) { where.push('al.created_at >= :dateFrom'); params.dateFrom = dateFrom; }
+  if (dateTo) { where.push('al.created_at <= :dateTo'); params.dateTo = dateTo; }
+  if (q) { where.push('(al.action LIKE :q OR al.entity_type LIKE :q OR al.entity_id LIKE :q)'); params.q = `%${q}%`; }
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+  // Each entry is resolved to the actor's current identity + role + assigned
+  // facilities, so the trail can be grouped by account / role / facility.
+  const [rows] = await execute(
     `SELECT al.uuid, al.actor_user_id, al.action, al.entity_type, al.entity_id, al.outcome,
             al.ip, al.user_agent, al.metadata, al.created_at,
-            u.email_enc AS actor_email_enc, u.role AS actor_role
+            u.uuid AS actor_uuid, u.email_enc AS actor_email_enc, u.full_name_enc AS actor_name_enc, u.role AS actor_role,
+            (SELECT GROUP_CONCAT(DISTINCT f.name ORDER BY f.name SEPARATOR ', ')
+               FROM provider_facilities pf JOIN facilities f ON f.id = pf.facility_id
+              WHERE pf.provider_id = al.actor_user_id) AS actor_facilities
        FROM audit_logs al
        LEFT JOIN users u ON u.id = al.actor_user_id
-       ${where}
-      ORDER BY al.id DESC LIMIT ? OFFSET ?`,
-    args,
+       ${whereSql}
+      ORDER BY al.id DESC LIMIT ${safeLimit} OFFSET ${safeOffset}`,
+    params,
   );
   return rows.map((r) => ({
     uuid: r.uuid,
     action: r.action,
+    actorUuid: r.actor_uuid || null,
     actorEmail: r.actor_email_enc ? decrypt(r.actor_email_enc) : (r.actor_user_id ? 'Deleted user' : 'System'),
-    actorRole: r.actor_role || null,
+    actorName: r.actor_name_enc ? decrypt(r.actor_name_enc) : null,
+    actorRole: r.actor_role || (r.actor_user_id ? null : 'system'),
+    actorFacilities: r.actor_facilities || null,
     entityType: r.entity_type,
     entityId: r.entity_id,
     outcome: r.outcome,

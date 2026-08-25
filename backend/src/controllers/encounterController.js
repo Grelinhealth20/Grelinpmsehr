@@ -7,6 +7,15 @@ import {
   updateNote as updateNoteSvc, signNote as signNoteSvc, amendSignedNote as amendNoteSvc,
 } from '../services/encounterNoteService.js';
 import { recordAudit } from '../services/auditService.js';
+import { notePdf } from '../services/pdfExport.js';
+
+function sendPdf(res, out) {
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${out.filename}"`);
+  res.setHeader('Content-Length', out.buffer.length);
+  res.setHeader('Cache-Control', 'no-store');
+  res.send(out.buffer);
+}
 
 const ctx = (req) => ({ ip: req.ip, userAgent: req.get('user-agent') });
 
@@ -112,6 +121,18 @@ export async function signNote(req, res, next) {
     if (result.locked) return res.status(409).json({ error: 'This note is already signed.', code: 'NOTE_SIGNED' });
     await recordAudit({ actorUserId: req.authUserId, action: 'encounter.note.sign', entityType: 'encounter_note', entityId: req.params.noteUuid, ...ctx(req), metadata: { noteType: result.noteType } });
     res.json({ note: result });
+  } catch (err) { next(err); }
+}
+
+/** Download a clinical note as a branded, non-editable PDF (signed records; MD may
+ *  also download an unsigned draft). Access-scoped, per-facility isolated. */
+export async function downloadNote(req, res, next) {
+  try {
+    const out = await notePdf(req.params.noteUuid, req.authUserId);
+    if (out.notFound) return res.status(404).json({ error: 'Note not found.', code: 'NOT_FOUND' });
+    if (out.forbidden) return res.status(403).json({ error: 'Only signed medical records can be downloaded — unsigned records are restricted to an MD.', code: 'DOWNLOAD_FORBIDDEN' });
+    await recordAudit({ actorUserId: req.authUserId, action: 'encounter.note.download', entityType: 'encounter_note', entityId: req.params.noteUuid, ...ctx(req), metadata: { format: 'pdf' } });
+    sendPdf(res, out);
   } catch (err) { next(err); }
 }
 

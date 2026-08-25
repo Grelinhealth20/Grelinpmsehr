@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import {
-  listPatients, createPatient, updatePatient, deletePatient, getRawByUuid, toPublicPatient, getPatientS3Ctx,
+  listPatients, createPatient, updatePatient, applyPatientUpdateLocked, deletePatient, getRawByUuid, toPublicPatient, getPatientS3Ctx,
 } from '../services/patientService.js';
 import {
   listDocuments, getRawDocByUuid, findDocByType,
@@ -14,7 +14,16 @@ import { saveCheck, listChecks, mergeVerificationIntoPatient } from '../services
 import { verifyPatientEligibility, autoVerifyOnCreate, latestCheckForPolicy } from '../services/eligibilityWorkflow.js';
 import { stediEnabled } from '../services/stediService.js';
 import { recordAudit } from '../services/auditService.js';
+import { faceSheetPdf, benefitsPdf } from '../services/pdfExport.js';
 import { logger } from '../config/logger.js';
+
+function sendPdf(res, out) {
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${out.filename}"`);
+  res.setHeader('Content-Length', out.buffer.length);
+  res.setHeader('Cache-Control', 'no-store');
+  res.send(out.buffer);
+}
 
 const DOC_TYPES = new Set(['license_front', 'license_back', 'insurance_front', 'insurance_back', 'other']);
 const ALLOWED_MIME = {
@@ -274,6 +283,28 @@ export async function verifyNow(req, res, next) {
   }
 }
 
+/** Download the patient Face Sheet as a branded, non-editable PDF. Owner-scoped. */
+export async function downloadFaceSheet(req, res, next) {
+  try {
+    const row = await ownedPatientOr404(req);
+    const out = await faceSheetPdf(row);
+    await recordAudit({ actorUserId: req.authUserId, action: 'patient.facesheet.download', entityType: 'patient', entityId: row.uuid, ...ctx(req), metadata: { format: 'pdf' } });
+    sendPdf(res, out);
+  } catch (err) { next(err); }
+}
+
+/** Download the patient's verified benefits as a branded, non-editable PDF. Owner-scoped. */
+export async function downloadBenefits(req, res, next) {
+  try {
+    const row = await ownedPatientOr404(req);
+    const policyIndex = Number(req.query?.policyIndex) || 0;
+    const out = await benefitsPdf(row, policyIndex);
+    if (!out) return res.status(404).json({ error: 'No verified benefits to download for this patient.', code: 'NO_BENEFITS' });
+    await recordAudit({ actorUserId: req.authUserId, action: 'patient.benefits.download', entityType: 'patient', entityId: row.uuid, ...ctx(req), metadata: { format: 'pdf', policyIndex } });
+    sendPdf(res, out);
+  } catch (err) { next(err); }
+}
+
 /** Ingest a payer 271 response the caller already holds (programmatic integration). */
 export async function importEligibility(req, res, next) {
   try {
@@ -281,12 +312,17 @@ export async function importEligibility(req, res, next) {
     const { policyIndex = 0, response } = req.body;
     const check = await saveCheck({ patientId: row.id, policyIndex, response, createdBy: req.authUserId });
     // Payer-confirmed identity (address, group #, MBI, plan, cost-shares) corrects
-    // the Face Sheet + this insurance policy — for THIS patient only.
-    const patch = mergeVerificationIntoPatient(toPublicPatient(row), check.summary, policyIndex);
-    const patient = await updatePatient(row.uuid, patch);
+    // the Face Sheet + this insurance policy — for THIS patient only. Applied under a
+    // row lock against the freshest record so a concurrent edit is never clobbered.
+    let appliedKeys = [];
+    const patient = await applyPatientUpdateLocked(row.uuid, (cur) => {
+      const p = mergeVerificationIntoPatient(cur, check.summary, policyIndex);
+      appliedKeys = Object.keys(p);
+      return p;
+    });
     await recordAudit({
       actorUserId: req.authUserId, action: 'patient.eligibility.verify', entityType: 'patient', entityId: row.uuid,
-      ...ctx(req), metadata: { policyIndex, payer: check.payer, status: check.status, updated: Object.keys(patch) },
+      ...ctx(req), metadata: { policyIndex, payer: check.payer, status: check.status, updated: appliedKeys },
     });
     res.status(201).json({ check, patient });
   } catch (err) { next(err); }

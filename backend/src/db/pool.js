@@ -54,6 +54,28 @@ export async function execute(sql, params = {}) {
   }
 }
 
+/**
+ * Run `fn` inside a single transaction on one pooled connection. `fn` receives a
+ * scoped `exec(sql, params)` bound to that connection (so `SELECT ... FOR UPDATE`
+ * row locks taken inside are honored by the same transaction). Commits on success,
+ * rolls back on any throw. Used to serialize read-modify-write of a patient row.
+ */
+export async function withTransaction(fn) {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const exec = async (sql, params = {}) => { const [rows] = await conn.execute(sql, params); return [rows]; };
+    const result = await fn(exec);
+    await conn.commit();
+    return result;
+  } catch (err) {
+    try { await conn.rollback(); } catch { /* connection may be gone */ }
+    throw err;
+  } finally {
+    conn.release();
+  }
+}
+
 export async function assertDbConnection() {
   const conn = await pool.getConnection();
   try {

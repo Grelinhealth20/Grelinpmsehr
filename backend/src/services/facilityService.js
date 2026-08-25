@@ -2,6 +2,24 @@ import { v4 as uuidv4 } from 'uuid';
 import { execute } from '../db/pool.js';
 import { decrypt } from '../utils/crypto.js';
 import { normalizeState, extractStateFromText } from './payerDirectoryService.js';
+import { s3Enabled, uploadFacilityLogo, signedGetUrl, deleteObject } from './s3Service.js';
+
+// Decode a data:image/...;base64 URI → { buffer, contentType, ext } (null if not one).
+const EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg' };
+function parseLogoDataUri(uri) {
+  const m = String(uri || '').match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i);
+  if (!m) return null;
+  const contentType = m[1].toLowerCase();
+  return { buffer: Buffer.from(m[2], 'base64'), contentType, ext: EXT[contentType] || 'png' };
+}
+
+/** Replace facility.logo (an S3 key) with a short-lived signed URL for display. */
+async function signLogo(facility) {
+  if (facility && facility.logo && s3Enabled()) {
+    try { facility.logo = await signedGetUrl(facility.logo, 900); } catch { facility.logo = null; }
+  }
+  return facility;
+}
 
 /**
  * Facility records + provider⇄facility assignments.
@@ -13,7 +31,7 @@ import { normalizeState, extractStateFromText } from './payerDirectoryService.js
  */
 
 const FAC_COLS = `f.uuid, f.npi, f.name, f.address, f.city, f.state, f.zip, f.phone,
-  f.taxonomy, f.status, f.source,
+  f.taxonomy, f.logo, f.status, f.source,
   DATE_FORMAT(f.created_at, '%Y-%m-%dT%H:%i:%sZ') AS created_at`;
 
 function toFacility(r) {
@@ -21,6 +39,7 @@ function toFacility(r) {
     uuid: r.uuid, npi: r.npi || null, name: r.name,
     address: r.address || null, city: r.city || null, state: r.state || null,
     zip: r.zip || null, phone: r.phone || null, taxonomy: r.taxonomy || null,
+    logo: r.logo || null,
     status: r.status, source: r.source,
     providerCount: r.provider_count != null ? Number(r.provider_count) : undefined,
     createdAt: r.created_at,
@@ -39,7 +58,7 @@ export async function listFacilities({ q = '', status = null } = {}) {
       FROM facilities f ${clause} ORDER BY f.name ASC`,
     params,
   );
-  return rows.map(toFacility);
+  return Promise.all(rows.map((r) => signLogo(toFacility(r))));
 }
 
 async function facilityRowByUuid(uuid) {
@@ -65,7 +84,7 @@ export async function getFacility(uuid) {
     credentials: (() => { try { return Array.isArray(p.credentials) ? p.credentials : JSON.parse(p.credentials || '[]'); } catch { return []; } })(),
     assignedAt: p.assigned_at,
   }));
-  return { ...toFacility(row), providers };
+  return { ...(await signLogo(toFacility(row))), providers };
 }
 
 /** Insert a verified facility. Dedupe by NPI (returns existing if already saved). */
@@ -75,13 +94,20 @@ export async function createFacility(data, { adminId } = {}) {
     if (dupe[0]) return { facility: toFacility(dupe[0]), duplicate: true };
   }
   const uuid = uuidv4();
+  // Logo (if provided as a data URI) is stored in the facility's S3 folder; the DB
+  // keeps only the object key.
+  let logoKey = null;
+  const parsed = parseLogoDataUri(data.logo);
+  if (parsed && s3Enabled()) {
+    try { logoKey = await uploadFacilityLogo(uuid, parsed.buffer, parsed.contentType, parsed.ext); } catch { logoKey = null; }
+  }
   await execute(
-    `INSERT INTO facilities (uuid, npi, name, address, city, state, zip, phone, taxonomy, status, source, verified_by, created_by)
-     VALUES (:uuid, :npi, :name, :address, :city, :state, :zip, :phone, :taxonomy, 'active', :source, :adminId, :adminId)`,
+    `INSERT INTO facilities (uuid, npi, name, address, city, state, zip, phone, taxonomy, logo, status, source, verified_by, created_by)
+     VALUES (:uuid, :npi, :name, :address, :city, :state, :zip, :phone, :taxonomy, :logo, 'active', :source, :adminId, :adminId)`,
     {
       uuid, npi: data.npi || null, name: data.name, address: data.address || null,
       city: data.city || null, state: data.state || null, zip: data.zip || null,
-      phone: data.phone || null, taxonomy: data.taxonomy || null,
+      phone: data.phone || null, taxonomy: data.taxonomy || null, logo: logoKey,
       source: data.source || 'nppes', adminId: adminId || null,
     },
   );
@@ -95,6 +121,20 @@ export async function updateFacility(uuid, data) {
   const params = { uuid };
   for (const k of ['npi', 'name', 'address', 'city', 'state', 'zip', 'phone', 'taxonomy']) {
     if (data[k] !== undefined) { sets.push(`${k} = :${k}`); params[k] = data[k] || null; }
+  }
+  // Logo: a new data URI uploads to the facility's S3 folder (replacing the old
+  // object); an empty string clears it. `row.logo` holds the current S3 key.
+  if (data.logo !== undefined) {
+    const parsed = parseLogoDataUri(data.logo);
+    if (parsed && s3Enabled()) {
+      let key = null;
+      try { key = await uploadFacilityLogo(uuid, parsed.buffer, parsed.contentType, parsed.ext); } catch { key = null; }
+      if (key) { sets.push('logo = :logo'); params.logo = key; }
+      if (key && row.logo && row.logo !== key) { try { await deleteObject(row.logo); } catch { /* best-effort */ } }
+    } else if (!data.logo) { // cleared
+      sets.push('logo = :logo'); params.logo = null;
+      if (row.logo && s3Enabled()) { try { await deleteObject(row.logo); } catch { /* best-effort */ } }
+    }
   }
   if (!sets.length) return getFacility(uuid);
   await execute(`UPDATE facilities SET ${sets.join(', ')} WHERE uuid = :uuid`, params);
