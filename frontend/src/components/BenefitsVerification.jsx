@@ -271,8 +271,18 @@ function PolicyActions({ patientUuid, policyIndex, hasExisting, onDone, onPatien
 
 /* -------- Main ---------------------------------------------------------- */
 export default function BenefitsVerification({ patientUuid, insurance, onPatientUpdated }) {
+  const toast = useToast();
   const [byPolicy, setByPolicy] = useState({});
   const [loading, setLoading] = useState(true);
+  const [dlPolicy, setDlPolicy] = useState(null);
+
+  // Download THIS policy's verified benefits as a branded PDF.
+  async function downloadBenefits(i, payer) {
+    setDlPolicy(i);
+    try {
+      await patientsApi.downloadBenefits(patientUuid, i, `benefits-${(payer || 'policy').replace(/[^\w]+/g, '_')}.pdf`);
+    } catch (err) { toast.error(toApiError(err).message); } finally { setDlPolicy(null); }
+  }
 
   const load = useCallback(async () => {
     if (!patientUuid) return;
@@ -304,6 +314,17 @@ export default function BenefitsVerification({ patientUuid, insurance, onPatient
               </div>
               <span className="spacer" />
               {s ? <StatusBadge status={s.status} label={s.statusLabel} /> : <span className="bx-status none"><span className="bx-status-dot" />Not verified</span>}
+              {s && (
+                <button
+                  className="act"
+                  style={{ marginLeft: 10 }}
+                  onClick={() => downloadBenefits(i, ins.payer)}
+                  disabled={dlPolicy === i}
+                  title="Download this policy's benefits as a PDF"
+                >
+                  {dlPolicy === i ? <span className="spinner dark" /> : 'Download'}
+                </button>
+              )}
             </div>
             {s ? <BenefitsView s={s} verifiedAt={check.verifiedAt} /> : (
               <div className="bx-none">Not verified yet. Run a real-time check to pull plan status, copay, coinsurance, deductible, out-of-pocket, and per-service benefits directly from the payer.</div>

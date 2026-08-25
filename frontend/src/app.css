@@ -1082,6 +1082,8 @@
 .act.danger { color: var(--c-danger); }
 .act.danger:hover { background: var(--c-danger); border-color: var(--c-danger); color: #fff; box-shadow: 0 4px 12px rgba(192, 57, 43, 0.3); }
 .act:disabled { opacity: 0.4; cursor: not-allowed; transform: none; box-shadow: none; }
+/* Row action cluster (e.g. View + Download in a table cell) */
+.clr-actions { display: inline-flex; gap: 8px; align-items: center; }
 
 /* Segmented control (replaces dropdowns in the create/edit form) */
 .seg-ctrl { display: flex; gap: 4px; padding: 4px; background: rgba(9, 17, 33, 0.05); border-radius: 10px; }

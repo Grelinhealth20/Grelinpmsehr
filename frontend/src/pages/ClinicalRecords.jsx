@@ -43,7 +43,18 @@ export default function ClinicalRecords() {
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(true);
   const [viewing, setViewing] = useState(null);
+  const [downloadingId, setDownloadingId] = useState(null);
   const firstLoad = useRef(true);
+
+  // Per-record PDF download. Signed records are downloadable by anyone with access;
+  // an unsigned draft is downloadable only by an MD (also enforced server-side).
+  async function downloadRecord(r, e) {
+    e?.stopPropagation();
+    setDownloadingId(r.noteUuid);
+    try {
+      await encountersApi.downloadNote(r.noteUuid, `medical-record-${r.mrn || 'record'}-${(r.date || '').replace(/-/g, '') || r.encounterNo || ''}.pdf`);
+    } catch (err) { toast.error(toApiError(err).message); } finally { setDownloadingId(null); }
+  }
 
   async function load(p, q, st) {
     setLoading(true);
@@ -120,7 +131,21 @@ export default function ClinicalRecords() {
                       ? <span className="clr-badge signed"><span className="dot" />Signed</span>
                       : <span className="clr-badge draft"><span className="dot" />Yet to Sign</span>}
                   </td>
-                  <td><button className="act accent" onClick={() => setViewing(r)}>View</button></td>
+                  <td>
+                    <div className="clr-actions">
+                      <button className="act accent" onClick={() => setViewing(r)}>View</button>
+                      {(r.status === 'signed' || isMD) && (
+                        <button
+                          className="act"
+                          onClick={(e) => downloadRecord(r, e)}
+                          disabled={downloadingId === r.noteUuid}
+                          title={r.status === 'signed' ? 'Download this record as a PDF' : 'Download draft (MD)'}
+                        >
+                          {downloadingId === r.noteUuid ? <span className="spinner dark" /> : 'Download'}
+                        </button>
+                      )}
+                    </div>
+                  </td>
                 </tr>
               ))
             )}
