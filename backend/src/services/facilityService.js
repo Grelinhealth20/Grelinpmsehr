@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { execute } from '../db/pool.js';
 import { decrypt } from '../utils/crypto.js';
+import { normalizeState, extractStateFromText } from './payerDirectoryService.js';
 
 /**
  * Facility records + provider⇄facility assignments.
@@ -161,14 +162,21 @@ export async function providerFacilityIds(providerId) {
  */
 export async function providerPrimaryFacility(providerId) {
   const [rows] = await execute(
-    `SELECT f.npi, f.name, f.state FROM facilities f
+    `SELECT f.npi, f.name, f.state, f.address, f.city, f.zip FROM facilities f
        JOIN provider_facilities pf ON pf.facility_id = f.id
       WHERE pf.provider_id = :pid AND f.status = 'active'
       ORDER BY f.name ASC LIMIT 1`,
     { pid: providerId },
   );
   const r = rows[0];
-  return r ? { npi: r.npi || null, name: r.name || null, state: r.state || null } : null;
+  if (!r) return null;
+  // State drives the Medicare Part B MAC. Prefer the discrete state column; when it
+  // is empty, derive it from the facility's ADDRESS (state can be fetched from the
+  // assigned facility address of that provider).
+  const state = normalizeState(r.state)
+    || extractStateFromText([r.address, r.city, r.zip].filter(Boolean).join(' '))
+    || null;
+  return { npi: r.npi || null, name: r.name || null, state };
 }
 
 /**

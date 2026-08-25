@@ -8,6 +8,7 @@ import patientRoutes from './patientRoutes.js';
 import encounterRoutes from './encounterRoutes.js';
 import providerRoutes from './providerRoutes.js';
 import facilityRoutes from './facilityRoutes.js';
+import payerRoutes from './payerRoutes.js';
 
 const router = Router();
 
@@ -21,6 +22,7 @@ router.use('/appointments', appointmentRoutes);
 router.use('/patients', patientRoutes);
 router.use('/encounters', encounterRoutes);
 router.use('/facilities', facilityRoutes);
+router.use('/payers', payerRoutes);
 router.use('/audit', auditRoutes);
 
 export default router;

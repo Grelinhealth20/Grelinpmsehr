@@ -120,6 +120,11 @@ export const facilitiesApi = {
   unassignProvider: (uuid, providerUuid) => api.delete(`/facilities/${uuid}/providers/${providerUuid}`),
 };
 
+// --- Payer directory (Stedi network) search --------------------------------
+export const payersApi = {
+  search: (q) => api.get('/payers/search', { params: { q } }),
+};
+
 // --- Patients (EHR face sheet) ---------------------------------------------
 export const patientsApi = {
   list: () => api.get('/patients'),

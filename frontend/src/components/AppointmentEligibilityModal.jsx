@@ -40,7 +40,7 @@ export default function AppointmentEligibilityModal({ appointment, onClose, onCh
       onChanged?.();
     } catch (e) {
       const a = toApiError(e);
-      setErr(a.code === 'STEDI_DISABLED' ? 'Eligibility service is not configured (add STEDI_API_KEY).' : a.message);
+      setErr(a.code === 'STEDI_DISABLED' ? 'Eligibility service is not configured.' : a.message);
     } finally { setBusy(false); }
   };
 

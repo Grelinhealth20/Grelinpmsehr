@@ -26,7 +26,8 @@ const ELIG_SKIP_MSG = {
   no_name: 'The linked patient has no name.',
   no_facility_npi: 'The rendering provider has no assigned facility NPI.',
   no_facility_state: 'Medicare Part B needs the assigned facility state — set it on the facility.',
-  payer_unresolved: 'Could not match the payer in the Stedi payer network.',
+  no_dos: 'A date of service is required to verify eligibility.',
+  payer_unresolved: 'Could not match this payer in the payer directory.',
 };
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -215,11 +216,17 @@ export async function verifyEligibility(req, res, next) {
     // A manual click is a deliberate user action → force a fresh check (this is the
     // ONLY way a with-benefits appointment re-calls the payer; automatic paths never do).
     const r = await auditedEligibility(req, row, { trigger: 'manual', manual: true, opts: { force: true } });
-    if (r.skipped === 'stedi_disabled') return res.status(503).json({ error: 'Eligibility service is not configured. Add STEDI_API_KEY.', code: 'STEDI_DISABLED' });
+    if (r.skipped === 'stedi_disabled') return res.status(503).json({ error: 'Eligibility service is not configured.', code: 'STEDI_DISABLED' });
     if (r.skipped) return res.status(422).json({ error: ELIG_SKIP_MSG[r.skipped] || 'Eligibility could not be verified.', code: `ELIG_${r.skipped.toUpperCase()}` });
     res.status(201).json({ appointment: toPublicAppointment(await getRawByUuid(req.params.uuid)), status: r.check?.status });
   } catch (err) {
     // Payer/clearinghouse error — already audited as outcome:'error' by the helper.
+    if (err.code === 'STEDI_US_IP_REQUIRED') {
+      return res.status(502).json({
+        error: 'Medicare eligibility requires a U.S.-based server connection. This environment’s network location is outside the U.S., so the payer rejected the request. Commercial payers are unaffected — deploy the backend on a U.S. host to enable Medicare Part B checks.',
+        code: err.code,
+      });
+    }
     if (err.code && String(err.code).startsWith('STEDI')) return res.status(502).json({ error: err.message, code: err.code });
     next(err);
   }

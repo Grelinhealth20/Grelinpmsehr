@@ -1,4 +1,4 @@
-import { stediEnabled, searchPayer, checkEligibility, stediLog } from './stediService.js';
+import { stediEnabled, checkEligibility, stediLog } from './stediService.js';
 import { resolvePayer, resolveMedicarePartB, isMedicarePartB, normalizeState } from './payerDirectoryService.js';
 import {
   saveCheck, mergeVerificationIntoPatient, listChecks, getAppointmentCheck,
@@ -47,16 +47,16 @@ export async function verifyPatientEligibility({ patient, patientId, providerId,
 
   const ins = (patient?.insurance || [])[policyIndex];
   if (!ins) return { skipped: 'no_insurance' };
-  // Member ID for the 271: the MBI (Original Medicare) takes precedence; the plan
-  // member ID is used ONLY when no MBI is on file.
+  // IDENTIFIER PRECEDENCE for the 271:
+  //   1) If an MBI is on file  → verify with the MBI (this is the first member ID used).
+  //   2) ONLY when there is NO MBI → fall back to the primary policy's Member ID.
   const mbi = String(ins.mbi || '').trim();
   const memberId = mbi || String(ins.memberId || '').trim();
   if (!memberId) return { skipped: 'no_member_id' };
 
   const demo = patient.demographics || {};
-  const dob = ymd(demo.dob);
-  if (!dob) return { skipped: 'no_dob' };
   if (!demo.firstName || !demo.lastName) return { skipped: 'no_name' };
+  const dob = ymd(demo.dob); // YYYYMMDD (subscriber.dateOfBirth)
 
   // Automatic-verification policy (bypassed by a manual `force`):
   //  • Reuse existing benefits for the SAME patient + SAME insurance — no payer call.
@@ -82,11 +82,13 @@ export async function verifyPatientEligibility({ patient, patientId, providerId,
   const fac = await providerPrimaryFacility(providerId);
   if (!fac || !fac.npi) return { skipped: 'no_facility_npi' };
 
-  // 2. Resolve the payer. An MBI on file (or a Medicare-Part-B payer name) routes to
-  //    the STATE-SPECIFIC Medicare Part B MAC using the ASSIGNED FACILITY'S STATE
-  //    (real-time). The STEDI payer ID — not the primary payer ID — is the
-  //    tradingPartnerServiceId. Non-Medicare payers resolve from the directory (DB)
-  //    first, then the live payer-search API.
+  // 2. Resolve the payer + its Stedi payer ID (the tradingPartnerServiceId — never
+  //    the primary payer ID). ROUTING PRECEDENCE:
+  //   • MBI on file (or a Medicare-Part-B payer name) → the STATE-SPECIFIC Medicare
+  //     Part B MAC for the ASSIGNED FACILITY'S STATE, verified with the MBI.
+  //   • Otherwise (no MBI) → the PRIMARY payer from the face sheet, resolved from the
+  //     directory (DB) first, then the live payer-search API, verified with the
+  //     primary Member ID.
   const medicarePartB = !!mbi || isMedicarePartB(ins.payer);
   let payer;
   if (medicarePartB) {
@@ -94,8 +96,11 @@ export async function verifyPatientEligibility({ patient, patientId, providerId,
     payer = await resolveMedicarePartB(fac.state);
   } else {
     if (!ins.payer) return { skipped: 'no_payer' };
+    // EXACT resolution against the Stedi payer network only — no fuzzy match, no
+    // live-search fallback. Unmatched → surfaced as "payer not matched" (never a
+    // guessed payer). Providers pick the exact payer via the Payer search on the
+    // face sheet, which stores the canonical name + Stedi ID.
     payer = await resolvePayer(ins.payer, { state: fac.state });
-    if (!payer) payer = await searchPayer(ins.payer);
   }
   if (!payer || !payer.stediId) return { skipped: 'payer_unresolved' };
 
@@ -108,23 +113,35 @@ export async function verifyPatientEligibility({ patient, patientId, providerId,
   const serviceTypeCodes = ['30'];        // plan coverage only — authoritative, unaffected by the procedure
   const readStcs = [...new Set(['30', ...proc.stcs])]; // which service's cost-share to surface
 
-  // 3b. Build the request entirely from the Face Sheet.
+  // DOS: a provider-set date (from the UI) or the appointment date; otherwise the
+  // date the patient was added. Normalized to YYYYMMDD. REQUIRED — no synthetic
+  // "today" fallback (never a wrong date).
+  const dateOfService = ymd(dosOverride) || ymd(patient.createdAt);
+  if (!dateOfService) return { skipped: 'no_dos' };
+
+  // 3b. Build the request in the EXACT required shape. No dependents, no address.
+  //   subscriber   : first/last name + dateOfBirth + memberId (MBI first, else plan member ID).
+  //   provider     : the assigned facility NPI + facility (organization) name.
+  //   encounter    : serviceTypeCodes ALWAYS ["30"] + dateOfService (kept).
+  //   tradingPartnerServiceId : the Stedi payer ID (routing key — never the plan payer ID).
   const request = {
-    provider: { npi: fac.npi, organizationName: fac.name || undefined },
     subscriber: {
       firstName: demo.firstName,
       lastName: demo.lastName,
       dateOfBirth: dob,
-      memberId, // MBI when present, else the plan member ID
-      ...(demo.address ? { address: { address1: demo.address, city: demo.city || undefined } } : {}),
+      memberId,                            // MBI when present, else the plan member ID
     },
+    provider: {
+      npi: fac.npi,                        // assigned facility NPI
+      organizationName: fac.name || undefined, // assigned facility name
+    },
+    controlNumber: null,
+    externalPatientId: memberId,
     encounter: {
       serviceTypeCodes,                    // ALWAYS "30" — the real plan benefits
-      // DOS: appointment date when verifying an appointment, else the patient's add date.
-      dateOfService: dosOverride || ymd(patient.createdAt) || ymd(new Date()),
+      dateOfService,                       // appointment DOS, else the patient add-date (no fallback)
     },
-    tradingPartnerServiceId: payer.stediId, // Stedi payer ID (routing key)
-    externalPatientId: memberId || patient.uuid,
+    tradingPartnerServiceId: payer.stediId,
   };
 
   stediLog('eligibility.request', { patient: patient.uuid, stediId: payer.stediId, facilityNpi: fac.npi, serviceTypeCodes, procedures: proc.resolved.map((p) => p.code), appointment: appointmentUuid || undefined });
@@ -183,8 +200,11 @@ export async function verifyAppointmentEligibility(apptRow, { force = false } = 
     if (r.skipped) logger.info({ appointment: apptRow.uuid, reason: r.skipped }, 'appointment eligibility skipped');
     return r;
   } catch (err) {
+    // Re-throw real payer/clearinghouse errors (STEDI_US_IP_REQUIRED, STEDI_ERROR,
+    // timeouts) so the MANUAL verify endpoint can surface the exact reason. Background
+    // auto-verify callers wrap this in `.catch(() => {})`, so a throw is harmless there.
     logger.warn({ appointment: apptRow?.uuid, err: err.message, code: err.code }, 'appointment eligibility failed');
-    return { skipped: 'error', error: err.message };
+    throw err;
   }
 }
 

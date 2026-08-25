@@ -274,6 +274,7 @@ export const verifyEligibilitySchema = z
   .object({
     policyIndex: z.coerce.number().int().min(0).max(4).optional(),
     procedureCodes: z.array(z.string().trim().min(2).max(10)).max(12).optional(),
+    dateOfService: isoDate.optional(), // provider-set DOS for the eligibility check
   })
   .strict();
 

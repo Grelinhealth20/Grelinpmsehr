@@ -54,24 +54,31 @@ export async function create(req, res, next) {
   try {
     const { demographics, insurance, facility, emergencyContact, emergencyContacts } = req.body;
     const patient = await createPatient({ providerId: req.authUserId, demographics, insurance, facility, emergencyContact, emergencyContacts, createdBy: req.authUserId });
-    if (s3Enabled()) { try { const s3ctx = await getPatientS3Ctx(patient.uuid); if (s3ctx) await ensurePatientFolder(s3ctx); } catch { /* folder marker is best-effort */ } }
     await recordAudit({ actorUserId: req.authUserId, action: 'patient.create', entityType: 'patient', entityId: patient.uuid, ...ctx(req), metadata: { mrn: patient.mrn } });
 
-    // Auto-trigger real-time eligibility verification on creation (server-side).
-    // Non-fatal: a failed/disabled check never blocks patient creation. On success
-    // the returned patient already carries the payer-confirmed Face Sheet + benefits.
-    let finalPatient = patient;
-    try {
-      const row = await getRawByUuid(patient.uuid);
-      if (row) {
-        // Provider identity on the eligibility request = the patient's RENDERING
-        // provider's assigned facility NPI (row.provider_id, not merely the caller).
-        const r = await autoVerifyOnCreate({ patient: toPublicPatient(row), patientId: row.id, providerId: row.provider_id });
-        if (r?.patient) finalPatient = r.patient;
-        if (r?.check) await recordAudit({ actorUserId: req.authUserId, action: 'patient.eligibility.verify', entityType: 'patient', entityId: patient.uuid, ...ctx(req), metadata: { auto: true, status: r.check.status, payer: r.payer?.name } });
+    // Respond IMMEDIATELY after the DB write — the save never waits on S3 folder
+    // creation or the real-time eligibility call (which take seconds). Both run in
+    // the BACKGROUND; the payer-confirmed Face Sheet + benefits appear on the next
+    // load / the Benefits tab. This keeps patient creation instant.
+    res.status(201).json({ patient });
+
+    const auditCtx = ctx(req); const actorUserId = req.authUserId;
+    setImmediate(async () => {
+      // Best-effort S3 folder marker.
+      if (s3Enabled()) {
+        try { const s3ctx = await getPatientS3Ctx(patient.uuid); if (s3ctx) await ensurePatientFolder(s3ctx); }
+        catch (e) { logger.warn({ err: e.message }, 'patient folder create failed'); }
       }
-    } catch (e) { logger.warn({ err: e.message }, 'auto eligibility on create failed'); }
-    res.status(201).json({ patient: finalPatient });
+      // Auto-trigger real-time eligibility (server-side). Non-fatal; writes back the
+      // confirmed Face Sheet + benefits onto the patient record.
+      try {
+        const row = await getRawByUuid(patient.uuid);
+        if (row) {
+          const r = await autoVerifyOnCreate({ patient: toPublicPatient(row), patientId: row.id, providerId: row.provider_id });
+          if (r?.check) await recordAudit({ actorUserId, action: 'patient.eligibility.verify', entityType: 'patient', entityId: patient.uuid, ...auditCtx, metadata: { auto: true, status: r.check.status, payer: r.payer?.name } });
+        }
+      } catch (e) { logger.warn({ err: e.message }, 'auto eligibility on create failed'); }
+    });
   } catch (err) { next(err); }
 }
 
@@ -221,8 +228,10 @@ const SKIP_MSG = {
   no_payer: 'A payer is required to verify eligibility.',
   no_dob: 'Date of birth is required to verify eligibility.',
   no_name: 'Patient first and last name are required to verify eligibility.',
-  payer_unresolved: 'Could not match this payer in the Stedi payer network.',
+  payer_unresolved: 'Could not match this payer in the payer directory — check the payer name on the face sheet.',
   no_facility_npi: 'This provider has no assigned facility NPI — assign a facility first.',
+  no_facility_state: 'The facility has no state on file — needed to route a Medicare Part B check.',
+  no_dos: 'A date of service is required to verify eligibility.',
   stedi_disabled: 'Eligibility service is not configured.',
 };
 
@@ -230,15 +239,16 @@ const SKIP_MSG = {
 export async function verifyNow(req, res, next) {
   try {
     const row = await ownedPatientOr404(req);
-    if (!stediEnabled()) return res.status(503).json({ error: 'Eligibility service is not configured. Add STEDI_API_KEY.', code: 'STEDI_DISABLED' });
+    if (!stediEnabled()) return res.status(503).json({ error: 'Eligibility service is not configured.', code: 'STEDI_DISABLED' });
     const policyIndex = Number(req.body?.policyIndex) || 0;
     const procedureCodes = Array.isArray(req.body?.procedureCodes) ? req.body.procedureCodes : [];
+    const dosOverride = req.body?.dateOfService || null; // provider-set DOS (YYYY-MM-DD)
     // provider.npi = the patient's RENDERING provider's assigned facility NPI.
     // A manual "Verify" is always a deliberate user action → force a fresh check
     // (this is what bypasses the automatic same-insurance de-dupe / 2-call cap).
     const r = await verifyPatientEligibility({
       patient: toPublicPatient(row), patientId: row.id, providerId: row.provider_id,
-      policyIndex, procedureCodes, force: true,
+      policyIndex, procedureCodes, dosOverride, force: true,
     });
     if (r.skipped === 'insurance_reused' || r.skipped === 'duplicate_this_month') {
       const existing = await latestCheckForPolicy(row.id, policyIndex);
@@ -251,6 +261,12 @@ export async function verifyNow(req, res, next) {
     });
     res.status(201).json({ check: r.check, patient: r.patient });
   } catch (err) {
+    if (err.code === 'STEDI_US_IP_REQUIRED') {
+      return res.status(502).json({
+        error: 'Medicare eligibility requires a U.S.-based server connection. This environment’s network location is outside the U.S., so the payer rejected the request. Commercial payers are unaffected — deploy the backend on a U.S. host to enable Medicare Part B checks.',
+        code: err.code,
+      });
+    }
     if (err.code && String(err.code).startsWith('STEDI')) {
       return res.status(502).json({ error: err.message, code: err.code });
     }
