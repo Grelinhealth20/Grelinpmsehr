@@ -3,7 +3,7 @@ import Modal from './Modal.jsx';
 import { useToast } from './Toast.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
 import { encountersApi, patientsApi, toApiError } from '../lib/api.js';
-import { NOTE_TYPES, NOTE_MENU, NOTE_MENU_MORE, TEMPLATES } from '../lib/noteTemplates.js';
+import { NOTE_TYPES, TEMPLATES } from '../lib/noteTemplates.js';
 
 const today = () => new Date().toISOString().slice(0, 10);
 // Display DOS in US format (MM/DD/YYYY); inputs keep the ISO value they require.
@@ -528,41 +528,57 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   );
 }
 
-/** Pop-up: choose the note template to create — sleek, searchable AI-tech selector. */
+const SERVICE_LABEL = { snf: 'Skilled Nursing Facility', pain: 'Pain Management' };
+
+/**
+ * Pop-up: choose the note template to create. The list is fetched from the note-
+ * template registry (DB) filtered to the current provider's SERVICE LINE — an SNF
+ * provider sees only SNF templates, a Pain provider only Pain templates. Access is
+ * also enforced on the server when the note is created.
+ */
 function NoteTypePicker({ onPick, onClose, busy }) {
   const [q, setQ] = useState('');
+  const [templates, setTemplates] = useState(null); // null = loading
+  const [serviceLine, setServiceLine] = useState('snf');
+
+  useEffect(() => {
+    let active = true;
+    encountersApi.noteTemplates()
+      .then(({ data }) => { if (active) { setTemplates(data.templates || []); setServiceLine(data.serviceLine || 'snf'); } })
+      .catch(() => { if (active) setTemplates([]); });
+    return () => { active = false; };
+  }, []);
+
   const query = q.trim().toLowerCase();
-  const match = (k) => {
-    const t = NOTE_TYPES[k];
-    return !query || t.label.toLowerCase().includes(query) || t.category.toLowerCase().includes(query) || String(t.cpt).toLowerCase().includes(query);
-  };
-  const row = (k) => {
-    const t = NOTE_TYPES[k];
-    return (
-      <button key={k} type="button" className="ntp-row" disabled={busy} onClick={() => onPick(k)}>
-        <span className="ntp-row-ic" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M7 3h7l4 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z" /><path d="M14 3v4h4M9 13h6M9 16.5h4" />
-          </svg>
-        </span>
-        <span className="ntp-row-main">
-          <span className="ntp-row-title">{t.label}</span>
-          <span className="ntp-row-cat">{t.category}</span>
-        </span>
-        <span className="ntp-row-cpt">{t.cpt}</span>
-        <span className="ntp-row-arrow" aria-hidden="true">
-          <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><path d="M3 8h9M8.5 4l4 4-4 4" /></svg>
-        </span>
-      </button>
-    );
-  };
-  const common = NOTE_MENU.filter(match);
-  const more = NOTE_MENU_MORE.filter(match);
-  const all = [...NOTE_MENU, ...NOTE_MENU_MORE].filter(match);
+  const match = (t) => !query
+    || (t.label || '').toLowerCase().includes(query)
+    || (t.category || '').toLowerCase().includes(query)
+    || String(t.cpt || '').toLowerCase().includes(query);
+  const row = (t) => (
+    <button key={t.noteType} type="button" className="ntp-row" disabled={busy} onClick={() => onPick(t.noteType)}>
+      <span className="ntp-row-ic" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M7 3h7l4 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z" /><path d="M14 3v4h4M9 13h6M9 16.5h4" />
+        </svg>
+      </span>
+      <span className="ntp-row-main">
+        <span className="ntp-row-title">{t.label}</span>
+        <span className="ntp-row-cat">{t.category}</span>
+      </span>
+      <span className="ntp-row-cpt">{t.cpt}</span>
+      <span className="ntp-row-arrow" aria-hidden="true">
+        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><path d="M3 8h9M8.5 4l4 4-4 4" /></svg>
+      </span>
+    </button>
+  );
+  const list = templates || [];
+  const common = list.filter((t) => t.menuGroup === 'common' && match(t));
+  const more = list.filter((t) => t.menuGroup !== 'common' && match(t));
+  const all = list.filter(match);
   const searching = !!query;
   return (
     <Modal title="Create a New Note" width={840} onClose={onClose} footer={<>
-      <span className="ntp-foot">CMS-compliant SNF Part B templates · MD sign-off required for billing</span>
+      <span className="ntp-foot">CMS-compliant {SERVICE_LABEL[serviceLine] || 'clinical'} templates · MD sign-off required for billing</span>
       <span className="spacer" />
       <button className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
     </>}>
@@ -571,7 +587,11 @@ function NoteTypePicker({ onPick, onClose, busy }) {
           <svg className="ntp-search-ic" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.2-3.2" /></svg>
           <input className="ntp-search-in" autoFocus placeholder="Search note templates by name, category or CPT…" value={q} onChange={(e) => setQ(e.target.value)} />
         </div>
-        {searching ? (
+        {templates === null ? (
+          <div className="ntp-empty">Loading your templates…</div>
+        ) : list.length === 0 ? (
+          <div className="ntp-empty">No note templates are available for your specialty.</div>
+        ) : searching ? (
           <div className="ntp-sec">
             <div className="ntp-group"><span>{all.length} result{all.length === 1 ? '' : 's'}</span><i /></div>
             {all.length ? <div className="ntp-list">{all.map(row)}</div> : <div className="ntp-empty">No templates match “{q}”.</div>}
@@ -582,10 +602,12 @@ function NoteTypePicker({ onPick, onClose, busy }) {
               <div className="ntp-group"><span>Common</span><i /></div>
               <div className="ntp-list">{common.map(row)}</div>
             </div>
-            <div className="ntp-sec">
-              <div className="ntp-group"><span>More templates</span><i /></div>
-              <div className="ntp-list">{more.map(row)}</div>
-            </div>
+            {more.length > 0 && (
+              <div className="ntp-sec">
+                <div className="ntp-group"><span>More templates</span><i /></div>
+                <div className="ntp-list">{more.map(row)}</div>
+              </div>
+            )}
           </>
         )}
       </div>

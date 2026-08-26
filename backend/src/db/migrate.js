@@ -1,5 +1,6 @@
 import { pool, assertDbConnection } from './pool.js';
 import { SCHEMA_STATEMENTS } from './schema.js';
+import { seedNoteTemplates } from '../services/noteTemplateService.js';
 import { logger } from '../config/logger.js';
 
 /**
@@ -161,6 +162,10 @@ export async function runMigrations() {
        \`rotated_at\` DATETIME NOT NULL
      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
   );
+  // Seed/refresh the note-template registry (SNF + Pain service lines).
+  try { const n = await seedNoteTemplates(); logger.info({ templates: n }, 'Note-template registry seeded'); }
+  catch (err) { logger.warn({ err: err.message }, 'Note-template registry seed skipped'); }
+
   logger.info(`Schema ensured (${SCHEMA_STATEMENTS.length} tables)`);
 }
 

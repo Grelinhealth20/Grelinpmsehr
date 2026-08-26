@@ -310,4 +310,26 @@ export const SCHEMA_STATEMENTS = [
     CONSTRAINT fk_pf_facility FOREIGN KEY (facility_id) REFERENCES facilities(id) ON DELETE CASCADE,
     CONSTRAINT fk_pf_assigned_by FOREIGN KEY (assigned_by) REFERENCES users(id) ON DELETE SET NULL
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+  // --- Note template registry (governs SNF vs Pain template access) ----------
+  // Each clinical note template belongs to a SERVICE LINE ('snf' or 'pain'). A
+  // provider sees & may create ONLY the templates for their own service line — the
+  // two sets never cross over. Reference data (labels/CPT), NOT PHI. Notes themselves
+  // still live in encounter_notes, so all existing note behaviour is unchanged.
+  `CREATE TABLE IF NOT EXISTS note_templates (
+    id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    note_type     VARCHAR(60)     NOT NULL,
+    service_line  ENUM('snf','pain') NOT NULL,
+    label         VARCHAR(160)    NOT NULL,
+    category      VARCHAR(160)    NULL,
+    cpt           VARCHAR(160)    NULL,
+    menu_group    ENUM('common','more') NOT NULL DEFAULT 'more',
+    sort_order    INT             NOT NULL DEFAULT 100,
+    active        TINYINT(1)      NOT NULL DEFAULT 1,
+    created_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_note_template_type (note_type),
+    KEY idx_note_template_service (service_line, active)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 ];

@@ -7,8 +7,24 @@ import {
   listNotes as listNotesSvc, createNote as createNoteSvc, getNote as getNoteSvc,
   updateNote as updateNoteSvc, signNote as signNoteSvc, amendSignedNote as amendNoteSvc,
 } from '../services/encounterNoteService.js';
+import {
+  providerServiceLine, listTemplatesForServiceLine, providerCanUseNoteType,
+} from '../services/noteTemplateService.js';
 import { recordAudit } from '../services/auditService.js';
 import { notePdf } from '../services/pdfExport.js';
+
+/**
+ * Note templates AVAILABLE to the current provider — filtered to their service line
+ * (SNF vs Pain Management) from the note_templates registry. The provider sees only
+ * their own service's templates; the picker renders exactly this list.
+ */
+export async function noteTemplates(req, res, next) {
+  try {
+    const serviceLine = await providerServiceLine(req.authUserId);
+    const templates = await listTemplatesForServiceLine(serviceLine);
+    res.json({ serviceLine, templates });
+  } catch (err) { next(err); }
+}
 
 function sendPdf(res, out) {
   res.setHeader('Content-Type', 'application/pdf');
@@ -108,6 +124,11 @@ export async function listNotes(req, res, next) {
 export async function createNote(req, res, next) {
   try {
     const { noteType, reason, content } = req.body;
+    // SERVICE-LINE ACCESS: a provider may create ONLY the note templates for their own
+    // specialty's service line (SNF vs Pain). Server-enforced — no cross-over.
+    if (!(await providerCanUseNoteType(req.authUserId, noteType))) {
+      return res.status(403).json({ error: 'This note template is not available for your specialty.', code: 'TEMPLATE_FORBIDDEN' });
+    }
     const note = await createNoteSvc({ encounterUuid: req.params.encounterUuid, providerId: req.authUserId, noteType, reason, content, createdBy: req.authUserId });
     if (!note) return res.status(404).json({ error: 'Encounter not found.', code: 'NOT_FOUND' });
     await recordAudit({ actorUserId: req.authUserId, action: 'encounter.note.create', entityType: 'encounter_note', entityId: note.uuid, ...ctx(req), metadata: { noteType } });
@@ -125,6 +146,11 @@ export async function getNote(req, res, next) {
 
 export async function updateNote(req, res, next) {
   try {
+    // If the note type is being changed, it must still belong to the provider's own
+    // service line (SNF vs Pain) — no switching a note across service lines.
+    if (req.body.noteType && !(await providerCanUseNoteType(req.authUserId, req.body.noteType))) {
+      return res.status(403).json({ error: 'This note template is not available for your specialty.', code: 'TEMPLATE_FORBIDDEN' });
+    }
     const result = await updateNoteSvc(req.params.noteUuid, req.authUserId, req.body);
     if (!result) return res.status(404).json({ error: 'Note not found.', code: 'NOT_FOUND' });
     if (result.locked) return res.status(409).json({ error: 'This note is signed and can no longer be edited.', code: 'NOTE_SIGNED' });

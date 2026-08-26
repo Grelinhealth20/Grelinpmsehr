@@ -28,6 +28,19 @@ export const NOTE_TITLES = {
   behavioral_health: 'Behavioral Health / Psychiatric Note',
   cognitive_care: 'Cognitive Assessment & Care Planning Note',
   death: 'Death / Expiration Note',
+  // Pain Management
+  pain_consult: 'Initial Pain Consultation',
+  pain_followup: 'Pain Management Follow-Up Note',
+  pain_med_mgmt: 'Controlled Substance / Medication Management Note',
+  pain_esi: 'Epidural Steroid Injection — Procedure Note',
+  pain_facet_mbb: 'Facet Injection / Medial Branch Block — Procedure Note',
+  pain_rfa: 'Radiofrequency Ablation — Procedure Note',
+  pain_si_joint: 'Sacroiliac Joint Injection — Procedure Note',
+  pain_tpi: 'Trigger Point Injection — Procedure Note',
+  pain_nerve_block: 'Nerve Block — Procedure Note',
+  pain_scs: 'Spinal Cord Stimulator — Procedure Note',
+  pain_uds: 'Urine Drug Screen / Toxicology Review',
+  pain_discharge: 'Pain Management Discharge / Transition Note',
 };
 
 // Canonical section labels (must match the frontend note templates' section keys).
@@ -97,6 +110,14 @@ export const SECTION_LABELS = {
   safetyEval: 'Safety Evaluation',
   caregiver: 'Caregiver Assessment & Support',
   dementiaPlan: 'Care Plan (Cognitive / Dementia)',
+  // Pain Management
+  painHistory: 'History of Present Pain',
+  painScale: 'Pain Intensity & Character',
+  priorTreatments: 'Prior & Conservative Treatments',
+  pdmpReview: 'PDMP Review & Morphine-Equivalent Dose',
+  opioidRisk: 'Opioid Risk Assessment',
+  udsResult: 'Urine Drug Screen / Toxicology',
+  injectate: 'Medications Administered (Injectate)',
 };
 // Canonical clinical documentation order (Bates'/standard H&P). ROS is the LAST
 // subjective element, right before the objective exam; functional status sits with
@@ -104,14 +125,15 @@ export const SECTION_LABELS = {
 // section order — new notes render in their own template order.
 const SECTION_ORDER = [
   // Subjective
-  'chiefComplaint', 'changeDescription', 'hpi', 'interval', 'hospitalCourse',
+  'chiefComplaint', 'changeDescription', 'hpi', 'painHistory', 'painScale', 'interval', 'hospitalCourse',
   'pmh', 'psh', 'familyHistory', 'socialHistory', 'psychHistory',
-  'medications', 'medChanges', 'allergies', 'adverseEffects', 'ros',
+  'medications', 'medChanges', 'allergies', 'adverseEffects', 'priorTreatments',
+  'pdmpReview', 'udsResult', 'opioidRisk', 'ros',
   // Objective
   'vitals', 'exam', 'mentalStatus', 'cognitiveAssessment', 'neuroPsych',
   'wound', 'treatment', 'results', 'functionalStatus',
   // Procedure body (kept together, in operative-note order)
-  'procedureName', 'indication', 'consent', 'procTechnique', 'procFindings', 'specimen', 'ebl', 'complications', 'postProcedure',
+  'procedureName', 'indication', 'consent', 'procTechnique', 'injectate', 'procFindings', 'specimen', 'ebl', 'complications', 'postProcedure',
   // Assessment
   'prognosis', 'carePlanReview', 'riskAssessment', 'safetyEval', 'caregiver', 'assessment', 'mdm',
   // Plan
@@ -144,6 +166,19 @@ export const NOTE_LABEL_OVERRIDES = {
   behavioral_health: { chiefComplaint: 'Reason for Psychiatric Visit', interval: 'Interval / Symptom Status', medications: 'Current Psychotropic Medications', assessment: 'Psychiatric Assessment (DSM-5 / ICD-10)' },
   cognitive_care: { chiefComplaint: 'Reason for Cognitive Assessment', functionalStatus: 'Functional Assessment (ADL / IADL)', medications: 'Medication Reconciliation (High-Risk Medications)', timeSpent: 'Total Time (99483 is time-based) & Attestation' },
   death: { exam: 'Examination Findings at Time of Death', notifications: 'Notifications (Family / Attending / Medical Examiner)' },
+  // Pain Management — headers mirror the UI templates exactly.
+  pain_consult: { chiefComplaint: 'Reason for Pain Consultation', functionalStatus: 'Functional Impact of Pain (ADLs / Sleep / Mood / Work)', results: 'Diagnostic Studies Reviewed (MRI / CT / X-ray / EMG-NCS)', exam: 'Focused Musculoskeletal & Neurologic Examination', assessment: 'Pain Diagnosis & Medical Decision Making (ICD-10)', plan: 'Multimodal Pain Management Plan' },
+  pain_followup: { chiefComplaint: 'Reason for Follow-Up', interval: 'Interval History Since Last Visit', exam: 'Focused Examination', assessment: 'Pain Assessment & MDM', plan: 'Pain Management Plan' },
+  pain_med_mgmt: { chiefComplaint: 'Reason for Medication Review', interval: 'Interval, Pain Level & Functional Response', medications: 'Current Analgesic Regimen (incl. Controlled Substances)', assessment: 'Assessment & MDM', plan: 'Medication / Treatment Plan' },
+  pain_esi: { procedureName: 'Procedure Performed (Epidural Steroid Injection) + CPT', consent: 'Informed Consent & Pre-Procedure Time-Out', procTechnique: 'Technique (Level / Approach / Laterality / Guidance)', postProcedure: 'Post-Procedure Condition & Plan', timeSpent: 'Total Procedure Time & Attestation' },
+  pain_facet_mbb: { procedureName: 'Procedure Performed (Facet Injection / Medial Branch Block) + CPT', consent: 'Informed Consent & Pre-Procedure Time-Out', procTechnique: 'Technique (Levels / Targets / Laterality / Guidance)', postProcedure: 'Post-Procedure Condition & Plan', timeSpent: 'Total Procedure Time & Attestation' },
+  pain_rfa: { procedureName: 'Procedure Performed (Radiofrequency Ablation) + CPT', consent: 'Informed Consent & Pre-Procedure Time-Out', procTechnique: 'RFA Technique (Guidance / Sensory & Motor Testing / Lesioning)', injectate: 'Local Anesthetic / Steroid Administered', postProcedure: 'Post-Procedure Condition & Plan', timeSpent: 'Total Procedure Time & Attestation' },
+  pain_si_joint: { procedureName: 'Procedure Performed (Sacroiliac Joint Injection) + CPT', consent: 'Informed Consent & Pre-Procedure Time-Out', procTechnique: 'Technique (Approach / Guidance / Intra-articular Confirmation)', postProcedure: 'Post-Procedure Condition & Plan', timeSpent: 'Total Procedure Time & Attestation' },
+  pain_tpi: { procedureName: 'Procedure Performed (Trigger Point Injection) + CPT', consent: 'Informed Consent & Time-Out', procTechnique: 'Technique (Muscles & Number of Sites)', injectate: 'Medications Injected', postProcedure: 'Post-Procedure Condition & Plan', timeSpent: 'Total Procedure Time & Attestation' },
+  pain_nerve_block: { procedureName: 'Procedure Performed (Nerve Block) + CPT', consent: 'Informed Consent & Pre-Procedure Time-Out', procTechnique: 'Technique (Target / Guidance / Confirmation)', postProcedure: 'Post-Procedure Condition & Plan', timeSpent: 'Total Procedure Time & Attestation' },
+  pain_scs: { procedureName: 'Procedure Performed (Spinal Cord Stimulator — Trial / Implant) + CPT', consent: 'Informed Consent & Pre-Procedure Time-Out', procTechnique: 'Technique (Lead Placement / Guidance / Mapping / Programming)', postProcedure: 'Post-Procedure Condition & Trial Instructions', timeSpent: 'Total Procedure Time & Attestation' },
+  pain_uds: { chiefComplaint: 'Reason for Toxicology Review', medications: 'Prescribed Controlled Substances', assessment: 'Interpretation & Assessment', plan: 'Action & Plan' },
+  pain_discharge: { chiefComplaint: 'Reason for Discharge / Transition', interval: 'Summary of Pain Management Course & Functional Status', medications: 'Discharge Medication Reconciliation', assessment: 'Final Pain Assessment', plan: 'Discharge Plan & Instructions', followUp: 'Follow-Up & Care Coordination' },
 };
 
 const BLUE = '2753B3';

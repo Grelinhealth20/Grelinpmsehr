@@ -14,6 +14,9 @@ router.use(authenticate, requirePasswordSettled);
 router.get('/', ctrl.list);
 router.post('/', csrfProtection, validate(createEncounterSchema), ctrl.createEncounter);
 
+// Note templates available to the current provider (filtered to their service line).
+router.get('/note-templates', ctrl.noteTemplates);
+
 // Server-side pagination (enterprise scale) — literal paths before param routes.
 router.get('/patients', ctrl.listPatients);
 router.get('/clinical-records', ctrl.clinicalRecords);

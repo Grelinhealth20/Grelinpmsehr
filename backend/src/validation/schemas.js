@@ -222,6 +222,10 @@ export const NOTE_TYPES = [
   'advance_care', 'discharge', 'death',
   // Non-E/M Part B physician services
   'procedure_note', 'behavioral_health', 'cognitive_care',
+  // Pain Management
+  'pain_consult', 'pain_followup', 'pain_med_mgmt', 'pain_esi', 'pain_facet_mbb',
+  'pain_rfa', 'pain_si_joint', 'pain_tpi', 'pain_nerve_block', 'pain_scs',
+  'pain_uds', 'pain_discharge',
 ];
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be YYYY-MM-DD');
 // Structured note body (PHI, encrypted at rest): narrative sections + Rx list.

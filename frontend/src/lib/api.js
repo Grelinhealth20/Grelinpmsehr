@@ -211,6 +211,8 @@ export const encountersApi = {
   rxContext: (patientUuid) => api.get(`/encounters/patient/${patientUuid}/rx-context`),
   create: (payload) => api.post('/encounters', payload),
   updateStatus: (appointmentUuid, payload) => api.patch(`/encounters/${appointmentUuid}`, payload),
+  // Note templates available to the current provider (their service line only).
+  noteTemplates: () => api.get('/encounters/note-templates'),
   // Clinical notes
   listNotes: (encounterUuid) => api.get(`/encounters/${encounterUuid}/notes`),
   createNote: (encounterUuid, payload) => api.post(`/encounters/${encounterUuid}/notes`, payload),
