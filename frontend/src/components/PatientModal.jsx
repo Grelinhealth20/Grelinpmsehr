@@ -67,7 +67,6 @@ function PayerSearch({ value, payerId, onPick }) {
         placeholder="Insurance payer — e.g. UnitedHealthcare, Cigna, Aetna, Medicare"
         onChange={(e) => onPick({ name: e.target.value, stediId: '' })}
       />
-      <span className="hint">Matched to the Stedi payer network automatically at verification — no search needed.</span>
       {payerId ? <div className="payer-id-chip">Matched payer ID: <b>{payerId}</b></div> : null}
     </div>
   );
