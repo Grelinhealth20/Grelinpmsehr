@@ -243,6 +243,40 @@ function accumsFor(list, code) {
   return out.sort((a, b) => rank(a) - rank(b));
 }
 
+/**
+ * Pharmacy / PBM benefit info the payer volunteered in the 271 — the prescription
+ * "vendor" (pharmacy benefit manager), plan, cost-shares, and messages. REAL values
+ * only; returns null when the payer returned no pharmacy benefit (never fabricated).
+ */
+const PHARMACY_STC = new Set(['88', '89', '90', '91', '92', 'B1', 'B2', 'B3', 'BW', 'BX', 'GF', 'GN', 'A9']);
+function pharmacyInfo(bi) {
+  const lines = bi.filter((b) => (b.serviceTypeCodes || []).some((c) => PHARMACY_STC.has(c)));
+  if (!lines.length) return null;
+  let vendor = '';
+  for (const b of lines) {
+    const e = b.benefitsRelatedEntity;
+    const nm = e ? [e.entityFirstname, e.entityMiddlename, e.entityName].filter(Boolean).join(' ').trim() : '';
+    if (nm) { vendor = nm; break; }
+  }
+  const active = lines.some((b) => b.code === '1');
+  const notCovered = lines.some((b) => b.code === 'I');
+  const planName = lines.find((b) => b.planCoverage)?.planCoverage || '';
+  const copay = money((lines.find((b) => b.code === 'B' && b.benefitAmount) || {}).benefitAmount);
+  const coinsurance = pct((lines.find((b) => b.code === 'A' && b.benefitPercent) || {}).benefitPercent);
+  const messages = [...new Set(lines.flatMap((b) => (b.additionalInformation || []).map((a) => a.description).filter(Boolean)))];
+  const network = net(lines[0]) || '';
+  if (!vendor && !planName && copay === null && coinsurance === null && !messages.length && !active && !notCovered) return null;
+  return {
+    vendor: vendor || null,
+    planName: planName || null,
+    status: notCovered ? 'not_covered' : active ? 'active' : 'info',
+    copay,
+    coinsurance,
+    network: network || null,
+    messages,
+  };
+}
+
 export function normalize271(resp) {
   const bi = Array.isArray(resp?.benefitsInformation) ? resp.benefitsInformation : [];
   const ps = Array.isArray(resp?.planStatus) ? resp.planStatus[0] : null;
@@ -417,6 +451,7 @@ export function normalize271(resp) {
     financial,
     visitCost,
     services,
+    pharmacy: pharmacyInfo(bi),
     limitations,
     messages,
     disclaimer,

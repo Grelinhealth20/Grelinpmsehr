@@ -615,12 +615,16 @@
 .sch-new { margin-left: auto; }
 
 /* Patient search combobox (appointment modal) */
+/* Patient search: each appt field is its own stacking context (from appt-rise), so a
+   later field would paint over this field's dropdown. Lift the WHOLE patient field
+   above its siblings while its results are open, so the dropdown overlays cleanly. */
 .sch-pt { position: relative; }
+.appt-col > .field:focus-within { position: relative; z-index: 40; }
 .sch-pt-linked { position: absolute; right: 12px; top: 13px; font-size: 11px; font-weight: 700; color: var(--c-success); pointer-events: none; }
 .sch-pt-list {
-  position: absolute; z-index: 5; left: 0; right: 0; top: calc(100% + 4px);
+  position: absolute; z-index: 40; left: 0; right: 0; top: calc(100% + 4px);
   background: #fff; border: 1.5px solid rgba(9, 17, 33, 0.12); border-radius: 12px; box-shadow: var(--shadow-lg);
-  padding: 6px; max-height: 220px; overflow-y: auto;
+  padding: 6px; max-height: 240px; overflow-y: auto;
 }
 .sch-pt-item {
   display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%;
@@ -1952,3 +1956,170 @@ input::-ms-clear, input::-ms-reveal { display: none; width: 0; height: 0; }
 @media (max-width: 680px) { .appt-cols { grid-template-columns: 1fr; } }
 /* Booking button shows a soft working state */
 .btn:disabled { opacity: 0.6; cursor: default; }
+
+/* ============ Patient Face Sheet — front-office redesign (scoped) ============
+   Sleek, dense, dynamically-responsive registration form. These rules apply ONLY
+   inside .fs-sheet, so the Benefits Information tab is left completely untouched. */
+.fs-sheet { display: flex; flex-direction: column; gap: 14px; }
+.fs-sheet .fs-section { margin: 0; border: 1px solid var(--c-line); border-radius: 12px; padding: 18px 22px 20px; background: #fff; box-shadow: none; animation: none; }
+
+/* Dynamic field grid — auto-fits as many aligned columns as the width allows */
+.fs-sheet .fs-grid,
+.fs-sheet .fs-grid.fs-grid-3 { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 13px 16px; align-items: end; }
+.fs-sheet .fs-grid .field { min-width: 0; }
+.fs-sheet .fs-grid .field label { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; color: var(--c-ink-3); margin-bottom: 5px; }
+.fs-sheet .fs-grid .input, .fs-sheet .fs-grid .select { height: 40px; font-size: 13px; border-radius: 9px; border: 1px solid #e2e8f2; background: #fbfcfe; }
+.fs-sheet .fs-grid .input:hover, .fs-sheet .fs-grid .select:hover { border-color: #c9d5e8; background: #fff; }
+.fs-sheet .fs-grid .input:focus, .fs-sheet .fs-grid .select:focus { border-color: var(--c-blue); background: #fff; box-shadow: 0 0 0 3px rgba(39,83,179,0.12); }
+
+/* Sub-group labels as thin, colored section dividers */
+.fs-sheet .fs-sub { font-size: 9.5px; letter-spacing: 0.12em; color: var(--c-blue); margin: 20px 0 12px; }
+.fs-sheet .fs-sub:first-of-type { margin-top: 2px; }
+
+/* Insurance + emergency-contact cards — nested, lighter, sleek */
+.fs-sheet .fs-ins { border: 1px solid #e6ecf5; border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; background: #fafcff; box-shadow: none; }
+.fs-sheet .fs-ins:hover { border-color: #cdd9ee; }
+/* Icon tile: flat, no glow (enterprise) */
+.fs-sheet .fs-sh-ic { background: var(--c-dark-blue); box-shadow: none; }
+
+/* Redesigned section header — tighter icon tile */
+.fs-sheet .fs-sh { margin-bottom: 16px; }
+.fs-sheet .fs-sh-ic { width: 32px; height: 32px; border-radius: 9px; }
+.fs-sheet .fs-sh-t { font-size: 14px; }
+
+/* Documents grid — dynamic */
+.fs-sheet .fs-docs { grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+
+/* ============ Prescriptions — provider-focused medication workspace ============ */
+.rx2-scroll { padding: clamp(14px,2vh,22px) 20px 60px; }
+.rx2 { max-width: 820px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+/* Pharmacy / PBM vendor (from benefits) */
+.rx2-pharm { display: flex; align-items: center; gap: 14px; padding: 13px 18px; border: 1px solid var(--c-line); border-radius: 12px; background: #fff; }
+.rx2-pharm.is-empty { background: #fbfcfe; border-style: dashed; }
+.rx2-pharm-ic { width: 38px; height: 38px; border-radius: 10px; display: grid; place-items: center; flex-shrink: 0; font-size: 19px; font-weight: 800; color: #fff; background: var(--c-dark-blue); }
+.rx2-pharm.is-empty .rx2-pharm-ic { background: #c4cfe0; }
+.rx2-pharm-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.rx2-pharm-lbl { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.06em; color: var(--c-ink-3); }
+.rx2-pharm-v { font-size: 14px; font-weight: 800; color: var(--c-dark-blue); }
+.rx2-pharm-sub { font-size: 12px; font-weight: 600; color: var(--c-ink-2); }
+/* Carry-forward banner */
+.rx2-carry { display: flex; align-items: center; gap: 9px; font-size: 12px; font-weight: 700; color: #8a5a1f; background: var(--c-accent-050); border: 1px solid rgba(207,148,85,0.35); border-radius: 10px; padding: 9px 14px; }
+.rx2-carry-ic { font-size: 14px; }
+.rx2-head { display: flex; align-items: center; }
+.rx2-head-t { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.07em; color: var(--c-dark-blue); }
+.rx2-empty { padding: 22px; text-align: center; font-size: 12.5px; font-weight: 600; color: var(--c-ink-3); border: 1px dashed var(--c-line); border-radius: 12px; background: #fff; }
+/* Medication card */
+.rx2-med { border: 1px solid var(--c-line); border-radius: 12px; background: #fff; padding: 14px 16px 16px; }
+.rx2-med-top { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.rx2-med-n { width: 24px; height: 24px; border-radius: 7px; display: grid; place-items: center; flex-shrink: 0; font-size: 11px; font-weight: 800; color: var(--c-blue); background: var(--c-blue-050); border: 1px solid #d5e2f6; }
+.rx2-drug { flex: 1; height: 40px; border: 1px solid #e2e8f2; border-radius: 9px; padding: 0 14px; font-family: inherit; font-size: 14px; font-weight: 700; color: var(--c-dark-blue); background: #fbfcfe; outline: none; transition: border-color 0.14s var(--ease), box-shadow 0.14s var(--ease), background 0.14s var(--ease); }
+.rx2-drug::placeholder { color: #aab3c4; font-weight: 600; }
+.rx2-drug:hover { border-color: #c9d5e8; background: #fff; }
+.rx2-drug:focus { border-color: var(--c-blue); background: #fff; box-shadow: 0 0 0 3px rgba(39,83,179,0.12); }
+.rx2-drug:disabled { background: #f4f6fa; color: var(--c-ink); -webkit-text-fill-color: var(--c-ink); opacity: 1; }
+.rx2-x { width: 30px; height: 30px; border-radius: 8px; flex-shrink: 0; border: 1px solid var(--c-line); background: #fff; color: var(--c-ink-3); cursor: pointer; font-size: 12px; font-family: inherit; transition: border-color 0.14s var(--ease), color 0.14s var(--ease), background 0.14s var(--ease); }
+.rx2-x:hover { border-color: var(--c-danger); color: var(--c-danger); background: #fdf2f1; }
+.rx2-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 10px 12px; }
+.rx2-f { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.rx2-f label { font-size: 9.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; color: var(--c-ink-3); }
+.rx2-f .input { height: 38px; font-size: 13px; border-radius: 8px; border: 1px solid #e2e8f2; background: #fbfcfe; }
+.rx2-f .input:hover { border-color: #c9d5e8; background: #fff; }
+.rx2-f .input:focus { border-color: var(--c-blue); background: #fff; box-shadow: 0 0 0 3px rgba(39,83,179,0.12); }
+.rx2-sigrow { margin-top: 11px; display: flex; flex-direction: column; gap: 5px; }
+.rx2-sigrow label { font-size: 9.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; color: var(--c-ink-3); }
+.rx2-sig { height: 38px; font-size: 13px; border-radius: 8px; }
+
+/* Search dropdown states (patient / provider comboboxes) */
+.sch-pt-note { padding: 12px; font-size: 12.5px; font-weight: 600; color: var(--c-ink-3); display: flex; align-items: center; gap: 8px; }
+.sch-pt-fac { font-size: 11px; font-weight: 600; color: var(--c-ink-3); }
+
+/* ============ New Appointment — front-desk redesign (sleek, flat, no glow) ============ */
+.appt-form { gap: 17px; }
+/* No entrance animation: snappier for the front desk, AND it removes the per-field
+   stacking context that let a later field paint over the search dropdown. */
+.appt-col > .field { animation: none; }
+.appt-cols { gap: 18px 34px; position: relative; }
+@media (min-width: 681px) { .appt-cols::before { content: ''; position: absolute; top: 2px; bottom: 2px; left: calc(50% + 1px); width: 1px; background: var(--c-line); } }
+.appt-form .field > label { font-size: 10.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; color: var(--c-ink-3); }
+.appt-form .field > label .muted { text-transform: none; letter-spacing: 0; font-weight: 600; color: var(--c-ink-3); }
+.appt-form .input, .appt-form .select { height: 42px; border-radius: 10px; border: 1px solid #e2e8f2; background: #fbfcfe; font-size: 13.5px; transition: border-color 0.14s var(--ease), box-shadow 0.14s var(--ease), background 0.14s var(--ease); }
+.appt-form .input:hover, .appt-form .select:hover { border-color: #c9d5e8; background: #fff; }
+.appt-form .input:focus, .appt-form .select:focus { border-color: var(--c-blue); background: #fff; box-shadow: 0 0 0 3px rgba(39,83,179,0.12); }
+/* Segmented controls (Type + Duration) — flat, crisp active state */
+.appt-form .seg-ctrl { background: #eef1f6; border: 1px solid var(--c-line); border-radius: 11px; padding: 3px; gap: 3px; flex-wrap: wrap; }
+.appt-form .seg-opt { border-radius: 8px; font-size: 12.5px; font-weight: 700; padding: 8px 12px; transition: background 0.14s var(--ease), color 0.14s var(--ease); }
+.appt-form .seg-opt.active { background: var(--c-dark-blue); color: #fff; box-shadow: none; }
+.appt-form .seg-opt:hover:not(.active) { color: var(--c-dark-blue); }
+/* Search comboboxes — sleek, interactive dropdown */
+.appt-form .sch-pt input { padding-right: 84px; }
+.appt-form .sch-pt-list { border-radius: 11px; padding: 5px; }
+.appt-form .sch-pt-item { padding: 10px 12px; border-radius: 8px; }
+.appt-form .sch-pt-item:hover { background: var(--c-blue-050); }
+.appt-form .sch-pt-nm { font-weight: 700; }
+.appt-form .sch-pt-actions .btn { font-size: 12px; }
+
+/* Procedure combobox rows — CPT code + description (replaces the native datalist) */
+.sch-cpt-item { justify-content: flex-start; gap: 12px; }
+.sch-cpt-code { font-size: 12px; font-weight: 800; color: var(--c-blue); font-variant-numeric: tabular-nums; min-width: 46px; flex-shrink: 0; text-align: left; }
+.sch-cpt-desc { font-size: 12.5px; font-weight: 600; color: var(--c-ink); text-align: left; }
+
+/* ============ Benefits — enterprise color cleanup (one accent + neutrals) ============
+   Removes the decorative blue/green/amber gradients. Semantic color is kept ONLY on
+   the coverage status badge, where it actually communicates active vs inactive. */
+.bx-policy { box-shadow: 0 1px 2px rgba(9,17,33,0.04); }
+.bx-policy-h { background: #f8fafc; }
+.bx-policy-h .fs-ins-rank,
+.bx-policy-h .fs-ins-rank.r-primary,
+.bx-policy-h .fs-ins-rank.r-secondary,
+.bx-policy-h .fs-ins-rank.r-tertiary { color: var(--c-dark-blue); background: rgba(9,17,33,0.05); border: 1px solid var(--c-line); }
+.bx-head, .bx-head.active, .bx-head.inactive { background: #fbfcfe; border-color: var(--c-line); }
+/* Coverage tiles + accumulator meters — single navy accent (was blue + amber) */
+.bx-tile::before, .bx-tile.copay::before, .bx-tile.coins::before { background: var(--c-dark-blue); }
+.bx-acc-meter > span, .bx-acc.oop .bx-acc-meter > span { background: var(--c-dark-blue); }
+.bx-acc-lvl.ind, .bx-acc-lvl.fam { color: var(--c-ink-2); background: rgba(9,17,33,0.05); }
+.bx-acc-row .v.strong { color: var(--c-ink-1); }
+/* Network tags + group headers — neutral (distinguished by label, not by color) */
+.bx-net.in, .bx-net.out { color: var(--c-ink-2); background: #eef2f8; border: 1px solid var(--c-line); }
+.nx-grp.in .nx-grp-h, .nx-grp.out .nx-grp-h, .nx-grp.gen .nx-grp-h { background: #f6f8fc; }
+.nx-grp.in .nx-grp-tag, .nx-grp.out .nx-grp-tag, .nx-grp.gen .nx-grp-tag { color: var(--c-ink-2); }
+/* Procedure panel — neutral (was blue) */
+.bx-proc { border-color: var(--c-line); background: #fbfcfe; }
+.bx-proc-h { color: var(--c-ink-2); border-bottom-color: var(--c-line); }
+.bx-proc-tag, .bx-proc-tag b { color: var(--c-dark-blue); }
+.bx-proc-warn { color: var(--c-ink-2); background: #f4f6fa; border-top-color: var(--c-line); }
+/* Status badge stays semantic but calm */
+.bx-status.active { color: #0a7d3f; background: #eef6f1; }
+.bx-status.inactive { color: #b42318; background: #fbeeec; }
+.bx-status.pending { color: #8a5a1f; background: #f6efe4; }
+/* Benefit-type tags — neutral (was blue/green/amber/red rainbow). Only "not covered"
+   keeps a subtle warning color, since that one is a real flag. */
+.bx-tag, .bx-tag.copay, .bx-tag.coins, .bx-tag.ded, .bx-tag.oop, .bx-tag.act, .bx-tag.lim { color: var(--c-dark-blue); background: rgba(9,17,33,0.05); }
+.bx-tag.nc { color: #b42318; background: #fbeeec; }
+
+/* ============ Notes editor — document-flow redesign (no boxes) ============
+   A calm, premium clinical document to write in: section headings with a hairline
+   rule + accent tick, borderless flowing text areas, and a subtle left-accent focus.
+   Enterprise, provider-focused, comfortable to write. Read-only (signed) view keeps
+   its existing finished-document look. CSS-only — backend wiring unchanged. */
+.nt-doc-page.is-editing { max-width: 820px; padding: clamp(30px,3.5vw,48px) clamp(30px,4vw,56px) 56px; }
+/* Section = heading + flowing body, no card/box */
+.is-editing .nt-sec { margin: 0 0 24px; padding: 0; border: none; background: none; box-shadow: none; }
+.is-editing .nt-sec:focus-within { box-shadow: none; }
+.is-editing .nt-sec:last-child { margin-bottom: 0; }
+/* Heading: bold, small, accent tick + hairline rule */
+.is-editing .nt-sec-h { display: flex; align-items: center; gap: 9px; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.09em; color: var(--c-dark-blue); margin: 0 0 10px; padding-bottom: 7px; border-bottom: 1px solid var(--c-line); }
+.is-editing .nt-sec-h::before { content: ''; display: block; width: 3px; height: 12px; border-radius: 2px; background: var(--c-blue); flex-shrink: 0; }
+.is-editing .nt-sec-ic { display: none; }
+/* Body: borderless, flowing, comfortable — reads like writing on paper */
+.is-editing .nt-sec-edit { border: none; border-radius: 0; background: transparent; padding: 4px 2px 6px; font-size: 14.5px; line-height: 1.75; font-weight: 500; color: var(--c-ink-1); box-shadow: none; transition: background 0.15s var(--ease), box-shadow 0.15s var(--ease); }
+.is-editing .nt-sec-edit::placeholder { color: #a7b0c1; font-weight: 400; }
+.is-editing .nt-sec-edit:hover { border: none; background: rgba(9,17,33,0.015); border-radius: 6px; }
+.is-editing .nt-sec-edit:focus { border: none; background: rgba(39,83,179,0.035); border-radius: 0 8px 8px 0; box-shadow: inset 3px 0 0 var(--c-blue); }
+/* Vitals: clean underline-style fields on one comfortable row (no boxes) */
+.is-editing .nt-vitals-sec { background: none; }
+.is-editing .nt-vgrid { display: flex; flex-wrap: wrap; gap: 12px 26px; }
+.is-editing .nt-vfld { flex: 0 0 auto; min-width: 72px; gap: 4px; }
+.is-editing .nt-vfld label { font-size: 9px; }
+.is-editing .nt-vfld input { border: none; border-bottom: 1.5px solid #e2e8f2; border-radius: 0; background: transparent; text-align: left; padding: 5px 2px; font-size: 15px; font-weight: 700; color: var(--c-dark-blue); transition: border-color 0.15s var(--ease); }
+.is-editing .nt-vfld input:hover { border-bottom-color: #c9d5e8; }
+.is-editing .nt-vfld input:focus { border-bottom-color: var(--c-blue); box-shadow: none; background: transparent; }

@@ -77,7 +77,7 @@ export default function AppointmentEligibilityModal({ appointment, onClose, onCh
           <div className="aeg-orbit"><span /><span /><span /></div>
           <div className="aeg-scan"><i /></div>
           <p className="aeg-loading-t">Contacting the payer network…</p>
-          <p className="aeg-loading-s">Running real-time eligibility (270/271)</p>
+          <p className="aeg-loading-s">Checking eligibility &amp; benefits</p>
         </div>
       ) : !check ? (
         <div className="aeg-empty">

@@ -12,6 +12,9 @@ const EMPTY = {
   emergencyContacts: [],
 };
 const blankContact = () => ({ name: '', relationship: '', phone: '', email: '' });
+// Display an ISO date (YYYY-MM-DD, the stored/processing format) as US MM/DD/YYYY.
+// Only for read-only display — <input type="date"> values stay ISO as HTML requires.
+const mdy = (d) => { const m = String(d || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${m[2]}/${m[3]}/${m[1]}` : String(d || ''); };
 const INS_RANKS = ['primary', 'secondary', 'tertiary'];
 const INS_LABEL = { primary: 'Primary', secondary: 'Secondary', tertiary: 'Tertiary' };
 const blankBenefits = () => ({ eligibilityStatus: 'not_verified', planName: '', network: '', effectiveDate: '', termDate: '', copay: '', coinsurance: '', deductible: '', deductibleMet: '', oopMax: '', oopMet: '', coverageNotes: '', verifiedDate: '', verifiedBy: '', referenceNo: '' });
@@ -610,7 +613,7 @@ export default function PatientModal({ uuid = null, docMode = 'license', onClose
             <div className="fs-summary-main">
               <span className="fs-summary-nm">{patientDisplayName({ demographics: form.demographics })}</span>
               <span className="fs-summary-sub">
-                {form.demographics.dob ? `DOB ${form.demographics.dob}` : 'New patient'}
+                {form.demographics.dob ? `DOB ${mdy(form.demographics.dob)}` : 'New patient'}
                 {form.demographics.gender && form.demographics.gender !== 'unknown' ? ` · ${form.demographics.gender}` : ''}
               </span>
             </div>
@@ -633,7 +636,7 @@ export default function PatientModal({ uuid = null, docMode = 'license', onClose
           </div>
 
           {viewTab === 'facesheet' && (
-          <>
+          <div className="fs-sheet">
           {docMode === 'records' && (
             <div className="fs-section">
               <SecHead icon="file" title="Face sheets & PCC documents" note={!pUuid ? 'auto-fill now — files save after you create the patient' : undefined} />
@@ -738,14 +741,14 @@ export default function PatientModal({ uuid = null, docMode = 'license', onClose
               </div>
             </div>
           )}
-          </>
+          </div>
           )}
 
           {viewTab === 'benefits' && (
           <div className="fs-section" style={{ marginBottom: 0 }}>
             <div className="fs-section-h">
-              Benefits Verification
-              <span className="fs-section-note"> — real-time eligibility (X12 271), per insurance policy</span>
+              Insurance Benefits
+              <span className="fs-section-note"> — coverage &amp; eligibility for each policy</span>
             </div>
             {!pUuid ? (
               <div className="fs-empty" style={{ padding: '14px 0' }}>Create the patient first, then verify eligibility here. Verified benefits are stored with this patient only.</div>
@@ -765,7 +768,7 @@ export default function PatientModal({ uuid = null, docMode = 'license', onClose
 
             {form.insurance.length > 0 && (
             <details className="fs-manual-ben">
-              <summary>Record benefits manually (phone verification, no 271)</summary>
+              <summary>Record benefits manually (phone verification)</summary>
               {form.insurance.map((ins, i) => {
                 const ben = ins.benefits || {};
                 const elig = ben.eligibilityStatus || 'not_verified';

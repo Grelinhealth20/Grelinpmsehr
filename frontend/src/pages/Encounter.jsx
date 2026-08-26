@@ -6,7 +6,7 @@ import { encountersApi, toApiError } from '../lib/api.js';
 import { NOTE_TYPES } from '../lib/noteTemplates.js';
 
 const PATIENTS_PER_PAGE = 25;
-const ENC_PER_PAGE = 10;
+const ENC_PER_PAGE = 25;
 const procedureLabel = (r) => (r.noteTypes ? r.noteTypes.split(',').map((c) => NOTE_TYPES[c]?.label || c).join(', ') : '—');
 
 /**

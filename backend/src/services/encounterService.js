@@ -200,11 +200,19 @@ export async function listProviderPatients(providerId, { page = 1, pageSize = 25
   const params = { ...sc.params };
   let where = sc.sql;
   if (q) {
-    // MRN is plaintext (partial match); name is searchable only by exact full
-    // name via its blind index (PHI is encrypted — no partial name scans).
-    where += ' AND (p.mrn LIKE :qlike OR p.name_bidx = :qbidx)';
+    // MRN is plaintext (partial match). Name is encrypted → searched via its blind
+    // index (exact full name). We index names as "last first", so also try the
+    // reversed order so the front office can type the name either way. Scales to any
+    // patient count (indexed equality lookup — no full-table name scan).
+    const norm = String(q).trim().toLowerCase().replace(/\s+/g, ' ');
+    const parts = norm.split(' ').filter(Boolean);
+    const variants = new Set([norm]);
+    if (parts.length === 2) variants.add(`${parts[1]} ${parts[0]}`);
+    const keys = [...variants];
+    const ph = keys.map((_, i) => `:qb${i}`);
+    where += ` AND (p.mrn LIKE :qlike OR p.name_bidx IN (${ph.join(', ')}))`;
     params.qlike = `%${q}%`;
-    params.qbidx = blindIndex(q.trim().toLowerCase());
+    keys.forEach((v, i) => { params[`qb${i}`] = blindIndex(v); });
   }
   const [[rows], [cnt]] = await Promise.all([
     execute(
@@ -242,14 +250,14 @@ export async function listProviderPatients(providerId, { page = 1, pageSize = 25
 
 /** Paginated encounters for one patient (10/page). Scope: MD → all encounters at
  *  their facility for this patient; other providers → their own encounters only. */
-export async function listPatientEncounters(providerId, patientUuid, { page = 1, pageSize = 10 } = {}) {
+export async function listPatientEncounters(providerId, patientUuid, { page = 1, pageSize = 25 } = {}) {
   // Resolve + authorize the patient by the viewer's scope (strict isolation).
   const scope = await viewerScope(providerId);
   const sc = patientScopeWhere(scope, providerId, 'p');
   const [pr] = await execute(`SELECT p.id FROM patients p WHERE p.uuid = :u AND ${sc.sql} LIMIT 1`, { u: patientUuid, ...sc.params });
   if (!pr[0]) return null; // not visible to this viewer → 404
   const pidInt = pr[0].id;
-  const lim = Math.max(1, Math.min(50, Number(pageSize) || 10));
+  const lim = Math.max(1, Math.min(50, Number(pageSize) || 25));
   const off = Math.max(0, (Number(page) - 1) * lim);
   // A facility-wide MD sees every encounter for the patient; others see only theirs.
   const encWhere = isFacilityWide(scope) ? 'e.patient_id = :pid' : 'e.patient_id = :pid AND e.provider_id = :prov';
@@ -284,6 +292,42 @@ export async function listPatientEncounters(providerId, patientUuid, { page = 1,
     page: Number(page),
     pageSize: Number(pageSize),
   };
+}
+
+/**
+ * Carry-forward medication list — the patient's MOST RECENT note (within the caller's
+ * scope) that carries prescriptions. Used to auto-populate a new encounter's Rx so a
+ * provider never re-enters the med list; they simply amend it. STRICTLY scoped to the
+ * accessible patient (own patients, or facility-wide for an MD) — never cross-patient.
+ * Returns null when the patient is not accessible.
+ */
+export async function latestPrescriptions(providerId, patientUuid) {
+  const scope = await viewerScope(providerId);
+  const sc = patientScopeWhere(scope, providerId, 'p');
+  const [pr] = await execute(`SELECT p.id FROM patients p WHERE p.uuid = :u AND ${sc.sql} LIMIT 1`, { u: patientUuid, ...sc.params });
+  if (!pr[0]) return null; // not accessible → caller 404s (no cross-patient)
+  const patientId = pr[0].id;
+  const noteWhere = isFacilityWide(scope) ? 'e.patient_id = :pid' : 'e.patient_id = :pid AND e.provider_id = :prov';
+  const params = isFacilityWide(scope) ? { pid: patientId } : { pid: patientId, prov: providerId };
+  const [rows] = await execute(
+    `SELECT n.content_enc, n.created_at FROM encounter_notes n
+       JOIN encounters e ON e.id = n.encounter_id
+      WHERE ${noteWhere} AND n.content_enc IS NOT NULL
+      ORDER BY n.created_at DESC LIMIT 40`,
+    params,
+  );
+  for (const r of rows) {
+    const c = jsonFromEnc(r.content_enc);
+    const rx = Array.isArray(c?.prescriptions) ? c.prescriptions.filter((p) => p && p.drug) : [];
+    if (rx.length) {
+      return {
+        patientId,
+        prescriptions: rx.map((p) => ({ drug: p.drug || '', dose: p.dose || '', route: p.route || '', frequency: p.frequency || '', quantity: p.quantity || '', refills: p.refills || '', sig: p.sig || '' })),
+        sourceDate: r.created_at,
+      };
+    }
+  }
+  return { patientId, prescriptions: [], sourceDate: null };
 }
 
 /** Create a standalone encounter (select patient + date) not tied to an appointment. */
@@ -373,7 +417,10 @@ export async function listClinicalRecords(userId, { page = 1, pageSize = 25, q =
         LEFT JOIN patients p ON p.id = e.patient_id
         LEFT JOIN users u ON u.id = n.provider_id
         WHERE ${where}
-        ORDER BY n.created_at DESC
+        -- status is enum('draft','signed'): ASC puts 'draft' (Yet to Sign) first,
+        -- then newest within each group. A real column (not an expression) so the
+        -- composite index is used and there's no filesort even at 10k+ records.
+        ORDER BY n.status ASC, n.created_at DESC
         LIMIT ${lim} OFFSET ${off}`,
       params,
     ),

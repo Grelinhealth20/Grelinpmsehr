@@ -4,7 +4,7 @@ import PatientModal from '../components/PatientModal.jsx';
 import AppointmentEligibilityModal from '../components/AppointmentEligibilityModal.jsx';
 import { useToast } from '../components/Toast.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
-import { appointmentsApi, patientsApi, providersApi, toApiError } from '../lib/api.js';
+import { appointmentsApi, patientsApi, providersApi, encountersApi, toApiError } from '../lib/api.js';
 import { specialtyProcedures } from '../lib/procedureCatalog.js';
 
 const ELIG_TAG = { active: 'Active', inactive: 'Inactive', pending: 'Pending', error: 'Recheck' };
@@ -87,15 +87,17 @@ export default function AppointmentScheduler() {
   const [busy, setBusy] = useState(false); // guards actions so each runs only once
   const [drag, setDrag] = useState(null); // live drag ghost { appt, x, y, w }
   const dragRef = useRef(null); // { appt, offsetY, startX, startY, moved }
-  const [patients, setPatients] = useState([]); // provider's own patients (for search)
+  const [patResults, setPatResults] = useState([]); // server-side patient search results
+  const [patLoading, setPatLoading] = useState(false);
   const [patientOpen, setPatientOpen] = useState(false);
   const [patientModal, setPatientModal] = useState(null); // { uuid? } — face sheet popup
   const [eligModal, setEligModal] = useState(null); // { uuid, title } — eligibility benefits popup
   const [providers, setProviders] = useState([]); // active providers (from DB)
+  const [provOpen, setProvOpen] = useState(false);
+  const [provQuery, setProvQuery] = useState('');
+  const [procOpen, setProcOpen] = useState(false);
 
-  const refreshPatients = useCallback(() => {
-    patientsApi.list().then(({ data }) => setPatients(data.patients)).catch(() => {});
-  }, []);
+  const refreshPatients = useCallback(() => { setPatResults([]); }, []);
 
   useEffect(() => {
     let active = true;
@@ -105,11 +107,19 @@ export default function AppointmentScheduler() {
     return () => { active = false; };
   }, []);
 
+  // Debounced, server-side patient search — scoped + paginated, so it scales to
+  // 100k+ patients without ever loading the full list into the browser.
   useEffect(() => {
-    let active = true;
-    patientsApi.list().then(({ data }) => active && setPatients(data.patients)).catch(() => {});
-    return () => { active = false; };
-  }, []);
+    if (!patientOpen) return undefined;
+    const q = (modal?.form?.patient || '').trim();
+    setPatLoading(true);
+    const t = setTimeout(async () => {
+      try { const { data } = await encountersApi.listPatients({ q, pageSize: 8 }); setPatResults(data.patients || []); }
+      catch { setPatResults([]); } finally { setPatLoading(false); }
+    }, 220);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modal?.form?.patient, patientOpen]);
 
   const now = new Date();
   const todayKey = toKey(now);
@@ -412,30 +422,26 @@ export default function AppointmentScheduler() {
                   onBlur={() => setTimeout(() => setPatientOpen(false), 150)}
                 />
                 {modal.form.patientUuid && <span className="sch-pt-linked" title="Linked to a patient record">● Linked</span>}
-                {patientOpen && (() => {
-                  const q = (modal.form.patient || '').toLowerCase().trim();
-                  const matches = (q
-                    ? patients.filter((p) => patientName(p).toLowerCase().includes(q) || (p.mrn || '').toLowerCase().includes(q))
-                    : patients
-                  ).slice(0, 6);
-                  if (!matches.length) return null;
-                  return (
-                    <div className="sch-pt-list">
-                      {matches.map((p) => (
-                        <button
-                          type="button"
-                          key={p.uuid}
-                          className="sch-pt-item"
-                          onMouseDown={(e) => e.preventDefault()}
-                          onClick={() => { setF({ patient: patientName(p), patientUuid: p.uuid }); setPatientOpen(false); }}
-                        >
-                          <span className="sch-pt-nm">{patientName(p)}</span>
-                          <span className="sch-pt-mrn">{p.mrn}</span>
-                        </button>
-                      ))}
-                    </div>
-                  );
-                })()}
+                {patientOpen && (
+                  <div className="sch-pt-list">
+                    {patLoading ? (
+                      <div className="sch-pt-note"><span className="spinner dark" /> Searching…</div>
+                    ) : patResults.length === 0 ? (
+                      <div className="sch-pt-note">{(modal.form.patient || '').trim() ? 'No matching patients. Try the full name or the MRN.' : 'Type a name or MRN to search.'}</div>
+                    ) : patResults.map((p) => (
+                      <button
+                        type="button"
+                        key={p.patientUuid}
+                        className="sch-pt-item"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => { setF({ patient: p.patientName || '', patientUuid: p.patientUuid }); setPatResults([]); setPatientOpen(false); }}
+                      >
+                        <span className="sch-pt-nm">{p.patientName || '—'}{p.facilityName ? <span className="sch-pt-fac"> · {p.facilityName}</span> : ''}</span>
+                        <span className="sch-pt-mrn">{p.mrn}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
               <div className="sch-pt-actions">
                 <button type="button" className="btn ghost sm" onClick={() => setPatientModal({})}>+ New patient</button>
@@ -446,10 +452,33 @@ export default function AppointmentScheduler() {
             </div>
             <div className="field">
               <label>Rendering provider{isBilling && <span className="fs-req">*</span>}</label>
-              <select className="select" value={modal.form.renderingProviderUuid} onChange={(e) => setF({ renderingProviderUuid: e.target.value })}>
-                <option value="">— Select provider —</option>
-                {providers.map((p) => <option key={p.uuid} value={p.uuid}>{providerLabel(p)}</option>)}
-              </select>
+              <div className="sch-pt">
+                <input
+                  className="input"
+                  value={provOpen ? provQuery : (selProvider ? providerLabel(selProvider) : '')}
+                  placeholder="Search provider by name or specialty…"
+                  autoComplete="off"
+                  onChange={(e) => { setProvQuery(e.target.value); setF({ renderingProviderUuid: '' }); setProvOpen(true); }}
+                  onFocus={() => { setProvQuery(selProvider ? providerLabel(selProvider) : ''); setProvOpen(true); }}
+                  onBlur={() => setTimeout(() => setProvOpen(false), 150)}
+                />
+                {provOpen && (() => {
+                  const pq = provQuery.trim().toLowerCase();
+                  const matches = (pq ? providers.filter((p) => providerLabel(p).toLowerCase().includes(pq)) : providers).slice(0, 20);
+                  return (
+                    <div className="sch-pt-list">
+                      {matches.length === 0
+                        ? <div className="sch-pt-note">{providers.length ? 'No providers match.' : 'No providers assigned to your facility.'}</div>
+                        : matches.map((p) => (
+                          <button type="button" key={p.uuid} className="sch-pt-item" onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => { setF({ renderingProviderUuid: p.uuid }); setProvOpen(false); }}>
+                            <span className="sch-pt-nm">{providerLabel(p)}</span>
+                          </button>
+                        ))}
+                    </div>
+                  );
+                })()}
+              </div>
               {providers.length === 0
                 ? <span className="hint">No providers are assigned to your facility yet — assign providers to a facility in the Admin panel.</span>
                 : isBilling && <span className="hint">Select the provider whose schedule this appointment belongs to.</span>}
@@ -467,14 +496,34 @@ export default function AppointmentScheduler() {
             </div>
             <div className="field">
               <label>Procedure <span className="muted">(CPT/HCPCS — what the appointment is for; drives eligibility)</span></label>
-              <input
-                className="input" list="sch-cpt-list" value={modal.form.procedureCode}
-                placeholder={procCat.procedures[0] ? `e.g. ${procCat.procedures[0].code} — ${procCat.procedures[0].desc}` : 'e.g. 99309'}
-                onChange={(e) => setF({ procedureCode: e.target.value })}
-              />
-              <datalist id="sch-cpt-list">
-                {procCat.procedures.map((p) => <option key={p.code} value={p.code}>{`${p.code} — ${p.desc}`}</option>)}
-              </datalist>
+              <div className="sch-pt">
+                <input
+                  className="input" value={modal.form.procedureCode} autoComplete="off"
+                  placeholder={procCat.procedures[0] ? `e.g. ${procCat.procedures[0].code} — ${procCat.procedures[0].desc}` : 'e.g. 99309'}
+                  onChange={(e) => { setF({ procedureCode: e.target.value }); setProcOpen(true); }}
+                  onFocus={() => setProcOpen(true)}
+                  onBlur={() => setTimeout(() => setProcOpen(false), 150)}
+                />
+                {procOpen && (() => {
+                  const pq = (modal.form.procedureCode || '').trim().toLowerCase();
+                  const matches = (pq
+                    ? procCat.procedures.filter((p) => p.code.toLowerCase().includes(pq) || p.desc.toLowerCase().includes(pq))
+                    : procCat.procedures
+                  ).slice(0, 12);
+                  if (!matches.length) return null;
+                  return (
+                    <div className="sch-pt-list">
+                      {matches.map((p) => (
+                        <button type="button" key={p.code} className="sch-pt-item sch-cpt-item" onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => { setF({ procedureCode: p.code }); setProcOpen(false); }}>
+                          <span className="sch-cpt-code">{p.code}</span>
+                          <span className="sch-cpt-desc">{p.desc}</span>
+                        </button>
+                      ))}
+                    </div>
+                  );
+                })()}
+              </div>
               <span className="hint">
                 {procCat.matched
                   ? `Showing ${procCat.label} procedures`

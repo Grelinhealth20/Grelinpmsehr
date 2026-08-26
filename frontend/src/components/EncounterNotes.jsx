@@ -129,6 +129,8 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   const [tab, setTab] = useState('note');
   const [content, setContent] = useState({ vitals: {}, sections: {}, prescriptions: [] });
   const [reason, setReason] = useState('');
+  const [pharmacy, setPharmacy] = useState(null);   // pharmacy/PBM vendor from benefits
+  const [rxCarry, setRxCarry] = useState(null);      // carry-forward source info
   const [busy, setBusy] = useState(false);
   const [autoState, setAutoState] = useState('idle'); // idle | saving | saved
   const [amending, setAmending] = useState(false); // MD editing a signed note
@@ -136,12 +138,18 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   const [amendReason, setAmendReason] = useState('');
   const skipSave = useRef(true); // skip the save that a fresh load/open would trigger
 
-  async function loadNotes() {
+  async function loadNotes({ autoOpen = false } = {}) {
     setLoading(true);
-    try { const { data } = await encountersApi.listNotes(encounter.encounterUuid); setNotes(data.notes || []); }
-    catch (e) { toast.error(toApiError(e).message); } finally { setLoading(false); }
+    try {
+      const { data } = await encountersApi.listNotes(encounter.encounterUuid);
+      const list = data.notes || [];
+      setNotes(list);
+      // On first open of the encounter, auto-open the LATEST note (newest first) so the
+      // provider sees it immediately instead of the empty "Click + New note" placeholder.
+      if (autoOpen && list.length && !active) await openNote(list[0].uuid);
+    } catch (e) { toast.error(toApiError(e).message); } finally { setLoading(false); }
   }
-  useEffect(() => { if (encounter?.encounterUuid) loadNotes(); /* eslint-disable-next-line */ }, [encounter?.encounterUuid]);
+  useEffect(() => { if (encounter?.encounterUuid) loadNotes({ autoOpen: true }); /* eslint-disable-next-line */ }, [encounter?.encounterUuid]);
 
   async function openNote(uuid) {
     try {
@@ -159,7 +167,12 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
         sectionOrder: (TEMPLATES[data.note.noteType] || []).map((s) => s.key),
       });
       setReason(data.note.reason || '');
+      setRxCarry(null);
       setTab('note');
+      // Load the pharmacy/PBM vendor from the patient's benefits (display only).
+      if (encounter.patientUuid) {
+        encountersApi.rxContext(encounter.patientUuid).then((rc) => setPharmacy(rc.data.pharmacy || null)).catch(() => setPharmacy(null));
+      }
     } catch (e) { toast.error(toApiError(e).message); }
   }
 
@@ -168,13 +181,27 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
     setBusy(true);
     try {
       const order = (TEMPLATES[noteType] || []).map((s) => s.key);
-      const { data } = await encountersApi.createNote(encounter.encounterUuid, { noteType, content: { vitals: {}, sections: {}, prescriptions: [], sectionOrder: order } });
+      // Carry forward the patient's current medication list + pull the pharmacy/PBM
+      // vendor from their benefits, so a new encounter starts with the active meds.
+      let carriedRx = []; let pharm = null; let carrySrc = null;
+      try {
+        if (encounter.patientUuid) {
+          const rc = await encountersApi.rxContext(encounter.patientUuid);
+          carriedRx = rc.data.prescriptions || [];
+          pharm = rc.data.pharmacy || null;
+          if (carriedRx.length) carrySrc = { date: rc.data.sourceDate };
+        }
+      } catch { /* best-effort — a new note simply starts empty */ }
+      const initContent = { vitals: {}, sections: {}, prescriptions: carriedRx, sectionOrder: order };
+      const { data } = await encountersApi.createNote(encounter.encounterUuid, { noteType, content: initContent });
       // Show the template immediately (single round-trip) — refresh the tab list
       // in the background so there's no perceived wait.
       skipSave.current = true;
       setAutoState('idle');
       setActive(data.note);
-      setContent({ vitals: {}, sections: {}, prescriptions: [], sectionOrder: order });
+      setContent(initContent);
+      setPharmacy(pharm);
+      setRxCarry(carrySrc);
       setReason('');
       setTab('note');
       loadNotes();
@@ -376,7 +403,9 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
         </div>
 
         <section className="nt-main">
-          {!active ? (
+          {loading && !active ? (
+            <div className="nt-placeholder"><span className="spinner dark" /></div>
+          ) : !active ? (
             <div className="nt-placeholder">
               <div className="nt-ph-icon" aria-hidden="true" />
               <div>Click <strong>+ New note</strong> to create a clinical note.</div>
@@ -449,55 +478,44 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
                   </article>
                 </div>
               ) : (
-                readOnly ? (
-                  <div className="nt-doc-scroll">
-                    <article className="nt-doc-page">
-                      <h4 className="nt-sec-h" style={{ marginBottom: 12 }}>Prescriptions</h4>
-                      {content.prescriptions.filter((r) => r.drug).length === 0 ? (
-                        <p className="nt-sec-blank">No prescriptions on this note.</p>
-                      ) : (
-                        <table className="nt-rx-table">
-                          <thead><tr><th>Medication</th><th>Dose</th><th>Route</th><th>Frequency</th><th>Qty</th><th>Refills</th></tr></thead>
-                          <tbody>
-                            {content.prescriptions.filter((r) => r.drug).map((r, i) => (
-                              <>
-                                <tr key={i}>
-                                  <td className="nt-rx-drug">{r.drug}</td><td>{r.dose || '—'}</td><td>{r.route || '—'}</td>
-                                  <td>{r.frequency || '—'}</td><td>{r.quantity || '—'}</td><td>{r.refills || '—'}</td>
-                                </tr>
-                                {r.sig && <tr className="nt-rx-sigrow" key={`s${i}`}><td colSpan={6}>Sig: {r.sig}</td></tr>}
-                              </>
-                            ))}
-                          </tbody>
-                        </table>
-                      )}
-                    </article>
-                  </div>
-                ) : (
-                  <div className="nt-rx">
-                    <div className="nt-rx-head">
-                      <span>Prescriptions</span>
-                      <button className="btn ghost sm" onClick={addRx}>+ Add medication</button>
+                <div className="nt-doc-scroll rx2-scroll">
+                  <div className="rx2">
+                    <PharmacyBanner pharmacy={pharmacy} />
+                    {rxCarry && !readOnly && (
+                      <div className="rx2-carry">
+                        <span className="rx2-carry-ic" aria-hidden="true">⟳</span>
+                        Medications carried forward{rxCarry.date ? ` from ${usDate(rxCarry.date)}` : ''} — review and update for this encounter.
+                      </div>
+                    )}
+                    <div className="rx2-head">
+                      <span className="rx2-head-t">Active Medications{content.prescriptions.filter((r) => r.drug).length ? ` · ${content.prescriptions.filter((r) => r.drug).length}` : ''}</span>
+                      <span className="spacer" />
+                      {!readOnly && <button className="btn ghost sm" onClick={addRx}>+ Add medication</button>}
                     </div>
-                    {content.prescriptions.length === 0 && <div className="nt-empty" style={{ padding: '14px 0' }}>No prescriptions. Add a medication to prescribe.</div>}
-                    {content.prescriptions.map((r, i) => (
-                      <div className="nt-rx-item" key={i}>
-                        <div className="nt-rx-grid">
-                          <Fld label="Medication" v={r.drug} on={(v) => setRxAt(i, 'drug', v)} d={readOnly} wide />
-                          <Fld label="Dose" v={r.dose} on={(v) => setRxAt(i, 'dose', v)} d={readOnly} />
-                          <Fld label="Route" v={r.route} on={(v) => setRxAt(i, 'route', v)} d={readOnly} />
-                          <Fld label="Frequency" v={r.frequency} on={(v) => setRxAt(i, 'frequency', v)} d={readOnly} />
-                          <Fld label="Quantity" v={r.quantity} on={(v) => setRxAt(i, 'quantity', v)} d={readOnly} />
-                          <Fld label="Refills" v={r.refills} on={(v) => setRxAt(i, 'refills', v)} d={readOnly} />
+                    {content.prescriptions.length === 0 ? (
+                      <div className="rx2-empty">No active medications{readOnly ? ' on this note.' : '. Add a medication to prescribe, or it carries forward from the last encounter.'}</div>
+                    ) : content.prescriptions.map((r, i) => (
+                      <div className="rx2-med" key={i}>
+                        <div className="rx2-med-top">
+                          <span className="rx2-med-n">{i + 1}</span>
+                          <input className="rx2-drug" placeholder="Medication name" value={r.drug || ''} disabled={readOnly} onChange={(e) => setRxAt(i, 'drug', e.target.value)} />
+                          {!readOnly && <button type="button" className="rx2-x" title="Remove medication" onClick={() => removeRx(i)}>✕</button>}
                         </div>
-                        <div className="nt-rx-sig">
-                          <Fld label="Sig / directions" v={r.sig} on={(v) => setRxAt(i, 'sig', v)} d={readOnly} wide />
-                          <button className="act danger" onClick={() => removeRx(i)}>Remove</button>
+                        <div className="rx2-grid">
+                          <RxF label="Dose" v={r.dose} on={(v) => setRxAt(i, 'dose', v)} d={readOnly} />
+                          <RxF label="Route" v={r.route} on={(v) => setRxAt(i, 'route', v)} d={readOnly} />
+                          <RxF label="Frequency" v={r.frequency} on={(v) => setRxAt(i, 'frequency', v)} d={readOnly} />
+                          <RxF label="Quantity" v={r.quantity} on={(v) => setRxAt(i, 'quantity', v)} d={readOnly} />
+                          <RxF label="Refills" v={r.refills} on={(v) => setRxAt(i, 'refills', v)} d={readOnly} />
+                        </div>
+                        <div className="rx2-sigrow">
+                          <label>Sig / Directions</label>
+                          <input className="input rx2-sig" placeholder="e.g. Take one tablet by mouth daily" value={r.sig || ''} disabled={readOnly} onChange={(e) => setRxAt(i, 'sig', e.target.value)} />
                         </div>
                       </div>
                     ))}
                   </div>
-                )
+                </div>
               )}
 
               {!canSign && !signed && <div className="nt-md-note">Sign-off is restricted to providers with an <strong>MD</strong> credential. You can draft and save this note.</div>}
@@ -607,6 +625,39 @@ function Fld({ label, v, on, d, wide }) {
     <div className={`field ${wide ? 'nt-fld-wide' : ''}`}>
       <label>{label}</label>
       <input className="input" value={v} disabled={d} onChange={(e) => on(e.target.value)} />
+    </div>
+  );
+}
+
+/** Compact medication field (dose/route/frequency/…). */
+function RxF({ label, v, on, d }) {
+  return (
+    <div className="rx2-f">
+      <label>{label}</label>
+      <input className="input" value={v || ''} disabled={d} onChange={(e) => on(e.target.value)} />
+    </div>
+  );
+}
+
+/** Pharmacy / PBM vendor pulled from the patient's benefits (real data only). */
+function PharmacyBanner({ pharmacy: p }) {
+  const cost = p ? [p.copay && `Copay ${p.copay}`, p.coinsurance && `Coinsurance ${p.coinsurance}`].filter(Boolean).join('  ·  ') : '';
+  return (
+    <div className={`rx2-pharm ${p ? '' : 'is-empty'}`}>
+      <span className="rx2-pharm-ic" aria-hidden="true">℞</span>
+      <div className="rx2-pharm-main">
+        <span className="rx2-pharm-lbl">Pharmacy Benefit{p?.network ? `  ·  ${p.network}` : ''}</span>
+        {p ? (
+          <>
+            <span className="rx2-pharm-v">{p.vendor || p.planName || 'Covered'}</span>
+            {(cost || (p.messages && p.messages.length)) && (
+              <span className="rx2-pharm-sub">{[cost, (p.messages || [])[0]].filter(Boolean).join('  ·  ')}</span>
+            )}
+          </>
+        ) : (
+          <span className="rx2-pharm-sub">No pharmacy benefit returned by the payer. Run eligibility on the Benefits tab to populate the pharmacy vendor.</span>
+        )}
+      </div>
     </div>
   );
 }

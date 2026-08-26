@@ -191,85 +191,100 @@ const T = (keys, over = {}) => keys.map((key) => ({
  * (CMS SNF E/M documentation). Comprehensive initial vs. focused subsequent vs.
  * procedure/discussion-specific — no filler sections.
  */
+/**
+ * Lean, necessary-and-sufficient templates. Each carries ONLY the sections required
+ * for that note's CMS E/M level + medical necessity + its clinical purpose — the
+ * comprehensive history/exam for an initial H&P, focused interval + exam for
+ * subsequent visits, and the note-type-specific essentials (wound, procedure,
+ * psych, cognitive, discharge). Optional/foldable sections (family/surgical history,
+ * social history, redundant orders/notifications) were removed to keep providers
+ * focused without losing compliance.
+ */
 export const TEMPLATES = {
-  // Comprehensive initial evaluation (99304–99306).
+  // Comprehensive initial evaluation (99304–99306) — comprehensive Hx + exam + MDM.
   hp_admission: T(
-    ['chiefComplaint', 'hpi', 'pmh', 'psh', 'familyHistory', 'socialHistory', 'medications', 'allergies', 'ros', 'vitals', 'exam', 'results', 'functionalStatus', 'prognosis', 'assessment', 'mdm', 'plan', 'codeStatus', 'advanceDirective', 'careCoordination', 'timeSpent'],
-    { chiefComplaintLabel: 'Reason for Admission', resultsLabel: 'Diagnostic Data on Admission', medicationsLabel: 'Admission Medication Reconciliation', functionalStatusLabel: 'Functional / Rehabilitation Status', prognosisLabel: 'Rehabilitation Potential & Prognosis', prognosisPrompt: 'Rehabilitation potential, estimated length of stay, expected level of care, and overall prognosis…' },
+    // Vitals lead as a quick-reference header (standard EHR layout), then the H&P
+    // narrative: CC → HPI → PMH → Meds → Allergies → ROS (last subjective, before the
+    // exam) → Exam → Data → Functional status → A → MDM → Plan → Code status →
+    // Advance directive → Attestation.
+    ['vitals', 'chiefComplaint', 'hpi', 'pmh', 'medications', 'allergies', 'ros', 'exam', 'results', 'functionalStatus', 'assessment', 'mdm', 'plan', 'codeStatus', 'advanceDirective', 'timeSpent'],
+    { chiefComplaintLabel: 'Reason for Admission', resultsLabel: 'Diagnostic Data on Admission', medicationsLabel: 'Admission Medication Reconciliation', functionalStatusLabel: 'Functional / Rehabilitation Status' },
   ),
-  // Routine subsequent visit (99307–99310) — interval-focused, no re-documented history.
+  // Routine subsequent visit (99307–99310) — focused interval, exam, A/MDM/P.
   progress: T(
-    ['chiefComplaint', 'interval', 'ros', 'vitals', 'exam', 'results', 'assessment', 'mdm', 'plan', 'timeSpent'],
-    { chiefComplaintLabel: 'Reason for Visit', rosLabel: 'Focused Review of Systems', examLabel: 'Focused Physical Examination' },
+    ['vitals', 'chiefComplaint', 'interval', 'exam', 'assessment', 'mdm', 'plan', 'timeSpent'],
+    { chiefComplaintLabel: 'Reason for Visit', examLabel: 'Focused Physical Examination' },
   ),
-  // New acute problem — HPI-driven, with notification when indicated.
+  // New acute problem — HPI-driven, with SBAR notification.
   acute_visit: T(
-    ['chiefComplaint', 'hpi', 'ros', 'vitals', 'exam', 'results', 'assessment', 'mdm', 'orders', 'notifications', 'timeSpent'],
-    { chiefComplaintLabel: 'Presenting Problem', rosLabel: 'Focused Review of Systems', examLabel: 'Focused Physical Examination' },
+    ['vitals', 'chiefComplaint', 'hpi', 'exam', 'assessment', 'mdm', 'plan', 'notifications', 'timeSpent'],
+    { chiefComplaintLabel: 'Presenting Problem', examLabel: 'Focused Physical Examination' },
   ),
-  // CMS change-in-condition — change description, orders, and SBAR notification.
+  // CMS change-in-condition — change description, exam, and REQUIRED SBAR notification.
   change_in_condition: T(
-    ['changeDescription', 'hpi', 'vitals', 'exam', 'results', 'assessment', 'mdm', 'orders', 'notifications', 'timeSpent'],
+    ['vitals', 'changeDescription', 'hpi', 'exam', 'assessment', 'mdm', 'plan', 'notifications', 'timeSpent'],
     { examLabel: 'Focused Physical Examination' },
   ),
   // Focused follow-up on a prior problem, result, or intervention.
   follow_up: T(
-    ['chiefComplaint', 'interval', 'vitals', 'exam', 'results', 'assessment', 'mdm', 'plan', 'timeSpent'],
-    { chiefComplaintLabel: 'Reason for Follow-Up', intervalLabel: 'Interval Since Last Evaluation', examLabel: 'Focused Physical Examination', resultsLabel: 'Results / Findings Followed Up' },
+    ['vitals', 'chiefComplaint', 'interval', 'exam', 'assessment', 'mdm', 'plan', 'timeSpent'],
+    { chiefComplaintLabel: 'Reason for Follow-Up', intervalLabel: 'Interval Since Last Evaluation', examLabel: 'Focused Physical Examination' },
   ),
   // Required periodic physician visit — care-plan review + regulatory attestation.
   regulatory: T(
-    ['chiefComplaint', 'interval', 'ros', 'vitals', 'exam', 'results', 'carePlanReview', 'assessment', 'plan', 'regulatoryAttestation', 'timeSpent'],
+    ['vitals', 'chiefComplaint', 'interval', 'exam', 'carePlanReview', 'assessment', 'plan', 'regulatoryAttestation', 'timeSpent'],
     { chiefComplaintLabel: 'Purpose of Periodic Visit' },
   ),
   // Return from hospital/ED — hospital course + medication reconciliation.
   post_hospital: T(
-    ['chiefComplaint', 'hospitalCourse', 'dischargeDiagnoses', 'medications', 'allergies', 'vitals', 'exam', 'results', 'assessment', 'mdm', 'plan', 'codeStatus', 'careCoordination', 'timeSpent'],
+    ['vitals', 'chiefComplaint', 'hospitalCourse', 'dischargeDiagnoses', 'medications', 'allergies', 'exam', 'assessment', 'mdm', 'plan', 'timeSpent'],
     { chiefComplaintLabel: 'Reason for Readmission', dischargeDiagnosesLabel: 'Hospital Discharge Diagnoses', medicationsLabel: 'Medication Reconciliation (Post-Hospital)' },
   ),
-  // Medication management — no exam; medication-focused with monitoring.
+  // Medication management — no exam; medication-focused.
   medication: T(
-    ['chiefComplaint', 'medications', 'medChanges', 'allergies', 'adverseEffects', 'results', 'assessment', 'plan', 'timeSpent'],
-    { chiefComplaintLabel: 'Reason for Medication Review', resultsLabel: 'Monitoring Labs / Levels' },
+    ['chiefComplaint', 'medications', 'medChanges', 'allergies', 'assessment', 'plan', 'timeSpent'],
+    { chiefComplaintLabel: 'Reason for Medication Review' },
   ),
   // Clinically significant test-result review — result-focused, no exam.
   lab_imaging: T(
-    ['chiefComplaint', 'results', 'assessment', 'mdm', 'plan', 'orders', 'notifications', 'timeSpent'],
+    ['chiefComplaint', 'results', 'assessment', 'mdm', 'plan', 'timeSpent'],
     { chiefComplaintLabel: 'Reason for Review', resultsLabel: 'Results Reviewed & Interpretation' },
   ),
-  // Wound care — detailed wound assessment + treatment.
+  // Wound care — wound assessment + treatment (the wound IS the focused exam).
   wound_care: T(
-    ['chiefComplaint', 'interval', 'wound', 'vitals', 'exam', 'treatment', 'assessment', 'plan', 'timeSpent'],
-    { chiefComplaintLabel: 'Reason for Wound Care', intervalLabel: 'Wound Progress Since Last Visit', examLabel: 'Relevant Physical Examination' },
+    // Vitals header → reason → interval progress → wound assessment (the focused
+    // exam) → treatment → A → plan → time.
+    ['vitals', 'chiefComplaint', 'interval', 'wound', 'treatment', 'assessment', 'plan', 'timeSpent'],
+    { chiefComplaintLabel: 'Reason for Wound Care', intervalLabel: 'Wound Progress Since Last Visit' },
   ),
-  // Advance care planning (99497–99498) — discussion + time-based.
+  // Advance care planning (99497–99498) — discussion + directives + time.
   advance_care: T(
-    ['chiefComplaint', 'prognosis', 'goals', 'participants', 'decisionsMade', 'codeStatus', 'advanceDirective', 'timeSpent'],
+    ['chiefComplaint', 'goals', 'decisionsMade', 'codeStatus', 'advanceDirective', 'timeSpent'],
     { chiefComplaintLabel: 'Reason for Advance Care Planning Discussion', timeSpentLabel: 'Total Time Spent (required for 99497/99498)' },
   ),
   // Discharge summary (99315–99316) — summary of stay + transition of care.
   discharge: T(
-    ['dischargeDiagnoses', 'hospitalCourse', 'procedures', 'functionalStatus', 'dischargeMeds', 'disposition', 'followUp', 'careCoordination', 'dischargeInstructions', 'timeSpent'],
-    { hospitalCourseLabel: 'Summary of SNF Stay', functionalStatusLabel: 'Functional Status at Discharge', careCoordinationLabel: 'Transition of Care / Handoff' },
+    ['dischargeDiagnoses', 'hospitalCourse', 'functionalStatus', 'dischargeMeds', 'disposition', 'followUp', 'dischargeInstructions', 'timeSpent'],
+    { hospitalCourseLabel: 'Summary of SNF Stay', functionalStatusLabel: 'Functional Status at Discharge' },
   ),
-  // Bedside procedure (Part B) — procedure-note documentation, not E/M.
+  // Bedside procedure (Part B) — operative-note essentials.
   procedure_note: T(
-    ['procedureName', 'indication', 'consent', 'procTechnique', 'procFindings', 'specimen', 'ebl', 'complications', 'postProcedure', 'timeSpent'],
+    ['procedureName', 'indication', 'consent', 'procTechnique', 'procFindings', 'complications', 'postProcedure', 'timeSpent'],
     { timeSpentLabel: 'Total Procedure Time & Attestation' },
   ),
-  // Behavioral health / psychiatric visit (Part B) — psych-specific documentation.
+  // Behavioral health / psychiatric visit (Part B) — MSE + risk are the core.
   behavioral_health: T(
-    ['chiefComplaint', 'psychHistory', 'interval', 'medications', 'mentalStatus', 'riskAssessment', 'assessment', 'mdm', 'plan', 'timeSpent'],
+    ['chiefComplaint', 'interval', 'medications', 'mentalStatus', 'riskAssessment', 'assessment', 'mdm', 'plan', 'timeSpent'],
     { chiefComplaintLabel: 'Reason for Psychiatric Visit', intervalLabel: 'Interval / Symptom Status', medicationsLabel: 'Current Psychotropic Medications', assessmentLabel: 'Psychiatric Assessment (DSM-5 / ICD-10)' },
   ),
-  // Cognitive assessment & care planning (99483) — CMS-required elements.
+  // Cognitive assessment & care planning (99483) — CMS mandates these elements.
   cognitive_care: T(
     ['chiefComplaint', 'cognitiveAssessment', 'functionalStatus', 'medications', 'neuroPsych', 'safetyEval', 'caregiver', 'advanceDirective', 'dementiaPlan', 'timeSpent'],
     { chiefComplaintLabel: 'Reason for Cognitive Assessment', functionalStatusLabel: 'Functional Assessment (ADL / IADL)', medicationsLabel: 'Medication Reconciliation (High-Risk Medications)', timeSpentLabel: 'Total Time (99483 is time-based) & Attestation' },
   ),
   // Death / expiration documentation.
   death: T(
-    ['pronouncement', 'circumstances', 'exam', 'causeOfDeath', 'notifications', 'timeSpent'],
+    ['pronouncement', 'circumstances', 'exam', 'causeOfDeath', 'notifications'],
     { examLabel: 'Examination Findings at Time of Death', notificationsLabel: 'Notifications (Family / Attending / Medical Examiner)' },
   ),
 };

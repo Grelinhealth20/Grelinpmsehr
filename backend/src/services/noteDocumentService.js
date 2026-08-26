@@ -98,19 +98,31 @@ export const SECTION_LABELS = {
   caregiver: 'Caregiver Assessment & Support',
   dementiaPlan: 'Care Plan (Cognitive / Dementia)',
 };
+// Canonical clinical documentation order (Bates'/standard H&P). ROS is the LAST
+// subjective element, right before the objective exam; functional status sits with
+// the objective data. Used only as a fallback for legacy notes without a stored
+// section order — new notes render in their own template order.
 const SECTION_ORDER = [
-  'chiefComplaint', 'changeDescription', 'hpi', 'interval', 'hospitalCourse', 'ros',
+  // Subjective
+  'chiefComplaint', 'changeDescription', 'hpi', 'interval', 'hospitalCourse',
   'pmh', 'psh', 'familyHistory', 'socialHistory', 'psychHistory',
-  'medications', 'medChanges', 'allergies', 'adverseEffects', 'vitals', 'exam',
-  'mentalStatus', 'cognitiveAssessment', 'neuroPsych', 'wound', 'treatment', 'results',
+  'medications', 'medChanges', 'allergies', 'adverseEffects', 'ros',
+  // Objective
+  'vitals', 'exam', 'mentalStatus', 'cognitiveAssessment', 'neuroPsych',
+  'wound', 'treatment', 'results', 'functionalStatus',
   // Procedure body (kept together, in operative-note order)
   'procedureName', 'indication', 'consent', 'procTechnique', 'procFindings', 'specimen', 'ebl', 'complications', 'postProcedure',
-  'carePlanReview', 'riskAssessment', 'safetyEval', 'caregiver', 'assessment', 'mdm', 'plan', 'dementiaPlan',
-  'orders', 'notifications', 'prognosis',
-  'goals', 'participants', 'decisionsMade', 'codeStatus', 'advanceDirective',
-  'dischargeDiagnoses', 'procedures', 'functionalStatus', 'dischargeMeds', 'disposition',
-  'followUp', 'dischargeInstructions', 'careCoordination', 'pronouncement', 'circumstances',
-  'causeOfDeath', 'regulatoryAttestation', 'timeSpent', 'addendum',
+  // Assessment
+  'prognosis', 'carePlanReview', 'riskAssessment', 'safetyEval', 'caregiver', 'assessment', 'mdm',
+  // Plan
+  'plan', 'dementiaPlan', 'orders', 'notifications',
+  'goals', 'participants', 'decisionsMade', 'codeStatus', 'advanceDirective', 'careCoordination',
+  // Discharge block
+  'dischargeDiagnoses', 'procedures', 'dischargeMeds', 'disposition', 'followUp', 'dischargeInstructions',
+  // Death
+  'pronouncement', 'circumstances', 'causeOfDeath',
+  // Attestation
+  'regulatoryAttestation', 'timeSpent', 'addendum',
 ];
 
 // Note-type-specific section headings (mirror the UI templates so the Word

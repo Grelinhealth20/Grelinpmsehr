@@ -103,6 +103,13 @@ export async function runMigrations() {
   // patient_id are already indexed by their foreign keys.)
   await ensureIndex('encounter_notes', 'idx_note_created', '`created_at`');
   await ensureIndex('encounter_notes', 'idx_note_provider_created', '`provider_id`, `created_at`');
+  // Clinical Records ordering: drafts (Yet to Sign) first, then newest — kept fast at
+  // 10k+ records with a composite index matching ORDER BY status, created_at.
+  await ensureIndex('encounter_notes', 'idx_note_provider_status_created', '`provider_id`, `status`, `created_at`');
+  await ensureIndex('encounter_notes', 'idx_note_status_created', '`status`, `created_at`');
+  // Patient encounters sub-table (newest DOS first) — kept fast per patient at scale.
+  await ensureIndex('encounters', 'idx_enc_patient_date', '`patient_id`, `encounter_date`');
+  await ensureIndex('encounters', 'idx_enc_provider', '`provider_id`');
   // Per-patient visit numbers must be unique. NULLs are allowed to repeat, so an
   // appointment encounter awaiting its number never collides. Backed by app-level
   // retry so concurrent inserts resolve to distinct numbers instead of duplicates.

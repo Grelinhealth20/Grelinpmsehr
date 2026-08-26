@@ -205,6 +205,9 @@ export const encountersApi = {
   listPatients: (params) => api.get('/encounters/patients', { params }),
   clinicalRecords: (params) => api.get('/encounters/clinical-records', { params }),
   patientEncounters: (patientUuid, params) => api.get(`/encounters/patient/${patientUuid}/encounters`, { params }),
+  // Carried-forward medication list + pharmacy/PBM vendor (from the patient's latest
+  // eligibility) for a new note. Strictly patient-scoped server-side.
+  rxContext: (patientUuid) => api.get(`/encounters/patient/${patientUuid}/rx-context`),
   create: (payload) => api.post('/encounters', payload),
   updateStatus: (appointmentUuid, payload) => api.patch(`/encounters/${appointmentUuid}`, payload),
   // Clinical notes

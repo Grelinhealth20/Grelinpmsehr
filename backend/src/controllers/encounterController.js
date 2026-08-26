@@ -1,7 +1,8 @@
 import {
   listEncounters, updateEncounterStatus, createStandaloneEncounter,
-  listProviderPatients, listPatientEncounters, listClinicalRecords,
+  listProviderPatients, listPatientEncounters, listClinicalRecords, latestPrescriptions,
 } from '../services/encounterService.js';
+import { listChecks } from '../services/eligibilityService.js';
 import {
   listNotes as listNotesSvc, createNote as createNoteSvc, getNote as getNoteSvc,
   updateNote as updateNoteSvc, signNote as signNoteSvc, amendSignedNote as amendNoteSvc,
@@ -54,6 +55,25 @@ export async function patientEncounters(req, res, next) {
     const result = await listPatientEncounters(req.authUserId, req.params.patientUuid, { page, pageSize });
     if (!result) return res.status(404).json({ error: 'Patient not found.', code: 'NOT_FOUND' });
     res.json(result);
+  } catch (err) { next(err); }
+}
+
+/**
+ * Prescription context for a NEW note: the patient's carried-forward medication list
+ * (most recent note, scoped) + pharmacy/PBM vendor from their latest eligibility.
+ * Strictly patient-scoped — 404 if the patient isn't accessible to the caller.
+ */
+export async function rxContext(req, res, next) {
+  try {
+    const out = await latestPrescriptions(req.authUserId, req.params.patientUuid);
+    if (!out) return res.status(404).json({ error: 'Patient not found.', code: 'NOT_FOUND' });
+    // Pharmacy vendor from the patient's most recent eligibility check (real data only).
+    let pharmacy = null;
+    try {
+      const checks = await listChecks(out.patientId);
+      for (const c of (checks || [])) { if (c.summary?.pharmacy) { pharmacy = c.summary.pharmacy; break; } }
+    } catch { /* pharmacy is best-effort — never blocks the med list */ }
+    res.json({ prescriptions: out.prescriptions, sourceDate: out.sourceDate, pharmacy });
   } catch (err) { next(err); }
 }
 

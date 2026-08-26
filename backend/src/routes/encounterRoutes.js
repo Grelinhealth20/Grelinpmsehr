@@ -18,6 +18,7 @@ router.post('/', csrfProtection, validate(createEncounterSchema), ctrl.createEnc
 router.get('/patients', ctrl.listPatients);
 router.get('/clinical-records', ctrl.clinicalRecords);
 router.get('/patient/:patientUuid/encounters', ctrl.patientEncounters);
+router.get('/patient/:patientUuid/rx-context', ctrl.rxContext);
 
 // Clinical notes. Literal `/notes/...` segments are declared before the
 // `/:appointmentUuid` param route so they never collide. (UUIDs are bound query
