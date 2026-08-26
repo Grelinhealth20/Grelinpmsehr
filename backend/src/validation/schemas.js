@@ -42,6 +42,11 @@ export const changePasswordSchema = z
 const specialtyUuid = z.string().uuid().nullable().optional();
 // Provider credential tags (e.g. MD, DO, NP, APRN, ASNP, PA-C). Free-form but capped.
 const credentials = z.array(z.string().trim().min(1).max(20)).max(12).optional();
+// Individual-provider NPPES identity (NPI-1). NPI is 10 digits or empty; taxonomy is
+// the primary specialty description + code fetched from the NPPES registry.
+const providerNpi = z.union([z.string().regex(/^\d{10}$/, 'NPI must be 10 digits.'), z.literal('')]).nullable().optional();
+const taxonomyDesc = z.union([z.string().trim().max(160), z.literal('')]).nullable().optional();
+const taxonomyCode = z.union([z.string().trim().max(16), z.literal('')]).nullable().optional();
 
 export const createUserSchema = z
   .object({
@@ -51,6 +56,9 @@ export const createUserSchema = z
     accessLevel,
     credentials,
     specialtyUuid,
+    npi: providerNpi,
+    taxonomy: taxonomyDesc,
+    taxonomyCode,
     temporaryPassword: z.string().min(12).max(200),
   })
   .strict();
@@ -62,6 +70,9 @@ export const updateUserSchema = z
     accessLevel,
     credentials,
     specialtyUuid,
+    npi: providerNpi,
+    taxonomy: taxonomyDesc,
+    taxonomyCode,
   })
   .strict()
   .refine((v) => Object.keys(v).length > 0, { message: 'No fields to update.' });
@@ -305,7 +316,7 @@ const facilityBase = {
   name: z.string().trim().min(1, 'Facility name is required.').max(200),
   address: optStr(200), city: optStr(120),
   state: z.union([z.string().trim().length(2), z.literal('')]).optional(),
-  zip: optStr(10), phone: optStr(24), taxonomy: optStr(160),
+  zip: optStr(10), phone: optStr(24), taxonomy: optStr(160), taxId: optStr(32),
   // Facility logo as a data URI (base64 image) or empty to clear. ~700 KB cap.
   logo: z.union([
     z.string().regex(/^data:image\/(png|jpe?g|gif|webp|svg\+xml);base64,/, 'Logo must be a PNG, JPG, GIF, WEBP, or SVG image.').max(700000),

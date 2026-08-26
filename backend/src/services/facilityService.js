@@ -2,7 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { execute } from '../db/pool.js';
 import { decrypt } from '../utils/crypto.js';
 import { normalizeState, extractStateFromText } from './payerDirectoryService.js';
-import { s3Enabled, uploadFacilityLogo, signedGetUrl, deleteObject } from './s3Service.js';
+import { s3Enabled, uploadFacilityLogo, getObjectBytes, deleteObject } from './s3Service.js';
 
 // Decode a data:image/...;base64 URI → { buffer, contentType, ext } (null if not one).
 const EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg' };
@@ -13,10 +13,23 @@ function parseLogoDataUri(uri) {
   return { buffer: Buffer.from(m[2], 'base64'), contentType, ext: EXT[contentType] || 'png' };
 }
 
-/** Replace facility.logo (an S3 key) with a short-lived signed URL for display. */
-async function signLogo(facility) {
-  if (facility && facility.logo && s3Enabled()) {
-    try { facility.logo = await signedGetUrl(facility.logo, 900); } catch { facility.logo = null; }
+// Content type from a stored logo S3 key's extension.
+const LOGO_CT = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml' };
+function logoContentType(key) { return LOGO_CT[String(key || '').split('.').pop().toLowerCase()] || 'image/png'; }
+
+/**
+ * Replace facility.logo (an S3 object key) with an INLINE data URI so the browser
+ * can render it directly. This avoids exposing the S3 host (the app CSP allows
+ * `data:` but not the bucket origin) and has no signed-URL expiry. Best-effort:
+ * any failure leaves the logo null. `rawKey` is the stored S3 key from the row.
+ */
+async function inlineLogo(facility, rawKey) {
+  facility.logo = null;
+  if (rawKey && s3Enabled()) {
+    try {
+      const bytes = await getObjectBytes(rawKey);
+      if (bytes && bytes.length) facility.logo = `data:${logoContentType(rawKey)};base64,${Buffer.from(bytes).toString('base64')}`;
+    } catch { facility.logo = null; }
   }
   return facility;
 }
@@ -31,15 +44,18 @@ async function signLogo(facility) {
  */
 
 const FAC_COLS = `f.uuid, f.npi, f.name, f.address, f.city, f.state, f.zip, f.phone,
-  f.taxonomy, f.logo, f.status, f.source,
+  f.taxonomy, f.tax_id, f.logo, f.status, f.source,
   DATE_FORMAT(f.created_at, '%Y-%m-%dT%H:%i:%sZ') AS created_at`;
 
+// Map a row to the public DTO. `logo` is intentionally NOT the raw S3 key — callers
+// that display it set it to an inline data URI (inlineLogo) or a hasLogo flag.
 function toFacility(r) {
   return {
     uuid: r.uuid, npi: r.npi || null, name: r.name,
     address: r.address || null, city: r.city || null, state: r.state || null,
     zip: r.zip || null, phone: r.phone || null, taxonomy: r.taxonomy || null,
-    logo: r.logo || null,
+    taxId: r.tax_id || null,
+    logo: null, hasLogo: !!r.logo,
     status: r.status, source: r.source,
     providerCount: r.provider_count != null ? Number(r.provider_count) : undefined,
     createdAt: r.created_at,
@@ -58,7 +74,9 @@ export async function listFacilities({ q = '', status = null } = {}) {
       FROM facilities f ${clause} ORDER BY f.name ASC`,
     params,
   );
-  return Promise.all(rows.map((r) => signLogo(toFacility(r))));
+  // The list does not render logos — return the lightweight DTO (hasLogo flag only)
+  // so a large facility list never triggers one S3 fetch per row.
+  return rows.map(toFacility);
 }
 
 async function facilityRowByUuid(uuid) {
@@ -84,7 +102,8 @@ export async function getFacility(uuid) {
     credentials: (() => { try { return Array.isArray(p.credentials) ? p.credentials : JSON.parse(p.credentials || '[]'); } catch { return []; } })(),
     assignedAt: p.assigned_at,
   }));
-  return { ...(await signLogo(toFacility(row))), providers };
+  // Single-facility view (the admin modal) renders the logo — inline it as a data URI.
+  return { ...(await inlineLogo(toFacility(row), row.logo)), providers };
 }
 
 /** Insert a verified facility. Dedupe by NPI (returns existing if already saved). */
@@ -102,12 +121,12 @@ export async function createFacility(data, { adminId } = {}) {
     try { logoKey = await uploadFacilityLogo({ facilityUuid: uuid, facilityName: data.name }, parsed.buffer, parsed.contentType, parsed.ext); } catch { logoKey = null; }
   }
   await execute(
-    `INSERT INTO facilities (uuid, npi, name, address, city, state, zip, phone, taxonomy, logo, status, source, verified_by, created_by)
-     VALUES (:uuid, :npi, :name, :address, :city, :state, :zip, :phone, :taxonomy, :logo, 'active', :source, :adminId, :adminId)`,
+    `INSERT INTO facilities (uuid, npi, name, address, city, state, zip, phone, taxonomy, tax_id, logo, status, source, verified_by, created_by)
+     VALUES (:uuid, :npi, :name, :address, :city, :state, :zip, :phone, :taxonomy, :taxId, :logo, 'active', :source, :adminId, :adminId)`,
     {
       uuid, npi: data.npi || null, name: data.name, address: data.address || null,
       city: data.city || null, state: data.state || null, zip: data.zip || null,
-      phone: data.phone || null, taxonomy: data.taxonomy || null, logo: logoKey,
+      phone: data.phone || null, taxonomy: data.taxonomy || null, taxId: data.taxId || null, logo: logoKey,
       source: data.source || 'nppes', adminId: adminId || null,
     },
   );
@@ -122,6 +141,8 @@ export async function updateFacility(uuid, data) {
   for (const k of ['npi', 'name', 'address', 'city', 'state', 'zip', 'phone', 'taxonomy']) {
     if (data[k] !== undefined) { sets.push(`${k} = :${k}`); params[k] = data[k] || null; }
   }
+  // Tax ID (EIN): the DTO key `taxId` maps to the `tax_id` column.
+  if (data.taxId !== undefined) { sets.push('tax_id = :taxId'); params.taxId = data.taxId || null; }
   // Logo: a new data URI uploads to the facility's S3 folder (replacing the old
   // object); an empty string clears it. `row.logo` holds the current S3 key.
   if (data.logo !== undefined) {

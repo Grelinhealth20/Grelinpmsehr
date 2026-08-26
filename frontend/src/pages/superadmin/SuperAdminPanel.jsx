@@ -255,7 +255,7 @@ export default function SuperAdminPanel() {
                             <div className="avatar">{initials(u.fullName)}</div>
                             <div className="stack">
                               <span className="user-name">{u.fullName}{isSelf && <span className="you">You</span>}{u.credentials?.map((c) => <span key={c} className="cred-pill">{c}</span>)}{u.specialty && <span className="spec-pill">{u.specialty.name}</span>}</span>
-                              <span className="user-email">{u.email}</span>
+                              <span className="user-email">{u.email}{u.npi && <span className="mono" style={{ marginLeft: 8, color: 'var(--c-ink-3, var(--c-ink-2))' }}>· NPI {u.npi}</span>}{u.taxonomy && <span style={{ marginLeft: 6, color: 'var(--c-ink-2)' }}>· {u.taxonomy}</span>}</span>
                             </div>
                           </div>
                         </td>

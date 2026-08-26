@@ -19,6 +19,10 @@ const router = Router();
 // Every route here requires an authenticated admin whose password is settled.
 router.use(authenticate, requirePasswordSettled, authorize(ROLES.SUPER_ADMIN));
 
+// Live NPPES lookup for an individual provider (by NPI or name) — declared before
+// the :uuid routes so "/nppes" is not captured as a user id.
+router.get('/nppes', userController.nppesProviderSearch);
+
 router.get('/', userController.list);
 router.post('/', csrfProtection, validate(createUserSchema), userController.create);
 

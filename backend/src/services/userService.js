@@ -15,6 +15,9 @@ export function toPublicUser(row) {
     accessLevel: row.access_level ? safeJson(row.access_level) : null,
     credentials: row.credentials ? (safeJson(row.credentials) || []) : [],
     specialty: row.specialty_uuid ? { uuid: row.specialty_uuid, name: row.specialty_name } : null,
+    npi: row.npi || null,
+    taxonomy: row.taxonomy || null,
+    taxonomyCode: row.taxonomy_code || null,
     mustResetPassword: !!row.must_reset_password,
     lastLoginAt: row.last_login_at,
     createdAt: row.created_at,
@@ -33,7 +36,8 @@ function safeJson(v) {
 }
 
 const USER_SELECT = `SELECT u.id, u.uuid, u.email_enc, u.email_bidx, u.full_name_enc, u.role, u.status,
-  u.access_level, u.credentials, u.password_hash, u.must_reset_password, u.failed_login_attempts, u.locked_until,
+  u.access_level, u.credentials, u.npi, u.taxonomy, u.taxonomy_code, u.password_hash, u.must_reset_password,
+  u.failed_login_attempts, u.locked_until,
   u.last_login_at, u.password_changed_at, u.created_at, u.updated_at, u.specialty_id,
   s.uuid AS specialty_uuid, s.name AS specialty_name
   FROM users u LEFT JOIN specialties s ON s.id = u.specialty_id`;
@@ -90,6 +94,9 @@ export async function createUser({
   accessLevel = null,
   credentials = null,
   specialtyId = null,
+  npi = null,
+  taxonomy = null,
+  taxonomyCode = null,
   passwordHash,
   mustResetPassword = true,
   createdBy = null,
@@ -99,10 +106,10 @@ export async function createUser({
   await execute(
     `INSERT INTO users
        (uuid, email_enc, email_bidx, full_name_enc, role, status, access_level, credentials, specialty_id,
-        password_hash, must_reset_password, created_by, password_changed_at)
+        npi, taxonomy, taxonomy_code, password_hash, must_reset_password, created_by, password_changed_at)
      VALUES
        (:uuid, :emailEnc, :emailBidx, :nameEnc, :role, :status, :accessLevel, :credentials, :specialtyId,
-        :passwordHash, :mrp, :createdBy, NOW())`,
+        :npi, :taxonomy, :taxonomyCode, :passwordHash, :mrp, :createdBy, NOW())`,
     {
       uuid,
       emailEnc: encrypt(email),
@@ -113,6 +120,9 @@ export async function createUser({
       accessLevel: accessLevel ? JSON.stringify(accessLevel) : null,
       credentials: credentials && credentials.length ? JSON.stringify(credentials) : null,
       specialtyId: specialtyId ?? null,
+      npi: npi || null,
+      taxonomy: taxonomy || null,
+      taxonomyCode: taxonomyCode || null,
       passwordHash,
       mrp: mustResetPassword ? 1 : 0,
       createdBy,
@@ -137,7 +147,7 @@ export async function listUsers({ role = null, status = null } = {}) {
   return rows.map(toPublicUser);
 }
 
-export async function updateUserProfile(uuid, { fullName, role, accessLevel, credentials, specialtyId }) {
+export async function updateUserProfile(uuid, { fullName, role, accessLevel, credentials, specialtyId, npi, taxonomy, taxonomyCode }) {
   const sets = [];
   const params = { uuid };
   if (fullName !== undefined) {
@@ -159,6 +169,18 @@ export async function updateUserProfile(uuid, { fullName, role, accessLevel, cre
   if (specialtyId !== undefined) {
     sets.push('specialty_id = :specialtyId');
     params.specialtyId = specialtyId ?? null;
+  }
+  if (npi !== undefined) {
+    sets.push('npi = :npi');
+    params.npi = npi || null;
+  }
+  if (taxonomy !== undefined) {
+    sets.push('taxonomy = :taxonomy');
+    params.taxonomy = taxonomy || null;
+  }
+  if (taxonomyCode !== undefined) {
+    sets.push('taxonomy_code = :taxonomyCode');
+    params.taxonomyCode = taxonomyCode || null;
   }
   if (!sets.length) return findRawByUuid(uuid);
   await execute(`UPDATE users SET ${sets.join(', ')} WHERE uuid = :uuid`, params);

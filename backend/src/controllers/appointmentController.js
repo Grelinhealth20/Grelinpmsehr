@@ -87,8 +87,9 @@ async function auditedEligibility(req, apptRow, { trigger, manual = false, opts 
   if (!(await isEligibilityEnabled())) return { skipped: 'eligibility_disabled' };
   try {
     const r = await verifyAppointmentEligibility(apptRow, opts);
-    // These outcomes make NO payer call (benefits reused / cap reached) — no audit noise.
-    if (['already_verified', 'insurance_reused', 'insurance_auto_cap'].includes(r.skipped)) return r;
+    // These outcomes make NO payer call (benefits reused / once-per-patient cap) — no
+    // audit noise (nothing live was triggered).
+    if (['already_verified', 'insurance_reused', 'insurance_auto_cap', 'auto_once_per_patient'].includes(r.skipped)) return r;
     if (r.check) await recordAudit({ ...base, metadata: { trigger, manual, status: r.check.status, payer: r.payer?.name } });
     else await recordAudit({ ...base, outcome: 'skipped', metadata: { trigger, manual, skipped: r.skipped } });
     return r;

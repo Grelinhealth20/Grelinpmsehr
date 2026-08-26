@@ -87,7 +87,13 @@ export async function create(req, res, next) {
         const row = await getRawByUuid(patient.uuid);
         if (row) {
           const r = await autoVerifyOnCreate({ patient: toPublicPatient(row), patientId: row.id, providerId: row.provider_id });
-          if (r?.check) await recordAudit({ actorUserId, action: 'patient.eligibility.verify', entityType: 'patient', entityId: patient.uuid, ...auditCtx, metadata: { auto: true, status: r.check.status, payer: r.payer?.name } });
+          // Log EVERY live payer call by user: a success (check) or an attempted call
+          // that the payer/clearinghouse errored. Pre-call skips make no live call.
+          if (r?.check) {
+            await recordAudit({ actorUserId, action: 'patient.eligibility.verify', entityType: 'patient', entityId: patient.uuid, ...auditCtx, metadata: { auto: true, live: true, status: r.check.status, payer: r.payer?.name } });
+          } else if (r?.skipped === 'error') {
+            await recordAudit({ actorUserId, action: 'patient.eligibility.verify', entityType: 'patient', entityId: patient.uuid, outcome: 'error', ...auditCtx, metadata: { auto: true, live: true, error: r.error } });
+          }
         }
       } catch (e) { logger.warn({ err: e.message }, 'auto eligibility on create failed'); }
     });
@@ -274,6 +280,10 @@ export async function verifyNow(req, res, next) {
     });
     res.status(201).json({ check: r.check, patient: r.patient });
   } catch (err) {
+    // A manual verify that reaches the payer and errors is a LIVE call — log it by user.
+    if (err.code && String(err.code).startsWith('STEDI')) {
+      recordAudit({ actorUserId: req.authUserId, action: 'patient.eligibility.verify', entityType: 'patient', entityId: req.params.uuid, outcome: 'error', ...ctx(req), metadata: { manual: true, live: true, error: err.message, code: err.code } }).catch(() => {});
+    }
     if (err.code === 'STEDI_US_IP_REQUIRED') {
       return res.status(502).json({
         error: 'Medicare eligibility requires a U.S.-based server connection. This environment’s network location is outside the U.S., so the payer rejected the request. Commercial payers are unaffected — deploy the backend on a U.S. host to enable Medicare Part B checks.',

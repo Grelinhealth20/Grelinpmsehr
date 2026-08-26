@@ -232,7 +232,7 @@ function VerifyPanel({ patientUuid, policyIndex, hasExisting, dos, onDone, onPat
   };
   return (
     <div className="bx-verify">
-      <button type="button" className="btn sm" onClick={run} disabled={busy}>{busy ? 'Verifying…' : hasExisting ? 'Re-verify' : 'Verify eligibility'}</button>
+      <button type="button" className="btn sm" onClick={run} disabled={busy}>{busy ? 'Verifying…' : hasExisting ? 'Re-verify Benefits' : 'Verify Benefits'}</button>
       {notice ? <div className="bx-notice">{notice}</div> : null}
     </div>
   );

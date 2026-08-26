@@ -92,6 +92,79 @@ export async function searchFacilities({ q = '', npi = '', state = '', city = ''
   return results.map(mapFacility).filter((f) => f.npi && f.name);
 }
 
+// Extract the COMPLETE, accurate INDIVIDUAL provider record (NPI-1) from a raw
+// NPPES result — name, credential, and primary taxonomy (specialty + license).
+function mapProvider(r) {
+  const b = r.basic || {};
+  const loc = locOf(r);
+  const primaryTax = (r.taxonomies || []).find((t) => t.primary) || (r.taxonomies || [])[0] || null;
+  const first = titleCase(b.first_name || '');
+  const last = titleCase(b.last_name || '');
+  const middle = titleCase(b.middle_name || '');
+  const fullName = [first, middle, last].filter(Boolean).join(' ').trim();
+  const street = loc ? `${loc.address_1 || ''}${loc.address_2 ? ` ${loc.address_2}` : ''}`.trim() : '';
+  return {
+    npi: String(r.number || ''),
+    firstName: first,
+    lastName: last,
+    middleName: middle,
+    fullName,
+    // NPPES credential string, e.g. "MD", "M.D.", "DO", "NP". Split into clean tags.
+    credential: String(b.credential || '').trim(),
+    credentials: String(b.credential || '')
+      .split(/[,/]/).map((c) => c.replace(/\./g, '').toUpperCase().trim()).filter(Boolean),
+    taxonomy: primaryTax?.desc || '',
+    taxonomyCode: primaryTax?.code || '',
+    licenseNumber: primaryTax?.license || '',
+    licenseState: primaryTax?.state || '',
+    gender: b.gender || '',
+    soleProprietor: b.sole_proprietor || '',
+    enumerationDate: b.enumeration_date || '',
+    status: (b.status === 'A' ? 'active' : b.status === 'D' ? 'deactivated' : (b.status || '')),
+    address: titleCase(street),
+    city: titleCase(loc?.city || ''),
+    state: String(loc?.state || '').toUpperCase(),
+    zip: String(loc?.postal_code || '').slice(0, 5),
+  };
+}
+
+/**
+ * Search the NPPES registry for an INDIVIDUAL provider (NPI-1) by NPI or name and
+ * return the COMPLETE details of each candidate (for a Super/Master admin to verify
+ * before saving). Name search accepts "First Last" or a single last name; a state
+ * filter narrows results. Triggered as soon as an NPI (10 digits) or a name is typed.
+ */
+export async function searchProviders({ q = '', npi = '', state = '', limit = 15 } = {}) {
+  if (!config.nppes.enabled) return [];
+  const cleanNpi = String(npi || '').replace(/\D/g, '');
+  const base = { version: '2.1', enumeration_type: 'NPI-1', limit: String(Math.min(50, Math.max(1, limit))) };
+
+  let results = [];
+  if (cleanNpi.length === 10) {
+    results = await query(new URLSearchParams({ ...base, number: cleanNpi }));
+  } else {
+    const clean = String(q || '').replace(/[.,]+$/, '').trim();
+    if (clean.length < 2) return [];
+    if (state) base.state = state;
+    const toks = clean.split(/\s+/).filter(Boolean);
+    const params = { ...base };
+    if (toks.length >= 2) {
+      // "First Last" (or more) — first token → first name, last token → last name.
+      params.first_name = `${toks[0]}*`;
+      params.last_name = `${toks[toks.length - 1]}*`;
+    } else {
+      // Single token — match it as a last name (most selective for providers).
+      params.last_name = `${toks[0]}*`;
+    }
+    results = await query(new URLSearchParams(params));
+    // Fallback: a single token might be a first name — retry that way.
+    if (!results.length && toks.length === 1) {
+      results = await query(new URLSearchParams({ ...base, first_name: `${toks[0]}*` }));
+    }
+  }
+  return results.map(mapProvider).filter((p) => p.npi && (p.lastName || p.firstName));
+}
+
 /**
  * @returns {Promise<null | {npi?, address?, city?, state?, zip?}>}
  */

@@ -791,6 +791,31 @@
 .payer-id-chip { margin-top: 6px; font-size: 11.5px; color: var(--c-ink-3); background: var(--c-blue-050); border: 1px solid #d5e2f6; display: inline-block; padding: 3px 9px; border-radius: 999px; }
 .payer-id-chip b { color: var(--c-blue); font-weight: 800; letter-spacing: 0.02em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 
+/* Inline payer typeahead (replaces the popup) — provider types directly in the field. */
+.payer-inline { position: relative; display: flex; align-items: center; }
+.payer-inline-ic { position: absolute; left: 11px; color: var(--c-ink-3); pointer-events: none; display: flex; }
+.payer-inline-input { width: 100%; padding-left: 32px !important; padding-right: 34px !important; }
+.payer-inline.is-open .payer-inline-input { border-color: var(--c-blue); box-shadow: 0 0 0 3px var(--c-blue-050); }
+.payer-inline-spin { position: absolute; right: 11px; }
+.payer-inline-clear { position: absolute; right: 8px; width: 20px; height: 20px; border: none; background: transparent; color: var(--c-ink-3); font-size: 17px; line-height: 1; cursor: pointer; border-radius: 6px; display: flex; align-items: center; justify-content: center; }
+.payer-inline-clear:hover { background: #eef2f8; color: var(--c-dark-blue); }
+.payer-inline-menu { position: absolute; top: calc(100% + 5px); left: 0; right: 0; z-index: 60; background: #fff; border: 1px solid #dbe3ef; border-radius: 12px; box-shadow: 0 14px 40px -12px rgba(20, 38, 74, 0.28); max-height: 320px; overflow-y: auto; padding: 5px; }
+.payer-inline-empty { padding: 16px 14px; font-size: 12.5px; color: var(--c-ink-3); text-align: center; }
+.payer-inline-row { display: flex; align-items: center; gap: 11px; width: 100%; text-align: left; padding: 9px 10px; border: none; background: transparent; border-radius: 9px; cursor: pointer; }
+.payer-inline-row.is-active { background: var(--c-blue-050); }
+.payer-inline-av { flex-shrink: 0; width: 30px; height: 30px; border-radius: 8px; background: linear-gradient(135deg, var(--c-blue), var(--c-dark-blue)); color: #fff; font-size: 11px; font-weight: 800; letter-spacing: 0.02em; display: flex; align-items: center; justify-content: center; }
+.payer-inline-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.payer-inline-nm { font-size: 13.5px; font-weight: 700; color: var(--c-dark-blue); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.payer-inline-sub { font-size: 11px; color: var(--c-ink-3); }
+.payer-inline-sub b { color: var(--c-ink-2); font-weight: 700; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0.02em; }
+.payer-inline-badge { flex-shrink: 0; display: inline-flex; align-items: center; gap: 5px; font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.03em; color: #10893e; background: #e7f6ec; padding: 3px 8px; border-radius: 999px; }
+.payer-inline-dot { width: 6px; height: 6px; border-radius: 50%; background: #16a34a; }
+@media (prefers-color-scheme: dark) {
+  .payer-inline-menu { background: #131c2b; border-color: #263243; }
+  .payer-inline-row.is-active { background: rgba(80, 130, 220, 0.16); }
+  .payer-inline-clear:hover { background: #1e2937; }
+}
+
 /* Insurance-payer search — enterprise command palette (app color scheme) */
 .pxs-overlay { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: flex-start; justify-content: center;
   padding: 12vh 20px 20px; background: rgba(9,17,33,0.5); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);

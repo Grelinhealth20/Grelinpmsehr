@@ -596,6 +596,19 @@ export async function autoApiCountForInsurance(patientId, insuranceBidx) {
   return Number(rows[0].n) || 0;
 }
 
+/**
+ * Count of AUTOMATIC payer calls for this patient across EVERY insurance/scenario —
+ * the basis for the "automatic eligibility runs at most ONCE per patient" rule. A
+ * manual verify (automatic = 0) never counts, so a provider can always re-verify.
+ */
+export async function autoApiCountForPatient(patientId) {
+  const [rows] = await execute(
+    `SELECT COUNT(*) AS n FROM eligibility_checks WHERE patient_id = :pid AND automatic = 1`,
+    { pid: patientId },
+  );
+  return Number(rows[0].n) || 0;
+}
+
 /** Reuse a stored check's benefits on an appointment (a DB copy — NO payer call). */
 export async function cloneCheckToAppointment(sourceUuid, { appointmentUuid, serviceDate = null, insuranceBidx = null, createdBy = null }) {
   const uuid = uuidv4();

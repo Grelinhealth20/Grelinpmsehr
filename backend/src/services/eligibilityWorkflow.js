@@ -2,12 +2,20 @@ import { stediEnabled, checkEligibility, stediLog } from './stediService.js';
 import { resolvePayer, resolveMedicarePartB, isMedicarePartB, normalizeState } from './payerDirectoryService.js';
 import {
   saveCheck, mergeVerificationIntoPatient, listChecks, getAppointmentCheck,
-  insuranceBidxOf, latestBenefitsForInsurance, autoApiCountForInsurance, cloneCheckToAppointment, toPublicCheck,
+  insuranceBidxOf, latestBenefitsForInsurance, autoApiCountForPatient, cloneCheckToAppointment, toPublicCheck,
 } from './eligibilityService.js';
 import { providerPrimaryFacility } from './facilityService.js';
 import { stcsForProcedures } from './procedureStc.js';
 import { updatePatient, applyPatientUpdateLocked, getRawByUuid as getPatientRawByUuid, toPublicPatient } from './patientService.js';
 import { logger } from '../config/logger.js';
+
+// In-process guard: patient IDs with an AUTOMATIC eligibility verification currently
+// in flight. Together with the per-patient DB counter it guarantees at most ONE
+// automatic live payer call per patient even if two automatic triggers race (e.g. a
+// patient created and an appointment scheduled seconds apart). Manual (force) verifies
+// are never locked. Process-local by design — a single automatic call per patient is
+// low-frequency, and the DB counter is the durable backstop across restarts/instances.
+const autoInFlight = new Set();
 
 /**
  * End-to-end, SERVER-SIDE eligibility verification for a patient. Every input is
@@ -58,12 +66,16 @@ export async function verifyPatientEligibility({ patient, patientId, providerId,
   if (!demo.firstName || !demo.lastName) return { skipped: 'no_name' };
   const dob = ymd(demo.dob); // YYYYMMDD (subscriber.dateOfBirth)
 
-  // Automatic-verification policy (bypassed by a manual `force`):
-  //  • Reuse existing benefits for the SAME patient + SAME insurance — no payer call.
-  //    (So a reschedule within the month with the same insurance never re-calls.)
-  //  • Never make more than TWO automatic payer calls per insurance.
-  //  • An insurance change (different payer / member / MBI) is a new identity → allowed.
+  // AUTOMATIC-verification policy (a manual `force` bypasses ALL of it):
+  //  • Reuse the existing SUCCESSFUL benefits for the SAME patient+insurance — served
+  //    from saved data, NO payer call. So re-opening a patient, rescheduling, or a new
+  //    appointment never re-calls the payer.
+  //  • Otherwise, at most ONE automatic live call PER PATIENT, ever. An errored /
+  //    no-response check STILL counts toward that one, so it is NEVER auto-retried —
+  //    re-verification after a non-response is MANUAL only.
+  //  • A concurrency lock stops two automatic triggers racing into two live calls.
   const insuranceBidx = insuranceBidxOf(ins.payer, memberId);
+  let autoLock = false;
   if (!force) {
     const existing = await latestBenefitsForInsurance(patientId, insuranceBidx);
     if (existing) {
@@ -75,9 +87,16 @@ export async function verifyPatientEligibility({ patient, patientId, providerId,
       }
       return { skipped: 'insurance_reused', check: toPublicCheck(existing) };
     }
-    if (await autoApiCountForInsurance(patientId, insuranceBidx) >= 2) return { skipped: 'insurance_auto_cap' };
+    // Once-per-patient: any prior automatic check (success OR error) blocks a new
+    // automatic call; only a manual verify proceeds from here.
+    if (autoInFlight.has(patientId) || (await autoApiCountForPatient(patientId)) >= 1) {
+      return { skipped: 'auto_once_per_patient' };
+    }
+    autoInFlight.add(patientId);
+    autoLock = true;
   }
 
+  try {
   // 1. Provider identity = the rendering provider's ASSIGNED FACILITY (NPI + state).
   const fac = await providerPrimaryFacility(providerId);
   if (!fac || !fac.npi) return { skipped: 'no_facility_npi' };
@@ -92,14 +111,22 @@ export async function verifyPatientEligibility({ patient, patientId, providerId,
   const medicarePartB = !!mbi || isMedicarePartB(ins.payer);
   let payer;
   if (medicarePartB) {
+    // Traditional Medicare Part B → the state-specific MAC for the ASSIGNED FACILITY'S
+    // state (never a wrong-state jurisdiction). No facility state → surfaced, not guessed.
     if (!normalizeState(fac.state)) return { skipped: 'no_facility_state' };
     payer = await resolveMedicarePartB(fac.state);
+  } else if (/[A-Za-z]/.test(String(ins.payerId || '').trim())) {
+    // DETERMINISTIC PATH: the provider picked the payer from the Face Sheet search,
+    // which stored the canonical STEDI payer ID (e.g. "QRPMU", "HPQRS") on the policy.
+    // Use it DIRECTLY as the tradingPartnerServiceId — no re-resolution by name, so a
+    // picked payer can never fail to route ("Stedi ID issue"). The guard requires a
+    // letter so a purely-numeric value (a PRIMARY payer ID, not a Stedi ID) is never
+    // mis-used as the routing key — it falls through to resolution below instead.
+    payer = { stediId: String(ins.payerId).trim().toUpperCase(), primaryPayerId: null, name: ins.payer || '' };
   } else {
+    // FALLBACK (payer typed, not picked): exact resolution against the Stedi payer
+    // network. Unmatched → surfaced as "payer not matched" (never a guessed payer).
     if (!ins.payer) return { skipped: 'no_payer' };
-    // EXACT resolution against the Stedi payer network only — no fuzzy match, no
-    // live-search fallback. Unmatched → surfaced as "payer not matched" (never a
-    // guessed payer). Providers pick the exact payer via the Payer search on the
-    // face sheet, which stores the canonical name + Stedi ID.
     payer = await resolvePayer(ins.payer, { state: fac.state });
   }
   if (!payer || !payer.stediId) return { skipped: 'payer_unresolved' };
@@ -165,6 +192,10 @@ export async function verifyPatientEligibility({ patient, patientId, providerId,
 
   stediLog('eligibility.saved', { patient: patient.uuid, status: check.status, appointment: appointmentUuid || undefined });
   return { check, patient: updated, payer };
+  } finally {
+    // Release the automatic-verify lock on every exit (success, skip, or throw).
+    if (autoLock) autoInFlight.delete(patientId);
+  }
 }
 
 /**
@@ -197,7 +228,11 @@ export async function verifyAppointmentEligibility(apptRow, { force = false } = 
       procedureCodes: apptRow.procedure_code ? [apptRow.procedure_code] : [],
       dosOverride: /^\d{8}$/.test(dos) ? dos : null,
       appointmentUuid: apptRow.uuid,
-      force: true,        // appointment checks are per-appointment, not monthly-deduped
+      // Pass the caller's force through: an AUTOMATIC trigger (create/reschedule,
+      // force=false) reuses the patient's saved benefits (clone to the appointment,
+      // no payer call) and respects the once-per-patient automatic cap; only a MANUAL
+      // appointment verify (force=true) makes a fresh live call.
+      force: !!force,
       writeBack: false,   // never mutate the Face Sheet from an appointment check
     });
     if (r.skipped) logger.info({ appointment: apptRow.uuid, reason: r.skipped }, 'appointment eligibility skipped');

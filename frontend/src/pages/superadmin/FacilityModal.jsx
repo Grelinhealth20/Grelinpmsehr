@@ -3,7 +3,7 @@ import Modal from '../../components/Modal.jsx';
 import { useToast } from '../../components/Toast.jsx';
 import { facilitiesApi, usersApi, toApiError } from '../../lib/api.js';
 
-const BLANK = { npi: '', name: '', address: '', city: '', state: '', zip: '', phone: '', taxonomy: '', logo: '' };
+const BLANK = { npi: '', name: '', address: '', city: '', state: '', zip: '', phone: '', taxonomy: '', taxId: '', logo: '' };
 const initials = (n = '') => n.split(' ').filter(Boolean).slice(0, 2).map((w) => w[0]?.toUpperCase()).join('') || '·';
 
 /**
@@ -86,7 +86,8 @@ export default function FacilityModal({ facility = null, onClose, onSaved }) {
   }, [term, editing]);
 
   function choose(r) {
-    setForm({ npi: r.npi || '', name: r.name || '', address: r.address || '', city: r.city || '', state: r.state || '', zip: r.zip || '', phone: r.phone || '', taxonomy: r.taxonomy || '' });
+    // Tax ID (EIN) is not in NPPES — preserve any manually entered value.
+    setForm((f) => ({ npi: r.npi || '', name: r.name || '', address: r.address || '', city: r.city || '', state: r.state || '', zip: r.zip || '', phone: r.phone || '', taxonomy: r.taxonomy || '', taxId: f.taxId || '' }));
     setResults([]);
     setVerified(true);
   }
@@ -217,7 +218,8 @@ export default function FacilityModal({ facility = null, onClose, onSaved }) {
             <div className="fac-grid">
               <Fld label="Facility name" v={form.name} on={(v) => setF('name', v)} wide />
               <Fld label="NPI" v={form.npi} on={(v) => setF('npi', v)} />
-              <Fld label="Taxonomy" v={form.taxonomy} on={(v) => setF('taxonomy', v)} />
+              <Fld label="Tax ID (EIN)" v={form.taxId} on={(v) => setF('taxId', v)} />
+              <Fld label="Taxonomy" v={form.taxonomy} on={(v) => setF('taxonomy', v)} wide />
               <Fld label="Address" v={form.address} on={(v) => setF('address', v)} wide />
               <Fld label="City" v={form.city} on={(v) => setF('city', v)} />
               <Fld label="State" v={form.state} on={(v) => setF('state', v)} />

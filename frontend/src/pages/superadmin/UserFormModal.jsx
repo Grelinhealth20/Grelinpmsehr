@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Modal from '../../components/Modal.jsx';
 import PasswordInput from '../../components/PasswordInput.jsx';
 import { usersApi, specialtiesApi, facilitiesApi, toApiError } from '../../lib/api.js';
@@ -56,6 +56,16 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
   const [tempPassword, setTempPassword] = useState('');
   const [err, setErr] = useState(null);
   const [busy, setBusy] = useState(false);
+
+  // NPPES registry identity (individual provider, NPI-1): the provider's own NPI +
+  // primary taxonomy, fetched and verified from the CMS registry.
+  const [npi, setNpi] = useState(user?.npi || '');
+  const [taxonomy, setTaxonomy] = useState(user?.taxonomy || '');
+  const [taxonomyCode, setTaxonomyCode] = useState(user?.taxonomyCode || '');
+  const [npiTerm, setNpiTerm] = useState('');
+  const [npiResults, setNpiResults] = useState([]);
+  const [npiSearching, setNpiSearching] = useState(false);
+  const npiDebounce = useRef(null);
 
   // Facility assignment (providers + billing users) — governs their billing
   // facility and cross-facility isolation.
@@ -118,6 +128,42 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
     setNewCred('');
   };
 
+  // Auto-trigger the NPPES individual-provider lookup once a name (≥2 chars) or a
+  // 10-digit NPI is typed. Providers only.
+  useEffect(() => {
+    if (!isProvider) return undefined;
+    const t = npiTerm.trim();
+    const digits = t.replace(/\D/g, '');
+    const ready = digits.length === 10 || t.length >= 2;
+    if (!ready) { setNpiResults([]); setNpiSearching(false); return undefined; }
+    setNpiSearching(true);
+    clearTimeout(npiDebounce.current);
+    npiDebounce.current = setTimeout(async () => {
+      try {
+        const params = digits.length === 10 ? { npi: digits } : { q: t };
+        const { data } = await usersApi.nppes(params);
+        setNpiResults(data.results || []);
+      } catch { setNpiResults([]); }
+      finally { setNpiSearching(false); }
+    }, 400);
+    return () => clearTimeout(npiDebounce.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [npiTerm, isProvider]);
+
+  // Apply a chosen NPPES provider record: fill name, NPI, taxonomy, and merge the
+  // registry credential (e.g. MD) into the credential tags. The admin can still edit.
+  function chooseProvider(r) {
+    if (r.fullName) setFullName(r.fullName);
+    setNpi(r.npi || '');
+    setTaxonomy(r.taxonomy || '');
+    setTaxonomyCode(r.taxonomyCode || '');
+    if (Array.isArray(r.credentials) && r.credentials.length) {
+      setCredentials((l) => Array.from(new Set([...l, ...r.credentials])));
+    }
+    setNpiResults([]);
+    setNpiTerm('');
+  }
+
   const pw = useMemo(() => evaluatePassword(tempPassword), [tempPassword]);
   const canSubmit =
     fullName.trim().length >= 2 && (isEdit || (/^\S+@\S+\.\S+$/.test(email) && pw.valid)) && !busy;
@@ -138,6 +184,9 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
           accessLevel,
           credentials: isProvider ? credentials : [],
           specialtyUuid: isProvider ? specialtyUuid || null : null,
+          npi: isProvider ? npi.trim() : '',
+          taxonomy: isProvider ? taxonomy.trim() : '',
+          taxonomyCode: isProvider ? taxonomyCode.trim() : '',
         };
         if (!isMasterUser) payload.role = role; // master admin role is immutable
         await usersApi.update(user.uuid, payload);
@@ -150,6 +199,9 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
           accessLevel,
           credentials: isProvider ? credentials : undefined,
           specialtyUuid: isProvider ? specialtyUuid || null : undefined,
+          npi: isProvider ? npi.trim() : undefined,
+          taxonomy: isProvider ? taxonomy.trim() : undefined,
+          taxonomyCode: isProvider ? taxonomyCode.trim() : undefined,
           temporaryPassword: tempPassword,
         });
         // Assign the selected facilities to the freshly created user.
@@ -207,6 +259,52 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
           <label>System access level</label>
           <Segmented options={SCOPES} value={scope} onChange={setScope} />
         </div>
+
+        {isProvider && (
+          <div className="field">
+            <label>NPPES registry lookup <span className="muted">(individual NPI)</span></label>
+            <div className="fac-search-box">
+              <span className="fac-search-ic" aria-hidden="true" />
+              <input
+                className="input"
+                placeholder="Search by provider name or 10-digit NPI…"
+                value={npiTerm}
+                onChange={(e) => setNpiTerm(e.target.value)}
+              />
+              {npiSearching && <span className="spinner dark fac-search-spin" />}
+            </div>
+            {npiResults.length > 0 && (
+              <div className="fac-results">
+                {npiResults.map((r) => (
+                  <button key={r.npi} type="button" className="fac-result" onClick={() => chooseProvider(r)}>
+                    <span className="fac-result-main">
+                      <span className="fac-result-name">{r.fullName}{r.credential ? `, ${r.credential}` : ''}</span>
+                      <span className="fac-result-sub">{[r.taxonomy, [r.city, r.state].filter(Boolean).join(', ')].filter(Boolean).join(' · ')}</span>
+                    </span>
+                    <span className="fac-result-meta">
+                      <span className="fac-result-npi">NPI {r.npi}</span>
+                      {r.status && r.status !== 'active' && <span className="fac-result-tax">{r.status}</span>}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+            {!npiSearching && npiTerm.trim().length >= 2 && npiResults.length === 0 && (
+              <div className="fac-empty">No matching providers found in the NPPES registry.</div>
+            )}
+            <div className="fac-grid" style={{ marginTop: 10 }}>
+              <div className="fac-fld">
+                <label>NPI</label>
+                <input className="input" value={npi} maxLength={10} placeholder="10-digit NPI" onChange={(e) => setNpi(e.target.value.replace(/\D/g, '').slice(0, 10))} />
+              </div>
+              <div className="fac-fld fac-fld-wide">
+                <label>Taxonomy <span className="muted">(primary specialty)</span></label>
+                <input className="input" value={taxonomy} maxLength={160} placeholder="e.g. Internal Medicine" onChange={(e) => setTaxonomy(e.target.value)} />
+              </div>
+            </div>
+            {taxonomyCode && <span className="hint">Taxonomy code: {taxonomyCode}</span>}
+          </div>
+        )}
 
         {isProvider && (
           <div className="field">

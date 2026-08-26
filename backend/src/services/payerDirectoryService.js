@@ -23,6 +23,9 @@ const STATE_ABBR = {
   OHIO: 'OH', OKLAHOMA: 'OK', OREGON: 'OR', PENNSYLVANIA: 'PA', 'RHODE ISLAND': 'RI', 'SOUTH CAROLINA': 'SC',
   'SOUTH DAKOTA': 'SD', TENNESSEE: 'TN', TEXAS: 'TX', UTAH: 'UT', VERMONT: 'VT', VIRGINIA: 'VA',
   WASHINGTON: 'WA', 'WEST VIRGINIA': 'WV', WISCONSIN: 'WI', WYOMING: 'WY', 'PUERTO RICO': 'PR',
+  // US territories with their own Medicare Part B jurisdictions.
+  'VIRGIN ISLANDS': 'VI', 'U.S. VIRGIN ISLANDS': 'VI', 'US VIRGIN ISLANDS': 'VI',
+  GUAM: 'GU', 'AMERICAN SAMOA': 'AS', 'NORTHERN MARIANA ISLANDS': 'MP',
 };
 
 const STATE_CODES = new Set(Object.values(STATE_ABBR));
@@ -76,11 +79,17 @@ export function isMedicarePartB(payer) {
   );
 }
 
-/** State-specific "Medicare {State} Part B" MAC payer for a facility's state. */
+/**
+ * State-specific "Medicare {State} Part B" MAC payer for a facility's state. Prefers
+ * a clean "Medicare {State} Part B" name; if the state only has SUFFIXED jurisdictions
+ * (e.g. New York → "…Part B Upstate" / "…Part B Queens"), it falls back to the
+ * shortest suffixed Part B MAC for that state so a facility there still routes.
+ */
 export async function resolveMedicarePartB(state) {
   const st = normalizeState(state);
   if (!st) return null;
-  const [rows] = await execute(
+  // 1) Exact "Medicare {State} Part B" (no trailing jurisdiction suffix).
+  const [exact] = await execute(
     `SELECT stedi_id, primary_payer_id, display_name
        FROM stedi_payers
       WHERE UPPER(operating_states) = :st
@@ -90,41 +99,91 @@ export async function resolveMedicarePartB(state) {
       LIMIT 1`,
     { st },
   );
-  return rows[0] ? mapRow(rows[0]) : null;
+  if (exact[0]) return mapRow(exact[0]);
+  // 2) Fallback: a suffixed Part B MAC (split jurisdictions), shortest name first.
+  const [suffixed] = await execute(
+    `SELECT stedi_id, primary_payer_id, display_name
+       FROM stedi_payers
+      WHERE UPPER(operating_states) = :st
+        AND LOWER(display_name) LIKE 'medicare %part b %'
+        AND eligibility_supported = 1
+      ORDER BY CHAR_LENGTH(display_name) ASC
+      LIMIT 1`,
+    { st },
+  );
+  return suffixed[0] ? mapRow(suffixed[0]) : null;
 }
+
+// Common provider shorthand → canonical brand text. Providers type "UHC" or "BCBS",
+// not the full legal name; expanding the abbreviation to the brand makes the search
+// match the real payer rows. Deterministic (a fixed table, never a guess).
+const PAYER_SYNONYMS = {
+  uhc: 'unitedhealthcare', uhg: 'unitedhealthcare', unitedhealth: 'unitedhealthcare',
+  bcbs: 'blue cross blue shield', bx: 'blue cross', bs: 'blue shield',
+  bcbstx: 'blue cross blue shield of texas', bcbsil: 'blue cross blue shield of illinois',
+  bcbsfl: 'florida blue', floridablue: 'florida blue',
+  aetna: 'aetna', cigna: 'cigna', humana: 'humana', anthem: 'anthem',
+  kaiser: 'kaiser permanente', kp: 'kaiser permanente', wellcare: 'wellcare',
+  molina: 'molina', centene: 'centene', tricare: 'tricare', geha: 'geha',
+  aarp: 'aarp', mcr: 'medicare', mcd: 'medicaid', medicaid: 'medicaid',
+  ahcccs: 'arizona medicaid', medi: 'medicare',
+};
 
 /**
  * Typeahead search over the Stedi payer directory for the face-sheet Payer picker.
- * Unlike resolvePayer (which is exact-only for routing), this is a human-facing
- * SEARCH box: it ranks id / exact-name / prefix / contains matches so the provider
- * can pick the exact payer. Eligibility-supported payers rank first. Returns a small
- * result list [{ stediId, primaryPayerId, name, eligibilitySupported }].
+ * Provider-friendly: it matches the display name, alternate names AND the alias
+ * column (so shorthand like "UHC" or a bare payer ID resolves), expands common
+ * abbreviations to their canonical brand, and ranks id / exact-name / alias-token /
+ * prefix / contains matches. Eligibility-supported payers and the shorter (national /
+ * primary) name rank first, so a bare brand surfaces the main payer, not a state
+ * variant. Returns [{ stediId, primaryPayerId, name, eligibilitySupported }].
  */
 export async function searchPayers(queryText, { limit = 10 } = {}) {
   const q = String(queryText || '').trim();
   if (q.length < 2) return [];
   const qUpper = q.toUpperCase();
   const qLower = q.toLowerCase();
+  const qNorm = normId(q);
   const lim = Math.min(25, Math.max(1, Number(limit) || 10));
-  const [rows] = await execute(
-    `SELECT stedi_id, primary_payer_id, display_name, eligibility_supported,
+
+  // Search terms: the raw query plus any abbreviation expansion (deterministic).
+  const syn = PAYER_SYNONYMS[qNorm] || null;
+  const terms = [...new Set([qLower, syn].filter(Boolean))];
+
+  const params = { qu: qUpper, ql: qLower, qn: qNorm, aliasTok: `%|${qUpper}|%` };
+  const where = [
+    'UPPER(stedi_id) = :qu',
+    'UPPER(primary_payer_id) = :qu',
+    "CONCAT('|', UPPER(aliases), '|') LIKE :aliasTok",
+  ];
+  const scoreWhens = [];
+  terms.forEach((t, i) => {
+    const k = `t${i}`;
+    params[k] = `%${t}%`;
+    params[`${k}p`] = `${t}%`;
+    where.push(`LOWER(display_name) LIKE :${k}`, `LOWER(names) LIKE :${k}`, `LOWER(aliases) LIKE :${k}`);
+    scoreWhens.push(
+      `WHEN LOWER(display_name) LIKE :${k}p THEN 72`,
+      `WHEN LOWER(display_name) LIKE :${k} THEN 48`,
+      `WHEN LOWER(names) LIKE :${k} THEN 34`,
+      `WHEN LOWER(aliases) LIKE :${k} THEN 26`,
+    );
+  });
+  const NORM_DN = "REPLACE(REPLACE(REPLACE(LOWER(display_name),' ',''),'-',''),'.','')";
+  const sql = `SELECT stedi_id, primary_payer_id, display_name, eligibility_supported,
        (CASE
           WHEN UPPER(stedi_id) = :qu OR UPPER(primary_payer_id) = :qu THEN 100
-          WHEN LOWER(display_name) = :ql THEN 90
-          WHEN LOWER(display_name) LIKE :pfx THEN 70
-          WHEN LOWER(display_name) LIKE :ctn THEN 45
-          WHEN LOWER(names) LIKE :ctn THEN 30
+          WHEN LOWER(display_name) = :ql THEN 92
+          WHEN ${NORM_DN} = :qn THEN 88
+          WHEN CONCAT('|', UPPER(aliases), '|') LIKE :aliasTok THEN 84
+          ${scoreWhens.join('\n          ')}
           ELSE 10
         END) AS score
        FROM stedi_payers
-      WHERE UPPER(stedi_id) = :qu
-         OR UPPER(primary_payer_id) = :qu
-         OR LOWER(display_name) LIKE :ctn
-         OR LOWER(names) LIKE :ctn
+      WHERE ${where.join(' OR ')}
       ORDER BY score DESC, eligibility_supported DESC, CHAR_LENGTH(display_name) ASC
-      LIMIT ${lim}`,
-    { qu: qUpper, ql: qLower, pfx: `${qLower}%`, ctn: `%${qLower}%` },
-  );
+      LIMIT ${lim}`;
+  const [rows] = await execute(sql, params);
   return rows.map((r) => ({
     stediId: r.stedi_id,
     primaryPayerId: r.primary_payer_id || null,

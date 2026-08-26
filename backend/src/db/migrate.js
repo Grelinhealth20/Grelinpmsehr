@@ -75,8 +75,17 @@ export async function runMigrations() {
   );
   // Provider credential tags (MD, DO, NP, APRN, ASNP, PA, …) — staff metadata, not PHI.
   await ensureColumn('users', 'credentials', '`credentials` JSON NULL AFTER `specialty_id`');
+  // Individual-provider NPPES identity (NPI-1): the provider's own NPI and primary
+  // taxonomy, fetched from the CMS NPPES registry. PUBLIC provider data, not PHI —
+  // used on claims/eligibility as the rendering provider.
+  await ensureColumn('users', 'npi', '`npi` VARCHAR(10) NULL AFTER `credentials`');
+  await ensureColumn('users', 'taxonomy', '`taxonomy` VARCHAR(160) NULL AFTER `npi`');
+  await ensureColumn('users', 'taxonomy_code', '`taxonomy_code` VARCHAR(16) NULL AFTER `taxonomy`');
   // Facility logo — a data URI (base64 image), not PHI; shown across the app.
   await ensureColumn('facilities', 'logo', '`logo` MEDIUMTEXT NULL AFTER `taxonomy`');
+  // Facility Tax ID (EIN) — organizational billing identifier, entered by an admin
+  // (not in NPPES). Kept with the facility's other billing identifiers.
+  await ensureColumn('facilities', 'tax_id', '`tax_id` VARCHAR(32) NULL AFTER `taxonomy`');
   // Rendering provider selected for an appointment (may differ from the owner).
   await ensureColumn(
     'appointments',

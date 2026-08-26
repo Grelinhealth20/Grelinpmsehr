@@ -14,9 +14,20 @@ import { recordAudit } from '../services/auditService.js';
 import { findSpecialtyIdByUuid } from '../services/specialtyService.js';
 import { listUserFacilities, setUserFacilities } from '../services/facilityService.js';
 import { blindIndex } from '../utils/crypto.js';
+import { searchProviders, nppesEnabled } from '../services/nppesService.js';
 import { config, ROLES } from '../config/env.js';
 
 const auditCtx = (req) => ({ ip: req.ip, userAgent: req.get('user-agent') });
+
+/** Live NPPES lookup for an INDIVIDUAL provider (NPI-1) by NPI or name. */
+export async function nppesProviderSearch(req, res, next) {
+  try {
+    if (!nppesEnabled()) return res.status(503).json({ error: 'NPPES registry lookup is not configured.', code: 'NPPES_DISABLED' });
+    const { q = '', npi = '', state = '' } = req.query;
+    const results = await searchProviders({ q, npi, state });
+    res.json({ results });
+  } catch (err) { next(err); }
+}
 
 /** The configured master-admin account — protected from demotion/deletion. */
 function isMasterAccount(row) {
@@ -80,7 +91,8 @@ export async function list(req, res, next) {
 
 export async function create(req, res, next) {
   try {
-    const { email, fullName, role, accessLevel, credentials, specialtyUuid, temporaryPassword } = req.body;
+    const { email, fullName, role, accessLevel, credentials, specialtyUuid, npi, taxonomy, taxonomyCode, temporaryPassword } = req.body;
+    const isProvider = role === ROLES.PROVIDER;
 
     const policyErrors = validatePasswordPolicy(temporaryPassword);
     if (policyErrors.length) {
@@ -92,8 +104,8 @@ export async function create(req, res, next) {
       return res.status(409).json({ error: 'A user with this email already exists.', code: 'EMAIL_TAKEN' });
     }
 
-    // Specialty only applies to providers.
-    const specialtyId = role === ROLES.PROVIDER ? await resolveSpecialtyId(specialtyUuid) : null;
+    // Specialty + NPPES identity (NPI / taxonomy) only apply to providers.
+    const specialtyId = isProvider ? await resolveSpecialtyId(specialtyUuid) : null;
 
     const passwordHash = await hashPassword(temporaryPassword);
     const row = await createUser({
@@ -101,8 +113,11 @@ export async function create(req, res, next) {
       fullName,
       role,
       accessLevel: accessLevel || null,
-      credentials: role === ROLES.PROVIDER ? (credentials || null) : null,
+      credentials: isProvider ? (credentials || null) : null,
       specialtyId: specialtyId ?? null,
+      npi: isProvider ? (npi || null) : null,
+      taxonomy: isProvider ? (taxonomy || null) : null,
+      taxonomyCode: isProvider ? (taxonomyCode || null) : null,
       passwordHash,
       mustResetPassword: true, // new users must set their own password on first login
       createdBy: req.authUserId,

@@ -104,6 +104,7 @@ export const authApi = {
 // --- Users (admin) ---------------------------------------------------------
 export const usersApi = {
   list: (params) => api.get('/users', { params }),
+  nppes: (params) => api.get('/users/nppes', { params }),
   create: (payload) => api.post('/users', payload),
   update: (uuid, payload) => api.patch(`/users/${uuid}`, payload),
   setStatus: (uuid, status) => api.patch(`/users/${uuid}/status`, { status }),

@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
 import Modal from './Modal.jsx';
 import { useToast } from './Toast.jsx';
 import { patientsApi, payersApi, toApiError } from '../lib/api.js';
@@ -51,31 +50,97 @@ function Field({ label, value, onChange, type = 'text', required, options, place
 }
 
 /**
- * Payer field — opens a futuristic command-palette popup to search the Stedi payer
- * network and pick the EXACT payer (no free-text typos that misroute eligibility).
- * The trigger shows the selected payer + its Stedi Payer ID.
+ * Insurance-payer search — an INLINE, provider-focused typeahead (no popup). The
+ * provider types a payer name, a payer ID, or shorthand (e.g. "UHC") directly in the
+ * field and picks from a live-ranked dropdown. Eligibility-supported payers are
+ * flagged "Real-time". Picking stores the canonical name + Stedi payer ID.
  */
 function PayerSearch({ value, payerId, onPick }) {
+  const [term, setTerm] = useState(value || '');
+  const [results, setResults] = useState([]);
+  const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(0);
+  const boxRef = useRef(null);
+  const tRef = useRef(null);
+
+  // Keep the field text in sync when the selected payer changes from outside.
+  useEffect(() => { setTerm(value || ''); }, [value]);
+
+  // Debounced search as the provider types (only while the dropdown is open).
+  useEffect(() => {
+    if (!open) return undefined;
+    const q = term.trim();
+    if (q.length < 2) { setResults([]); setLoading(false); return undefined; }
+    setLoading(true);
+    clearTimeout(tRef.current);
+    tRef.current = setTimeout(async () => {
+      try { const { data } = await payersApi.search(q); setResults(data.payers || []); setActive(0); }
+      catch { setResults([]); } finally { setLoading(false); }
+    }, 200);
+    return () => clearTimeout(tRef.current);
+  }, [term, open]);
+
+  // Close the dropdown on an outside click.
+  useEffect(() => {
+    if (!open) return undefined;
+    const onDoc = (e) => { if (boxRef.current && !boxRef.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+
+  const pick = (p) => { onPick(p); setTerm(p.name || ''); setOpen(false); setResults([]); };
+  const clear = () => { onPick({ name: '', stediId: '' }); setTerm(''); setResults([]); setOpen(false); };
+
+  const onKey = (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); setOpen(true); setActive((a) => Math.min(a + 1, results.length - 1)); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setActive((a) => Math.max(a - 1, 0)); }
+    else if (e.key === 'Enter' && open && results[active]) { e.preventDefault(); pick(results[active]); }
+    else if (e.key === 'Escape') { setOpen(false); }
+  };
+
   return (
-    <div className="field">
+    <div className="field" ref={boxRef}>
       <label>Payer</label>
-      <button type="button" className={`payer-trigger ${value ? 'has' : ''}`} onClick={() => setOpen(true)}>
-        <span className="payer-trigger-ic" aria-hidden="true">
+      <div className={`payer-inline ${open ? 'is-open' : ''}`}>
+        <span className="payer-inline-ic" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.2-3.2" /></svg>
         </span>
-        {value ? (
-          <span className="payer-trigger-main">
-            <span className="payer-trigger-nm">{value}</span>
-            {payerId ? <span className="payer-trigger-id">{payerId}</span> : null}
-          </span>
-        ) : (
-          <span className="payer-trigger-ph">Select insurance payer…</span>
+        <input
+          className="input payer-inline-input"
+          value={term}
+          autoComplete="off"
+          placeholder="Search payer — name, ID, or shorthand (e.g. UHC)…"
+          onChange={(e) => { setTerm(e.target.value); setOpen(true); }}
+          onFocus={() => { if (term.trim().length >= 2) setOpen(true); }}
+          onKeyDown={onKey}
+        />
+        {loading ? <span className="spinner dark payer-inline-spin" /> : (term || payerId) ? (
+          <button type="button" className="payer-inline-clear" title="Clear payer" onClick={clear}>×</button>
+        ) : null}
+        {open && term.trim().length >= 2 && (
+          <div className="payer-inline-menu">
+            {results.length === 0 && !loading ? (
+              <div className="payer-inline-empty">No matching payer — try a shorter name or the payer ID.</div>
+            ) : results.map((p, idx) => (
+              <button
+                type="button" key={p.stediId}
+                className={`payer-inline-row ${idx === active ? 'is-active' : ''}`}
+                onMouseEnter={() => setActive(idx)}
+                onMouseDown={(e) => { e.preventDefault(); pick(p); }}
+              >
+                <span className="payer-inline-av" aria-hidden="true">{payerMonogram(p.name)}</span>
+                <span className="payer-inline-main">
+                  <span className="payer-inline-nm">{p.name}</span>
+                  <span className="payer-inline-sub">Payer ID · <b>{p.stediId}</b>{p.primaryPayerId ? ` · Plan ${p.primaryPayerId}` : ''}</span>
+                </span>
+                {p.eligibilitySupported ? <span className="payer-inline-badge"><span className="payer-inline-dot" />Real-time</span> : null}
+              </button>
+            ))}
+          </div>
         )}
-        <span className="payer-trigger-cta" aria-hidden="true">Search</span>
-      </button>
+      </div>
       {payerId ? <div className="payer-id-chip">Payer ID: <b>{payerId}</b></div> : null}
-      {open && <PayerSearchModal onClose={() => setOpen(false)} onPick={(p) => { onPick(p); setOpen(false); }} />}
     </div>
   );
 }
@@ -85,111 +150,6 @@ const payerMonogram = (name) => {
   if (!w.length) return '?';
   return (w.length >= 2 ? w[0][0] + w[1][0] : w[0].slice(0, 2)).toUpperCase();
 };
-
-/**
- * Insurance-payer search — an enterprise, provider-focused command palette. Live
- * search of the payer directory with keyboard navigation. No vendor branding shown.
- */
-function PayerSearchModal({ onClose, onPick }) {
-  const [q, setQ] = useState('');
-  const [results, setResults] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [active, setActive] = useState(0);
-  const tRef = useRef(null);
-  const inRef = useRef(null);
-  const listRef = useRef(null);
-
-  useEffect(() => { const t = setTimeout(() => inRef.current?.focus(), 40); return () => clearTimeout(t); }, []);
-
-  useEffect(() => {
-    const term = q.trim();
-    if (term.length < 2) { setResults([]); setLoading(false); return undefined; }
-    setLoading(true);
-    clearTimeout(tRef.current);
-    tRef.current = setTimeout(async () => {
-      try { const { data } = await payersApi.search(term); setResults(data.payers || []); setActive(0); }
-      catch { setResults([]); } finally { setLoading(false); }
-    }, 200);
-    return () => clearTimeout(tRef.current);
-  }, [q]);
-
-  useEffect(() => {
-    const onKey = (e) => {
-      if (e.key === 'Escape') { e.preventDefault(); onClose(); }
-      else if (e.key === 'ArrowDown') { e.preventDefault(); setActive((a) => Math.min(a + 1, results.length - 1)); }
-      else if (e.key === 'ArrowUp') { e.preventDefault(); setActive((a) => Math.max(a - 1, 0)); }
-      else if (e.key === 'Enter') { e.preventDefault(); if (results[active]) onPick(results[active]); }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [results, active, onClose, onPick]);
-
-  // Keep the active row scrolled into view during keyboard navigation.
-  useEffect(() => {
-    const el = listRef.current?.querySelector('.pxs-row.is-active');
-    el?.scrollIntoView({ block: 'nearest' });
-  }, [active]);
-
-  const term = q.trim();
-  return createPortal(
-    <div className="pxs-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="pxs" role="dialog" aria-label="Search insurance payers">
-        <div className="pxs-search">
-          <span className="pxs-search-ic" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="7" /><path d="M20.5 20.5l-3.6-3.6" /></svg>
-          </span>
-          <input
-            ref={inRef} className="pxs-input" value={q} autoComplete="off"
-            placeholder="Search insurance payers by name or ID…"
-            onChange={(e) => setQ(e.target.value)}
-          />
-          {loading ? <span className="pxs-spin" aria-hidden="true" /> : <kbd className="pxs-esc">esc</kbd>}
-        </div>
-        <div className="pxs-body" ref={listRef}>
-          {term.length < 2 ? (
-            <div className="pxs-hint">
-              <span className="pxs-hint-ic" aria-hidden="true">
-                <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3l7.5 3.2v5.3c0 4.8-3.2 8.3-7.5 10.2-4.3-1.9-7.5-5.4-7.5-10.2V6.2z" /><path d="M9 12l2 2 4-4" /></svg>
-              </span>
-              <div className="pxs-hint-t">Find the exact insurance payer</div>
-              <div className="pxs-hint-s">Type a payer name — try <b>United</b>, <b>Humana</b>, <b>Aetna</b> — or a payer ID.</div>
-            </div>
-          ) : results.length === 0 && !loading ? (
-            <div className="pxs-empty">
-              <div className="pxs-empty-t">No matching payer</div>
-              <div className="pxs-empty-s">Try a shorter name or the payer ID.</div>
-            </div>
-          ) : (
-            <div className="pxs-list">
-              {results.map((p, idx) => (
-                <button
-                  type="button" key={p.stediId}
-                  className={`pxs-row ${idx === active ? 'is-active' : ''}`}
-                  onMouseEnter={() => setActive(idx)} onClick={() => onPick(p)}
-                >
-                  <span className="pxs-avatar" aria-hidden="true">{payerMonogram(p.name)}</span>
-                  <span className="pxs-row-main">
-                    <span className="pxs-row-nm">{p.name}</span>
-                    <span className="pxs-row-sub">Payer ID · <b>{p.stediId}</b>{p.primaryPayerId ? <> · Plan {p.primaryPayerId}</> : null}</span>
-                  </span>
-                  {p.eligibilitySupported ? <span className="pxs-badge"><span className="pxs-badge-dot" />Real-time</span> : null}
-                  <span className="pxs-row-enter" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 10l-5 5 5 5" /><path d="M20 4v7a4 4 0 0 1-4 4H4" /></svg>
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-        <div className="pxs-foot">
-          <span className="pxs-foot-keys"><kbd>↑</kbd><kbd>↓</kbd> Navigate<i /> <kbd>↵</kbd> Select<i /> <kbd>esc</kbd> Close</span>
-          <span className="pxs-foot-brand">Real-time benefits verification</span>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  );
-}
 
 // Section-header icons (thin-line, enterprise).
 const SEC_ICONS = {

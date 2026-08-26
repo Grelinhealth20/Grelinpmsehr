@@ -95,6 +95,44 @@ export async function searchPayer(queryText) {
 }
 
 /**
+ * Live typeahead over the Stedi Payer Network — returns the full ranked candidate
+ * list (not just the single best) so the face-sheet picker can augment the local
+ * directory in real time. This is the PAYER-SEARCH endpoint (reference data, no PHI,
+ * no payer connection) — NOT the eligibility API — so it is used freely and is not
+ * subject to the eligibility geofencing. Each item is normalized to the same shape
+ * the local directory returns, plus raw fields for the directory upsert. Returns []
+ * when unconfigured.
+ */
+export async function searchPayersLive(queryText, { limit = 10 } = {}) {
+  const q = String(queryText || '').trim();
+  if (!stediEnabled() || q.length < 2) return [];
+  let data;
+  try { data = await stediFetch('/payers/search', { query: { query: q } }); }
+  catch (err) { stediLog('payer_search.error', { err: err.message, code: err.code }); return []; }
+  const items = Array.isArray(data?.items) ? data.items : [];
+  const out = [];
+  for (const it of items.slice(0, Math.min(25, Math.max(1, limit)))) {
+    const p = it?.payer;
+    if (!p || !p.stediId) continue;
+    const supported = p.transactionSupport?.eligibilityCheck === 'SUPPORTED';
+    out.push({
+      stediId: p.stediId,
+      primaryPayerId: p.primaryPayerId || null,
+      name: p.displayName || q,
+      eligibilitySupported: supported,
+      // Raw fields for directory upsert (self-healing cache).
+      _raw: {
+        names: Array.isArray(p.names) ? p.names.join('|') : (p.names || ''),
+        aliases: Array.isArray(p.aliases) ? p.aliases.join('|') : (Array.isArray(p.payerIds) ? p.payerIds.join('|') : ''),
+        coverageTypes: Array.isArray(p.coverageTypes) ? p.coverageTypes.join(',') : '',
+        operatingStates: Array.isArray(p.operatingStates) ? p.operatingStates.join(',') : '',
+      },
+    });
+  }
+  return out;
+}
+
+/**
  * Run a real-time eligibility check. `input` mirrors Stedi's request body:
  *   provider { npi, organizationName }, subscriber { firstName, lastName,
  *   dateOfBirth (YYYYMMDD), memberId, address }, encounter { serviceTypeCodes,
