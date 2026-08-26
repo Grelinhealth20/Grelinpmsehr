@@ -1,4 +1,4 @@
-import { stediEnabled, checkEligibility, stediLog } from './stediService.js';
+import { stediEnabled, checkEligibility, searchPayer, stediLog } from './stediService.js';
 import { resolvePayer, resolveMedicarePartB, isMedicarePartB, normalizeState } from './payerDirectoryService.js';
 import {
   saveCheck, mergeVerificationIntoPatient, listChecks, getAppointmentCheck,
@@ -124,10 +124,17 @@ export async function verifyPatientEligibility({ patient, patientId, providerId,
     // mis-used as the routing key — it falls through to resolution below instead.
     payer = { stediId: String(ins.payerId).trim().toUpperCase(), primaryPayerId: null, name: ins.payer || '' };
   } else {
-    // FALLBACK (payer typed, not picked): exact resolution against the Stedi payer
-    // network. Unmatched → surfaced as "payer not matched" (never a guessed payer).
+    // DETERMINISTIC RESOLUTION of the typed payer name (no manual selection). Resolve
+    // to the correct STEDI payer ID in two ordered, deterministic steps:
+    //   1) the local Stedi payer directory (fast, offline — exact/alias/shorthand), then
+    //   2) if the directory has no match, the LIVE Stedi Payer Network API in real time.
+    // Unmatched by BOTH → surfaced as "payer not matched" (never a guessed payer).
     if (!ins.payer) return { skipped: 'no_payer' };
     payer = await resolvePayer(ins.payer, { state: fac.state });
+    if (!payer) {
+      try { payer = await searchPayer(ins.payer); } catch { payer = null; }
+      if (payer) stediLog('payer.resolved_live', { stediId: payer.stediId });
+    }
   }
   if (!payer || !payer.stediId) return { skipped: 'payer_unresolved' };
 

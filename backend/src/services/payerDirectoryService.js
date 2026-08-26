@@ -230,6 +230,13 @@ export async function resolvePayer(queryText, opts = {}) {
   // surface it, rather than routing to a wrong-state Medicare payer.
   if (isMedicarePartB(q)) return resolveMedicarePartB(opts.state);
 
+  // Deterministic shorthand expansion: a KNOWN abbreviation (e.g. "UHC" → United
+  // Healthcare, "BCBS" → Blue Cross Blue Shield) maps to its canonical brand and is
+  // resolved EXACTLY. A fixed table — never a fuzzy guess — so the same input always
+  // yields the same Stedi ID.
+  const syn = PAYER_SYNONYMS[normId(q)];
+  if (syn) { const r = await resolveExact(syn); if (r) return r; }
+
   const words = q.split(/\s+/);
   for (let n = words.length; n >= 1; n--) {
     const sub = words.slice(0, n).join(' ');

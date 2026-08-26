@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Modal from './Modal.jsx';
 import { useToast } from './Toast.jsx';
-import { patientsApi, payersApi, toApiError } from '../lib/api.js';
+import { patientsApi, toApiError } from '../lib/api.js';
 import BenefitsVerification from './BenefitsVerification.jsx';
 
 const EMPTY = {
@@ -50,106 +50,28 @@ function Field({ label, value, onChange, type = 'text', required, options, place
 }
 
 /**
- * Insurance-payer search — an INLINE, provider-focused typeahead (no popup). The
- * provider types a payer name, a payer ID, or shorthand (e.g. "UHC") directly in the
- * field and picks from a live-ranked dropdown. Eligibility-supported payers are
- * flagged "Real-time". Picking stores the canonical name + Stedi payer ID.
+ * Insurance payer — a plain, DETERMINISTIC entry field (no dropdown, no selection).
+ * The provider types the payer name exactly as written on the insurance card; the
+ * system resolves it to the correct Stedi payer + ID automatically at verification
+ * (a fixed, deterministic mapping — the same entry always routes to the same payer).
+ * Editing the payer clears any previously matched ID so it is re-resolved fresh.
  */
 function PayerSearch({ value, payerId, onPick }) {
-  const [term, setTerm] = useState(value || '');
-  const [results, setResults] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [open, setOpen] = useState(false);
-  const [active, setActive] = useState(0);
-  const boxRef = useRef(null);
-  const tRef = useRef(null);
-
-  // Keep the field text in sync when the selected payer changes from outside.
-  useEffect(() => { setTerm(value || ''); }, [value]);
-
-  // Debounced search as the provider types (only while the dropdown is open).
-  useEffect(() => {
-    if (!open) return undefined;
-    const q = term.trim();
-    if (q.length < 2) { setResults([]); setLoading(false); return undefined; }
-    setLoading(true);
-    clearTimeout(tRef.current);
-    tRef.current = setTimeout(async () => {
-      try { const { data } = await payersApi.search(q); setResults(data.payers || []); setActive(0); }
-      catch { setResults([]); } finally { setLoading(false); }
-    }, 200);
-    return () => clearTimeout(tRef.current);
-  }, [term, open]);
-
-  // Close the dropdown on an outside click.
-  useEffect(() => {
-    if (!open) return undefined;
-    const onDoc = (e) => { if (boxRef.current && !boxRef.current.contains(e.target)) setOpen(false); };
-    document.addEventListener('mousedown', onDoc);
-    return () => document.removeEventListener('mousedown', onDoc);
-  }, [open]);
-
-  const pick = (p) => { onPick(p); setTerm(p.name || ''); setOpen(false); setResults([]); };
-  const clear = () => { onPick({ name: '', stediId: '' }); setTerm(''); setResults([]); setOpen(false); };
-
-  const onKey = (e) => {
-    if (e.key === 'ArrowDown') { e.preventDefault(); setOpen(true); setActive((a) => Math.min(a + 1, results.length - 1)); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); setActive((a) => Math.max(a - 1, 0)); }
-    else if (e.key === 'Enter' && open && results[active]) { e.preventDefault(); pick(results[active]); }
-    else if (e.key === 'Escape') { setOpen(false); }
-  };
-
   return (
-    <div className="field" ref={boxRef}>
+    <div className="field">
       <label>Payer</label>
-      <div className={`payer-inline ${open ? 'is-open' : ''}`}>
-        <span className="payer-inline-ic" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.2-3.2" /></svg>
-        </span>
-        <input
-          className="input payer-inline-input"
-          value={term}
-          autoComplete="off"
-          placeholder="Search payer — name, ID, or shorthand (e.g. UHC)…"
-          onChange={(e) => { setTerm(e.target.value); setOpen(true); }}
-          onFocus={() => { if (term.trim().length >= 2) setOpen(true); }}
-          onKeyDown={onKey}
-        />
-        {loading ? <span className="spinner dark payer-inline-spin" /> : (term || payerId) ? (
-          <button type="button" className="payer-inline-clear" title="Clear payer" onClick={clear}>×</button>
-        ) : null}
-        {open && term.trim().length >= 2 && (
-          <div className="payer-inline-menu">
-            {results.length === 0 && !loading ? (
-              <div className="payer-inline-empty">No matching payer — try a shorter name or the payer ID.</div>
-            ) : results.map((p, idx) => (
-              <button
-                type="button" key={p.stediId}
-                className={`payer-inline-row ${idx === active ? 'is-active' : ''}`}
-                onMouseEnter={() => setActive(idx)}
-                onMouseDown={(e) => { e.preventDefault(); pick(p); }}
-              >
-                <span className="payer-inline-av" aria-hidden="true">{payerMonogram(p.name)}</span>
-                <span className="payer-inline-main">
-                  <span className="payer-inline-nm">{p.name}</span>
-                  <span className="payer-inline-sub">Payer ID · <b>{p.stediId}</b>{p.primaryPayerId ? ` · Plan ${p.primaryPayerId}` : ''}</span>
-                </span>
-                {p.eligibilitySupported ? <span className="payer-inline-badge"><span className="payer-inline-dot" />Real-time</span> : null}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-      {payerId ? <div className="payer-id-chip">Payer ID: <b>{payerId}</b></div> : null}
+      <input
+        className="input"
+        value={value || ''}
+        autoComplete="off"
+        placeholder="Insurance payer — e.g. UnitedHealthcare, Cigna, Aetna, Medicare"
+        onChange={(e) => onPick({ name: e.target.value, stediId: '' })}
+      />
+      <span className="hint">Matched to the Stedi payer network automatically at verification — no search needed.</span>
+      {payerId ? <div className="payer-id-chip">Matched payer ID: <b>{payerId}</b></div> : null}
     </div>
   );
 }
-
-const payerMonogram = (name) => {
-  const w = String(name || '').replace(/[^A-Za-z0-9 ]/g, ' ').trim().split(/\s+/).filter(Boolean);
-  if (!w.length) return '?';
-  return (w.length >= 2 ? w[0][0] + w[1][0] : w[0].slice(0, 2)).toUpperCase();
-};
 
 // Section-header icons (thin-line, enterprise).
 const SEC_ICONS = {
