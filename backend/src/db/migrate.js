@@ -123,6 +123,16 @@ export async function runMigrations() {
   await pool.query(
     "ALTER TABLE `appointments` MODIFY COLUMN `status` ENUM('scheduled','checked_in','checked_out','cancelled','completed') NOT NULL DEFAULT 'scheduled'",
   );
+  // System settings (super-admin controlled feature flags, e.g. whether real-time
+  // eligibility verification is enabled EHR-wide). Small key/value store, not PHI.
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS \`app_settings\` (
+       \`setting_key\` VARCHAR(64) NOT NULL PRIMARY KEY,
+       \`setting_value\` JSON NOT NULL,
+       \`updated_by\` BIGINT UNSIGNED NULL,
+       \`updated_at\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+  );
   // Rotating key material (JWT signing secrets + gateway internal key). A single
   // persisted row so automatic rotation survives restarts without invalidating any
   // live session or breaking gateway↔API proxying. Not PHI; secrets only.

@@ -150,7 +150,14 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
       setAutoState('idle');
       setAmending(false); setAmendReason('');
       setActive(data.note);
-      setContent({ vitals: data.note.content?.vitals || {}, sections: data.note.content?.sections || {}, prescriptions: data.note.content?.prescriptions || [] });
+      setContent({
+        vitals: data.note.content?.vitals || {},
+        sections: data.note.content?.sections || {},
+        prescriptions: data.note.content?.prescriptions || [],
+        // Persist the template's clinical section order so the downloaded record
+        // renders in the exact provider order (dynamic, per note type).
+        sectionOrder: (TEMPLATES[data.note.noteType] || []).map((s) => s.key),
+      });
       setReason(data.note.reason || '');
       setTab('note');
     } catch (e) { toast.error(toApiError(e).message); }
@@ -160,13 +167,14 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
     setPicking(false);
     setBusy(true);
     try {
-      const { data } = await encountersApi.createNote(encounter.encounterUuid, { noteType, content: { vitals: {}, sections: {}, prescriptions: [] } });
+      const order = (TEMPLATES[noteType] || []).map((s) => s.key);
+      const { data } = await encountersApi.createNote(encounter.encounterUuid, { noteType, content: { vitals: {}, sections: {}, prescriptions: [], sectionOrder: order } });
       // Show the template immediately (single round-trip) — refresh the tab list
       // in the background so there's no perceived wait.
       skipSave.current = true;
       setAutoState('idle');
       setActive(data.note);
-      setContent({ vitals: {}, sections: {}, prescriptions: [] });
+      setContent({ vitals: {}, sections: {}, prescriptions: [], sectionOrder: order });
       setReason('');
       setTab('note');
       loadNotes();
@@ -342,15 +350,8 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
       )}
     </>}>
       <div className="nt2">
-        {/* Encounter identity band — Patient · MRN · Encounter ID · DOS */}
-        <div className="nt2-info">
-          <span className="nt2-info-nm">{encounter.patientName || 'Patient'}</span>
-          <span className="nt2-info-item"><b>MRN</b> {encounter.mrn || '—'}</span>
-          <span className="nt2-info-item"><b>Encounter ID</b> {encNo(encounter.encounterNo)}</span>
-          <span className="nt2-info-item"><b>DOS</b> {usDate(encounter.date)}</span>
-        </div>
-        {/* Top toolbar: note tabs (horizontal) + New note (top-right) */}
-        <div className="nt2-bar">
+        {/* Slim command bar: note pills · patient identity · status · New note */}
+        <div className="nt2-top">
           <div className="nt2-tabs">
             {notes.map((n) => (
               <button key={n.uuid} type="button" className={`nt2-tab ${active?.uuid === n.uuid ? 'is-on' : ''}`} onClick={() => openNote(n.uuid)}>
@@ -359,6 +360,18 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
               </button>
             ))}
           </div>
+          <div className="nt2-ident">
+            <span className="nt2-ident-nm">{encounter.patientName || 'Patient'}</span>
+            <span className="nt2-ident-meta">
+              <span><b>MRN</b> {encounter.mrn || '—'}</span>
+              <span><b>Enc</b> {encNo(encounter.encounterNo)}</span>
+              <span><b>DOS</b> {usDate(encounter.date)}</span>
+            </span>
+          </div>
+          <span className="spacer" />
+          {active && (signed
+            ? <span className="nt-status-pill signed"><span className="nt-signed-dot" />Signed · {active.signedByName || 'MD'}</span>
+            : <span className="nt-status-pill draft">Draft</span>)}
           <button className="btn sm nt2-new" onClick={() => setPicking(true)}>+ New note</button>
         </div>
 
@@ -371,19 +384,12 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
             </div>
           ) : (
             <>
-              <div className="nt-doc-head">
-                <div>
-                  <div className="nt-doc-title">{NOTE_TYPES[active.noteType]?.label}</div>
-                  <div className="nt-doc-cat">{encounter.patientName} · MRN {encounter.mrn || '—'} · DOS {usDate(encounter.date)} · {NOTE_TYPES[active.noteType]?.category} · CPT {NOTE_TYPES[active.noteType]?.cpt}</div>
+              <div className="nt-subbar">
+                <div className="nt-subtabs">
+                  <button className={`nt-tab ${tab === 'note' ? 'is-on' : ''}`} onClick={() => setTab('note')}>Clinical Note</button>
+                  <button className={`nt-tab ${tab === 'rx' ? 'is-on' : ''}`} onClick={() => setTab('rx')}>Prescriptions{content.prescriptions.length ? ` (${content.prescriptions.length})` : ''}</button>
                 </div>
-                {signed
-                  ? <span className="nt-signed"><span className="nt-signed-dot" />Signed by {active.signedByName || 'MD'} · Ready for billing</span>
-                  : <span className="nt-draft-flag">Draft</span>}
-              </div>
-
-              <div className="nt-tabs">
-                <button className={`nt-tab ${tab === 'note' ? 'is-on' : ''}`} onClick={() => setTab('note')}>Clinical Note</button>
-                <button className={`nt-tab ${tab === 'rx' ? 'is-on' : ''}`} onClick={() => setTab('rx')}>Prescriptions{content.prescriptions.length ? ` (${content.prescriptions.length})` : ''}</button>
+                <span className="nt-subcat">{NOTE_TYPES[active.noteType]?.category} · CPT {NOTE_TYPES[active.noteType]?.cpt}</span>
               </div>
 
               {tab === 'note' ? (

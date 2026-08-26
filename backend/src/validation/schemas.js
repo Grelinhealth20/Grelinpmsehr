@@ -231,6 +231,9 @@ const noteContentSchema = z
     vitals: vitalsSchema.optional(),
     sections: z.record(z.string().max(20000)).optional(),
     prescriptions: z.array(prescriptionItem).max(40).optional(),
+    // The template's clinical section order — so the record renders in the exact
+    // provider order for this note type (dynamic per note type).
+    sectionOrder: z.array(z.string().max(64)).max(80).optional(),
   })
   .strict()
   .optional();
@@ -316,3 +319,8 @@ export const facilityStatusSchema = z.object({ status: z.enum(['active', 'inacti
 export const assignProviderSchema = z.object({ providerUuid: z.string().uuid() }).strict();
 export const providerUuidParam = z.object({ uuid: z.string().uuid(), providerUuid: z.string().uuid() });
 export const setUserFacilitiesSchema = z.object({ facilityUuids: z.array(z.string().uuid()).max(100) }).strict();
+
+// System settings (super-admin feature flags). Only known boolean flags accepted.
+export const updateSettingsSchema = z
+  .object({ eligibilityEnabled: z.boolean().optional() })
+  .strict();

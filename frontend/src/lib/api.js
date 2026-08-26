@@ -145,6 +145,13 @@ export const auditApi = {
   list: (params) => api.get('/audit', { params }),
 };
 
+// --- System settings (feature flags) ---------------------------------------
+// GET readable by any authenticated user; PATCH is super-admin only (server-enforced).
+export const settingsApi = {
+  get: () => api.get('/settings'),
+  update: (patch) => api.patch('/settings', patch),
+};
+
 // --- Payer directory (Stedi network) search --------------------------------
 export const payersApi = {
   search: (q) => api.get('/payers/search', { params: { q } }),

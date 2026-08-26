@@ -99,7 +99,7 @@ export async function createFacility(data, { adminId } = {}) {
   let logoKey = null;
   const parsed = parseLogoDataUri(data.logo);
   if (parsed && s3Enabled()) {
-    try { logoKey = await uploadFacilityLogo(uuid, parsed.buffer, parsed.contentType, parsed.ext); } catch { logoKey = null; }
+    try { logoKey = await uploadFacilityLogo({ facilityUuid: uuid, facilityName: data.name }, parsed.buffer, parsed.contentType, parsed.ext); } catch { logoKey = null; }
   }
   await execute(
     `INSERT INTO facilities (uuid, npi, name, address, city, state, zip, phone, taxonomy, logo, status, source, verified_by, created_by)
@@ -128,7 +128,7 @@ export async function updateFacility(uuid, data) {
     const parsed = parseLogoDataUri(data.logo);
     if (parsed && s3Enabled()) {
       let key = null;
-      try { key = await uploadFacilityLogo(uuid, parsed.buffer, parsed.contentType, parsed.ext); } catch { key = null; }
+      try { key = await uploadFacilityLogo({ facilityUuid: uuid, facilityName: data.name || row.name }, parsed.buffer, parsed.contentType, parsed.ext); } catch { key = null; }
       if (key) { sets.push('logo = :logo'); params.logo = key; }
       if (key && row.logo && row.logo !== key) { try { await deleteObject(row.logo); } catch { /* best-effort */ } }
     } else if (!data.logo) { // cleared

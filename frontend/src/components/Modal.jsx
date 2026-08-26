@@ -18,7 +18,7 @@ export default function Modal({ title, onClose, children, footer, width = 460, s
   // Render into <body> so the fixed overlay escapes any ancestor stacking/overflow
   // context (e.g. the sticky app header) and always covers the whole viewport.
   return createPortal(
-    <div className="modal-overlay" onMouseDown={onClose}>
+    <div className={`modal-overlay ${isFull ? 'modal-overlay--full' : ''}`} onMouseDown={onClose}>
       <div
         className={`modal ${isFull ? 'modal--full' : ''}`}
         style={isFull ? undefined : { maxWidth: width }}

@@ -1,12 +1,25 @@
 import { createContext, useContext, useEffect, useState, useCallback } from 'react';
-import { authApi, setCsrfToken, toApiError } from '../lib/api.js';
+import { authApi, settingsApi, setCsrfToken, toApiError } from '../lib/api.js';
 
 const AuthContext = createContext(null);
+
+const DEFAULT_SETTINGS = { eligibilityEnabled: true };
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [mustReset, setMustReset] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+
+  // Load system feature flags (eligibility on/off, …). Never blocks the app —
+  // defaults keep everything enabled if the fetch fails.
+  const refreshSettings = useCallback(async () => {
+    try {
+      const { data } = await settingsApi.get();
+      setSettings({ ...DEFAULT_SETTINGS, ...(data.settings || {}) });
+      return data.settings;
+    } catch { return null; }
+  }, []);
 
   // Restore an existing session on load (cookies are httpOnly; ask the server).
   useEffect(() => {
@@ -20,6 +33,7 @@ export function AuthProvider({ children }) {
         if (!active) return;
         setUser(data.user);
         setMustReset(!!data.mustResetPassword);
+        refreshSettings();
       } catch {
         if (active) setUser(null);
       } finally {
@@ -36,8 +50,9 @@ export function AuthProvider({ children }) {
     setCsrfToken(data.csrfToken);
     setUser(data.user);
     setMustReset(!!data.mustResetPassword);
+    refreshSettings();
     return data;
-  }, []);
+  }, [refreshSettings]);
 
   const logout = useCallback(async () => {
     try {
@@ -57,7 +72,10 @@ export function AuthProvider({ children }) {
     setMustReset(false);
   }, []);
 
-  const value = { user, mustReset, loading, login, logout, completePasswordReset, toApiError };
+  const value = {
+    user, mustReset, loading, login, logout, completePasswordReset, toApiError,
+    settings, eligibilityEnabled: settings.eligibilityEnabled !== false, refreshSettings, setSettings,
+  };
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 

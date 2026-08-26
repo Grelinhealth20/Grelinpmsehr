@@ -175,6 +175,10 @@ button { font-family: inherit; }
 .modal-head h3 { font-size: 17px; color: var(--c-dark-blue); }
 .modal-x { min-width: 34px; }
 .modal-foot { gap: 10px; padding: 16px 22px; border-top: 1.5px solid var(--c-line); justify-content: flex-end; align-items: center; }
+/* Full-window editor: slim the chrome so the writing area gets the space. */
+.modal--full .modal-head { padding: 10px clamp(16px, 2.4vw, 30px); }
+.modal--full .modal-head h3 { font-size: 15px; }
+.modal--full .modal-foot { padding: 9px clamp(16px, 2.4vw, 30px); }
 .modal {
   position: relative; width: 100%; max-width: 460px; max-height: 92vh; background: #fff; border-radius: var(--r-xl);
   border: 1.5px solid rgba(9, 17, 33, 0.12);
@@ -189,15 +193,19 @@ button { font-family: inherit; }
   background-size: 200% 100%; animation: modalSheen 8s ease-in-out infinite;
 }
 @keyframes modalSheen { 0%, 100% { background-position: 0% 0; } 50% { background-position: 100% 0; } }
-/* Full-window popup (content-heavy forms) */
-.modal--full { max-width: 1360px; width: 96vw; height: 94vh; max-height: 94vh; }
+/* Full-window popup — fills the whole viewport (true full screen, no grey margin). */
+.modal-overlay--full { padding: 0; }
+.modal--full { max-width: 100vw; width: 100vw; height: 100vh; max-height: 100vh; border-radius: 0; border: none; }
 .modal > .row { flex-shrink: 0; }
 .modal > .row h3 { color: var(--c-dark-blue); }
 .modal-body { padding: 22px; overflow-y: auto; flex: 1; min-height: 0; }
 /* Centered content column so wide full-window forms stay readable */
 .modal--full .modal-body { padding: 26px 0; }
 .modal--full .modal-body > * { max-width: 1040px; margin-left: auto; margin-right: auto; padding-left: clamp(20px, 4vw, 48px); padding-right: clamp(20px, 4vw, 48px); }
+/* The notes editor manages its OWN single scroll region — the modal body must not
+   scroll (kills the double scrollbar) and must not pad/center the full-bleed layout. */
+.modal-body:has(> .nt2) { padding: 0; overflow: hidden; }
+.modal-body:has(> .nt2) > .nt2 { max-width: none; padding: 0; margin: 0; }
 @media (prefers-reduced-motion: reduce) { .modal::before { animation: none; } }
-@media (max-width: 640px) { .modal--full { width: 100vw; height: 100vh; max-height: 100vh; border-radius: 0; } }
 @keyframes fade { from { opacity: 0; } }
 @keyframes pop { from { opacity: 0; transform: translateY(12px) scale(0.98); } }

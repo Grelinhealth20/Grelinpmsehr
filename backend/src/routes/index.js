@@ -9,6 +9,7 @@ import encounterRoutes from './encounterRoutes.js';
 import providerRoutes from './providerRoutes.js';
 import facilityRoutes from './facilityRoutes.js';
 import payerRoutes from './payerRoutes.js';
+import settingsRoutes from './settingsRoutes.js';
 
 const router = Router();
 
@@ -24,5 +25,6 @@ router.use('/encounters', encounterRoutes);
 router.use('/facilities', facilityRoutes);
 router.use('/payers', payerRoutes);
 router.use('/audit', auditRoutes);
+router.use('/settings', settingsRoutes);
 
 export default router;

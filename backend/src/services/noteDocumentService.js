@@ -115,8 +115,8 @@ const SECTION_ORDER = [
 
 // Note-type-specific section headings (mirror the UI templates so the Word
 // record reads identically to what the provider saw on screen).
-const NOTE_LABEL_OVERRIDES = {
-  hp_admission: { chiefComplaint: 'Reason for Admission', results: 'Diagnostic Data on Admission', medications: 'Admission Medication Reconciliation', functionalStatus: 'Functional / Rehabilitation Status' },
+export const NOTE_LABEL_OVERRIDES = {
+  hp_admission: { chiefComplaint: 'Reason for Admission', results: 'Diagnostic Data on Admission', medications: 'Admission Medication Reconciliation', functionalStatus: 'Functional / Rehabilitation Status', prognosis: 'Rehabilitation Potential & Prognosis' },
   progress: { chiefComplaint: 'Reason for Visit', ros: 'Focused Review of Systems', exam: 'Focused Physical Examination' },
   acute_visit: { chiefComplaint: 'Presenting Problem', ros: 'Focused Review of Systems', exam: 'Focused Physical Examination' },
   change_in_condition: { exam: 'Focused Physical Examination' },
@@ -127,7 +127,7 @@ const NOTE_LABEL_OVERRIDES = {
   lab_imaging: { chiefComplaint: 'Reason for Review', results: 'Results Reviewed & Interpretation' },
   wound_care: { chiefComplaint: 'Reason for Wound Care', interval: 'Wound Progress Since Last Visit', exam: 'Relevant Physical Examination' },
   advance_care: { chiefComplaint: 'Reason for Advance Care Planning Discussion', timeSpent: 'Total Time Spent (required for 99497/99498)' },
-  discharge: { hospitalCourse: 'Summary of SNF Stay', functionalStatus: 'Functional Status at Discharge' },
+  discharge: { hospitalCourse: 'Summary of SNF Stay', functionalStatus: 'Functional Status at Discharge', careCoordination: 'Transition of Care / Handoff' },
   procedure_note: { timeSpent: 'Total Procedure Time & Attestation' },
   behavioral_health: { chiefComplaint: 'Reason for Psychiatric Visit', interval: 'Interval / Symptom Status', medications: 'Current Psychotropic Medications', assessment: 'Psychiatric Assessment (DSM-5 / ICD-10)' },
   cognitive_care: { chiefComplaint: 'Reason for Cognitive Assessment', functionalStatus: 'Functional Assessment (ADL / IADL)', medications: 'Medication Reconciliation (High-Risk Medications)', timeSpent: 'Total Time (99483 is time-based) & Attestation' },
@@ -209,7 +209,13 @@ export async function buildNoteDocx({ patient, encounterDate, note, signerName, 
 
   const overrides = NOTE_LABEL_OVERRIDES[note.noteType] || {};
   const sections = note.content?.sections || {};
-  for (const key of SECTION_ORDER) {
+  // Render in the note's OWN template order (matches the editor + the PDF exactly);
+  // fall back to the canonical clinical order for legacy notes without a stored order.
+  const storedOrder = note.content?.sectionOrder;
+  const order = Array.isArray(storedOrder) && storedOrder.length
+    ? [...storedOrder, ...SECTION_ORDER.filter((k) => !storedOrder.includes(k))]
+    : SECTION_ORDER;
+  for (const key of order) {
     const val = sections[key];
     if (val && String(val).trim()) { children.push(heading(overrides[key] || SECTION_LABELS[key] || key)); children.push(...body(val)); }
   }

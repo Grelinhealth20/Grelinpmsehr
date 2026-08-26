@@ -6,14 +6,16 @@ import { logger } from '../config/logger.js';
 /**
  * S3 access for patient documents. Credentials live only on the server; the
  * browser never sees them. Every object is stored server-side-encrypted (SSE)
- * under a strict HIERARCHICAL key prefix:
+ * under a strict, HUMAN-READABLE, HIERARCHICAL key prefix:
  *
- *     facilities/{facilityUuid}/providers/{providerUuid}/patients/{patientUuid}/
+ *     facilities/{facility-name}__{id}/providers/{provider-name}__{id}/patients/{patient-name}__{id}/
  *
- * so isolation is enforced by the key space (facility → provider → patient) as
- * well as by DB scoping in the controllers. A patient's records can never sit
- * outside their provider's folder, which can never sit outside their facility's
- * folder — preventing cross-facility / cross-provider leakage at the storage tier.
+ * Each level is named after the real facility / provider / patient, with a short
+ * unique id suffix so two same-named entities can NEVER collide (which would leak
+ * data across patients). Isolation is enforced by the key space (facility →
+ * provider → patient) AND by DB scoping in the controllers — a patient's records
+ * can never sit outside their provider's folder, which can never sit outside their
+ * facility's folder.
  */
 const client = config.s3.enabled
   ? new S3Client({
@@ -32,23 +34,43 @@ const seg = (v, fallback) => {
   const s = String(v || '').trim().replace(/[^A-Za-z0-9._-]/g, '');
   return s || fallback;
 };
+// Human-readable slug of a name: lowercase, hyphenated, ASCII-only, length-capped.
+const slug = (v, max = 48) => String(v || '').trim().toLowerCase()
+  .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, max).replace(/-+$/g, '');
+// First 8 hex of the uuid — the collision-proof suffix.
+const shortId = (uuid) => String(uuid || '').replace(/[^a-f0-9]/gi, '').slice(0, 8).toLowerCase();
+/**
+ * A readable, collision-safe folder segment: "<name-slug>__<short-uuid>".
+ * The name makes the folder human-navigable; the id guarantees uniqueness so two
+ * same-named facilities/providers/patients never share a folder. Falls back to the
+ * uuid alone when no name is available (legacy callers / missing data).
+ */
+const nameSeg = (name, uuid, fallback) => {
+  const id = shortId(uuid);
+  const s = slug(name);
+  if (s && id) return `${s}__${id}`;
+  if (id) return id;
+  return seg(uuid, fallback);
+};
 
-/** The facility folder prefix. */
-export function facilityPrefix(facilityUuid) {
-  return `${MASTER_PREFIX}${seg(facilityUuid, 'unassigned')}/`;
+/** The facility folder prefix. Accepts a uuid string OR a ctx with facilityName. */
+export function facilityPrefix(ctx) {
+  const c = typeof ctx === 'string' ? { facilityUuid: ctx } : (ctx || {});
+  return `${MASTER_PREFIX}${nameSeg(c.facilityName, c.facilityUuid, 'unassigned')}/`;
 }
 /** The provider folder prefix inside a facility. */
-export function providerPrefix({ facilityUuid, providerUuid }) {
-  return `${facilityPrefix(facilityUuid)}providers/${seg(providerUuid, 'unknown')}/`;
+export function providerPrefix(ctx) {
+  const c = ctx || {};
+  return `${facilityPrefix(c)}providers/${nameSeg(c.providerName, c.providerUuid, 'unknown')}/`;
 }
 /**
- * All objects for a patient live under this prefix — the patient's "folder",
- * nested under their provider, nested under their facility.
- * Accepts a context object { patientUuid, providerUuid, facilityUuid }.
+ * All objects for a patient live under this prefix — the patient's named "folder",
+ * nested under their provider, nested under their facility. Accepts a context
+ * { patientUuid, patientName, providerUuid, providerName, facilityUuid, facilityName }.
  */
 export function patientPrefix(ctx) {
   const c = typeof ctx === 'string' ? { patientUuid: ctx } : (ctx || {});
-  return `${providerPrefix(c)}patients/${seg(c.patientUuid, 'unknown')}/`;
+  return `${providerPrefix(c)}patients/${nameSeg(c.patientName, c.patientUuid, 'unknown')}/`;
 }
 
 /**
@@ -101,10 +123,11 @@ export async function uploadPatientObject(ctx, key, buffer, contentType) {
   return fullKey;
 }
 
-/** Upload a facility logo into that facility's S3 folder → returns the object key. */
-export async function uploadFacilityLogo(facilityUuid, buffer, contentType, ext) {
+/** Upload a facility logo into that facility's named S3 folder → returns the object
+ *  key. Accepts a uuid string OR a ctx { facilityUuid, facilityName }. */
+export async function uploadFacilityLogo(facilityCtx, buffer, contentType, ext) {
   if (!client) throw new Error('S3 is not configured.');
-  const key = `${facilityPrefix(facilityUuid)}branding/logo.${ext || 'png'}`;
+  const key = `${facilityPrefix(facilityCtx)}branding/logo.${ext || 'png'}`;
   await client.send(new PutObjectCommand({
     Bucket: config.s3.bucket,
     Key: key,

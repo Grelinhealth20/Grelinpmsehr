@@ -12,6 +12,7 @@ import { findProviderIdByUuid } from '../services/userService.js';
 import { ensureEncounter } from '../services/encounterService.js';
 import { verifyAppointmentEligibility } from '../services/eligibilityWorkflow.js';
 import { getAppointmentCheck } from '../services/eligibilityService.js';
+import { isEligibilityEnabled } from '../services/settingsService.js';
 import { schedulingScope } from '../services/accessScope.js';
 import { isProviderInUserFacilities, isPatientInUserFacilities } from '../services/facilityService.js';
 import { recordAudit } from '../services/auditService.js';
@@ -80,6 +81,10 @@ async function auditedEligibility(req, apptRow, { trigger, manual = false, opts 
   const userAgent = req.get('user-agent');
   const entityId = apptRow.uuid;
   const base = { actorUserId, action: 'appointment.eligibility.verify', entityType: 'appointment', entityId, ip, userAgent };
+  // Feature-flag gate: when a super admin has disabled eligibility EHR-wide, no
+  // payer call is made on any trigger (create / update / manual). Silent no-op for
+  // the automatic paths; the manual endpoint returns an explicit 403 to the caller.
+  if (!(await isEligibilityEnabled())) return { skipped: 'eligibility_disabled' };
   try {
     const r = await verifyAppointmentEligibility(apptRow, opts);
     // These outcomes make NO payer call (benefits reused / cap reached) — no audit noise.
@@ -213,6 +218,7 @@ export async function verifyEligibility(req, res, next) {
   try {
     const row = await getRawByUuid(req.params.uuid);
     await assertCanManage(req, row);
+    if (!(await isEligibilityEnabled())) return res.status(403).json({ error: 'Eligibility verification is currently disabled by your administrator.', code: 'ELIGIBILITY_DISABLED' });
     // A manual click is a deliberate user action → force a fresh check (this is the
     // ONLY way a with-benefits appointment re-calls the payer; automatic paths never do).
     const r = await auditedEligibility(req, row, { trigger: 'manual', manual: true, opts: { force: true } });

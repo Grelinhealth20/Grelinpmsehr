@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import Modal from './Modal.jsx';
 import { appointmentsApi, toApiError } from '../lib/api.js';
+import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from './Toast.jsx';
 
 /**
@@ -21,6 +22,7 @@ const fmtDate = (d) => { if (!d) return '—'; const [y, m, day] = String(d).sli
 
 export default function AppointmentEligibilityModal({ appointment, onClose, onChanged }) {
   const toast = useToast();
+  const { eligibilityEnabled } = useAuth();
   const [check, setCheck] = useState(undefined); // undefined = loading, null = none
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
@@ -60,11 +62,13 @@ export default function AppointmentEligibilityModal({ appointment, onClose, onCh
           {/* Opening never calls the payer — benefits are read from storage. This button
               is the ONLY trigger: a deliberate manual re-verify (subtle when benefits
               already exist, prominent to retry after a payer outage or first check). */}
-          {check !== undefined && (
+          {check !== undefined && (eligibilityEnabled ? (
             <button className={`btn ${check && check.status !== 'error' ? 'ghost' : ''}`} onClick={verify} disabled={busy}>
               {busy ? 'Verifying…' : (check?.status === 'error' ? 'Retry verification' : check ? 'Re-verify' : 'Verify now')}
             </button>
-          )}
+          ) : (
+            <span className="bx-disabled-note" style={{ margin: 0 }}>Eligibility verification is disabled by your administrator.</span>
+          ))}
         </>
       )}
     >

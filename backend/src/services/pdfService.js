@@ -1,5 +1,5 @@
 import PDFDocument from 'pdfkit';
-import { NOTE_TITLES, SECTION_LABELS } from './noteDocumentService.js';
+import { NOTE_TITLES, SECTION_LABELS, NOTE_LABEL_OVERRIDES } from './noteDocumentService.js';
 
 /**
  * Enterprise PDF generator for downloadable EHR documents — clinical notes (medical
@@ -202,10 +202,18 @@ export function buildNotePdf({ facility = {}, logoBuffer = null, patient = {}, n
   if (vitLine.length) { sectionBar(doc, 'Vital Signs'); doc.font('Helvetica').fontSize(10).fillColor(INK).text(vitLine.join('     '), ML(doc), doc.y, { width: CW(doc) }); doc.moveDown(0.5); }
 
   const sections = content.sections || {};
-  const keys = Object.keys(sections).filter((k) => S(sections[k]).trim());
+  // Render in the note's own template order (provider perspective) when present;
+  // fall back to whatever key order the object carries.
+  const order = Array.isArray(content.sectionOrder) && content.sectionOrder.length
+    ? [...content.sectionOrder, ...Object.keys(sections).filter((k) => !content.sectionOrder.includes(k))]
+    : Object.keys(sections);
+  const keys = order.filter((k) => S(sections[k]).trim());
   if (keys.length) {
+    // Use the note-type's own header overrides so the PDF headers read exactly like
+    // the editor and the Word document (e.g. "Reason for Admission", not "Chief Complaint").
+    const overrides = NOTE_LABEL_OVERRIDES[note.noteType] || {};
     sectionBar(doc, 'Clinical Note');
-    for (const k of keys) paragraph(doc, SECTION_LABELS[k] || k, sections[k]);
+    for (const k of keys) paragraph(doc, overrides[k] || SECTION_LABELS[k] || k, sections[k]);
   }
 
   const rx = (content.prescriptions || []).filter((p) => p.drug);
@@ -283,7 +291,9 @@ export function buildBenefitsPdf({ facility = {}, logoBuffer = null, patient = {
   kvGrid(doc, [
     ['Status', s.statusLabel || s.status], ['Plan', s.plan?.name], ['Plan type', s.plan?.type],
     ['Payer', `${s.payer?.name || ''}${s.payer?.id ? ` · ${s.payer.id}` : ''}`],
-    ['Effective', usDate(s.plan?.begin)], ['Through', usDate(s.plan?.end)], ['Date of service', usDate(s.plan?.serviceDate)],
+    ['Effective date', usDate(s.plan?.begin)],
+    [s.status === 'inactive' ? 'Termination date' : 'Through', usDate(s.plan?.end)],
+    ['Date of service', usDate(s.plan?.serviceDate)],
   ], 2);
 
   const m = s.member || {};

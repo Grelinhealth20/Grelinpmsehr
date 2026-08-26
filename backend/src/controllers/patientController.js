@@ -12,6 +12,7 @@ import {
 import { extractDocument, ocrEnabled } from '../services/docExtractService.js';
 import { saveCheck, listChecks, mergeVerificationIntoPatient } from '../services/eligibilityService.js';
 import { verifyPatientEligibility, autoVerifyOnCreate, latestCheckForPolicy } from '../services/eligibilityWorkflow.js';
+import { isEligibilityEnabled } from '../services/settingsService.js';
 import { stediEnabled } from '../services/stediService.js';
 import { recordAudit } from '../services/auditService.js';
 import { faceSheetPdf, benefitsPdf } from '../services/pdfExport.js';
@@ -79,8 +80,10 @@ export async function create(req, res, next) {
         catch (e) { logger.warn({ err: e.message }, 'patient folder create failed'); }
       }
       // Auto-trigger real-time eligibility (server-side). Non-fatal; writes back the
-      // confirmed Face Sheet + benefits onto the patient record.
+      // confirmed Face Sheet + benefits onto the patient record. Skipped entirely
+      // when a super admin has disabled eligibility verification EHR-wide.
       try {
+        if (!(await isEligibilityEnabled())) return;
         const row = await getRawByUuid(patient.uuid);
         if (row) {
           const r = await autoVerifyOnCreate({ patient: toPublicPatient(row), patientId: row.id, providerId: row.provider_id });
@@ -248,6 +251,7 @@ const SKIP_MSG = {
 export async function verifyNow(req, res, next) {
   try {
     const row = await ownedPatientOr404(req);
+    if (!(await isEligibilityEnabled())) return res.status(403).json({ error: 'Eligibility verification is currently disabled by your administrator.', code: 'ELIGIBILITY_DISABLED' });
     if (!stediEnabled()) return res.status(503).json({ error: 'Eligibility service is not configured.', code: 'STEDI_DISABLED' });
     const policyIndex = Number(req.body?.policyIndex) || 0;
     const procedureCodes = Array.isArray(req.body?.procedureCodes) ? req.body.procedureCodes : [];
@@ -309,6 +313,7 @@ export async function downloadBenefits(req, res, next) {
 export async function importEligibility(req, res, next) {
   try {
     const row = await ownedPatientOr404(req); // patient-scoped write
+    if (!(await isEligibilityEnabled())) return res.status(403).json({ error: 'Eligibility verification is currently disabled by your administrator.', code: 'ELIGIBILITY_DISABLED' });
     const { policyIndex = 0, response } = req.body;
     const check = await saveCheck({ patientId: row.id, policyIndex, response, createdBy: req.authUserId });
     // Payer-confirmed identity (address, group #, MBI, plan, cost-shares) corrects

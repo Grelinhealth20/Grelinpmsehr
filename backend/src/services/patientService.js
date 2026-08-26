@@ -61,7 +61,9 @@ export async function getRawByUuid(uuid) {
  */
 export async function getPatientS3Ctx(uuid) {
   const [rows] = await execute(
-    `SELECT p.uuid AS patient_uuid, u.uuid AS provider_uuid, f.uuid AS facility_uuid
+    `SELECT p.uuid AS patient_uuid, p.demographics_enc,
+        u.uuid AS provider_uuid, u.full_name_enc AS provider_name_enc,
+        f.uuid AS facility_uuid, f.name AS facility_name
        FROM patients p
        LEFT JOIN users u ON u.id = p.provider_id
        LEFT JOIN facilities f ON f.id = p.facility_id
@@ -70,7 +72,17 @@ export async function getPatientS3Ctx(uuid) {
   );
   const r = rows[0];
   if (!r) return null;
-  return { patientUuid: r.patient_uuid, providerUuid: r.provider_uuid, facilityUuid: r.facility_uuid };
+  // Resolve the REAL names so the S3 folders are facility → provider → patient by
+  // name (with a unique id suffix). Names are decrypted server-side in memory only.
+  const demo = safeParse(r.demographics_enc) || {};
+  const patientName = `${demo.firstName || ''} ${demo.lastName || ''}`.trim();
+  let providerName = '';
+  try { providerName = r.provider_name_enc ? decrypt(r.provider_name_enc) : ''; } catch { providerName = ''; }
+  return {
+    patientUuid: r.patient_uuid, patientName,
+    providerUuid: r.provider_uuid, providerName,
+    facilityUuid: r.facility_uuid, facilityName: r.facility_name || '',
+  };
 }
 
 // Approved MRN format: 7-digit numeric (1000000–9999999), unique.

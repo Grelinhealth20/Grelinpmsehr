@@ -159,7 +159,8 @@ export async function signNote(noteUuid, providerId, { content, reason } = {}) {
 async function generateSignedDoc(noteId, note, signerName) {
   const [meta] = await execute(
     `SELECT p.uuid AS patient_uuid, p.mrn, p.demographics_enc, p.facility_enc, e.encounter_no,
-        pu.uuid AS provider_uuid, f.uuid AS facility_uuid,
+        pu.uuid AS provider_uuid, pu.full_name_enc AS provider_name_enc,
+        f.uuid AS facility_uuid, f.name AS facility_name,
         DATE_FORMAT(COALESCE(e.encounter_date, a.appt_date), '%Y-%m-%d') AS dos
       FROM encounter_notes n JOIN encounters e ON e.id = n.encounter_id
       LEFT JOIN appointments a ON a.id = e.appointment_id
@@ -174,12 +175,19 @@ async function generateSignedDoc(noteId, note, signerName) {
   const demo = safeParse(m.demographics_enc) || {};
   const fac = safeParse(m.facility_enc) || {};
   const patientName = `${demo.firstName || ''} ${demo.lastName || ''}`.trim() || 'Patient';
+  let providerName = '';
+  try { providerName = m.provider_name_enc ? decrypt(m.provider_name_enc) : ''; } catch { providerName = ''; }
   await storeSignedNoteDoc({
     patientUuid: m.patient_uuid, patientName, encounterDate: m.dos || '',
     note, signerName, signedAt: note.signedAt || new Date().toISOString().slice(0, 19).replace('T', ' '),
     patient: { mrn: m.mrn, dob: demo.dob, facilityName: fac.facilityName, encounterNo: m.encounter_no },
-    // Patient's OWN provider + facility drive the S3 folder (not the signer's).
-    s3ctx: { patientUuid: m.patient_uuid, providerUuid: m.provider_uuid, facilityUuid: m.facility_uuid },
+    // Patient's OWN provider + facility drive the S3 folder (not the signer's) — by
+    // NAME with a unique id suffix so the folder path reads facility → provider → patient.
+    s3ctx: {
+      patientUuid: m.patient_uuid, patientName,
+      providerUuid: m.provider_uuid, providerName,
+      facilityUuid: m.facility_uuid, facilityName: m.facility_name || '',
+    },
   });
 }
 

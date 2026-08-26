@@ -110,26 +110,26 @@ export const SECTION_PROMPTS = {
   hpi: 'Onset, location, duration, character, aggravating/relieving factors, timing, severity, associated symptoms…',
   interval: 'Interval events since last visit; status of active problems; new complaints; nursing/therapy reports…',
   hospitalCourse: 'Transferring facility, admission/discharge dates, reason for hospitalization, treatment, and course…',
-  ros: 'Constitutional, Eyes, ENT, Cardiovascular, Respiratory, GI, GU, Musculoskeletal, Integumentary, Neurologic, Psychiatric, Endocrine, Heme/Lymph, Allergic/Immunologic…',
+  ros: 'Pertinent systems (≥10 for a comprehensive admission; focused systems for a subsequent visit): Constitutional, Eyes, ENT, Cardiovascular, Respiratory, GI, GU, Musculoskeletal, Integumentary, Neurologic, Psychiatric, Endocrine, Heme/Lymph, Allergic/Immunologic…',
   pmh: 'Chronic conditions and past diagnoses (with ICD-10 where known)…',
   psh: 'Prior surgeries with approximate dates…',
   familyHistory: 'Relevant family medical history…',
   socialHistory: 'Tobacco, alcohol, substance use; prior living situation; functional and support status…',
   medications: 'Reconciled current medications — drug, dose, route, frequency…',
   medChanges: 'Medications started, stopped, or adjusted, with clinical rationale…',
-  allergies: 'Drug / food / environmental allergies and reactions (or NKDA)…',
+  allergies: 'Drug / food / environmental allergies with reaction and severity, or NKDA (no known drug allergies)…',
   adverseEffects: 'Tolerability, adverse effects, and required monitoring…',
   vitals: 'T, HR, BP, RR, SpO₂, weight, and pain score…',
   exam: 'General, HEENT, Neck, Cardiovascular, Respiratory, Abdomen, Extremities, Skin, Neurologic, Psychiatric…',
   wound: 'Location, etiology, stage/classification, dimensions (L×W×D cm), wound bed, exudate, periwound, odor, signs of infection…',
   treatment: 'Cleansing, debridement, dressing type and change frequency, offloading, and orders…',
   results: 'Pertinent labs, imaging, and diagnostic results reviewed, with interpretation…',
-  carePlanReview: 'Interdisciplinary care plan reviewed; goals, interventions, and progress toward goals; revisions ordered…',
-  assessment: 'Problem list with clinical status (stable / improving / worsening) and diagnoses (ICD-10)…',
-  mdm: 'Number and complexity of problems addressed, data reviewed/analyzed, and risk of complications, morbidity, or mortality…',
-  plan: 'Plan per problem — diagnostics, treatment, medications, monitoring, and goals…',
-  orders: 'New or changed orders resulting from this visit — medications, labs, diagnostics, treatments, monitoring, diet, activity…',
-  notifications: 'Family, nursing, NP, and/or attending physician notified — who, when, and response (SBAR)…',
+  carePlanReview: 'Interdisciplinary care plan reviewed — measurable goals & target dates, interventions, progress toward goals, and revisions ordered; coordination with nursing, therapy, dietary, and social services…',
+  assessment: 'Numbered problem list — each problem with clinical status (stable / improving / worsening / resolved) and ICD-10 code, linked to its plan…',
+  mdm: 'Three MDM elements (2023 E/M): (1) problems addressed — number & complexity; (2) data reviewed — labs, notes, independent interpretation, discussion with other providers; (3) risk of complications/morbidity/mortality, including medication management. Supports the E/M level billed…',
+  plan: 'Plan per problem — diagnostics, treatment, medications, monitoring parameters, patient/goal-directed targets, and follow-up…',
+  orders: 'New or changed orders from this visit — medications, labs, diagnostics, treatments, monitoring, diet, activity, therapy, and consults…',
+  notifications: 'Family, nursing, NP, and/or attending physician notified — who, when, and response (SBAR: Situation, Background, Assessment, Recommendation)…',
   prognosis: 'Clinical prognosis and life expectancy considerations discussed…',
   goals: 'Goals-of-care discussion and patient/surrogate preferences…',
   participants: 'Patient, surrogate/POA, family, and staff present for the discussion…',
@@ -147,8 +147,8 @@ export const SECTION_PROMPTS = {
   pronouncement: 'Date and time of death; provider who pronounced…',
   circumstances: 'Circumstances and events preceding death…',
   causeOfDeath: 'Immediate and underlying cause(s) of death…',
-  regulatoryAttestation: 'This required periodic physician evaluation was personally performed on this date…',
-  timeSpent: 'Total time spent on the date of the encounter (for time-based billing) and attestation of personal performance…',
+  regulatoryAttestation: 'Required physician/NPP visit personally performed (42 CFR §483.30): reviewed the total program of care, documented progress, made decisions to continue or change treatment, and reviewed & signed all orders…',
+  timeSpent: 'Total time on the date of service (face-to-face + non-face-to-face). Subsequent NF: 99308 ~20m · 99309 ~30m · 99310 ~45m; Initial: 99305 ~35m · 99306 ~50m; add prolonged 99418 per additional 15m. Attest personal performance…',
   addendum: 'Any additional clinically relevant information…',
   // Procedure note
   procedureName: 'Exact procedure(s) performed (e.g. selective debridement, joint aspiration/injection, I&D, laceration repair) with CPT…',
@@ -194,8 +194,8 @@ const T = (keys, over = {}) => keys.map((key) => ({
 export const TEMPLATES = {
   // Comprehensive initial evaluation (99304–99306).
   hp_admission: T(
-    ['chiefComplaint', 'hpi', 'pmh', 'psh', 'familyHistory', 'socialHistory', 'medications', 'allergies', 'ros', 'vitals', 'exam', 'results', 'functionalStatus', 'assessment', 'mdm', 'plan', 'codeStatus', 'advanceDirective', 'careCoordination', 'timeSpent'],
-    { chiefComplaintLabel: 'Reason for Admission', resultsLabel: 'Diagnostic Data on Admission', medicationsLabel: 'Admission Medication Reconciliation', functionalStatusLabel: 'Functional / Rehabilitation Status' },
+    ['chiefComplaint', 'hpi', 'pmh', 'psh', 'familyHistory', 'socialHistory', 'medications', 'allergies', 'ros', 'vitals', 'exam', 'results', 'functionalStatus', 'prognosis', 'assessment', 'mdm', 'plan', 'codeStatus', 'advanceDirective', 'careCoordination', 'timeSpent'],
+    { chiefComplaintLabel: 'Reason for Admission', resultsLabel: 'Diagnostic Data on Admission', medicationsLabel: 'Admission Medication Reconciliation', functionalStatusLabel: 'Functional / Rehabilitation Status', prognosisLabel: 'Rehabilitation Potential & Prognosis', prognosisPrompt: 'Rehabilitation potential, estimated length of stay, expected level of care, and overall prognosis…' },
   ),
   // Routine subsequent visit (99307–99310) — interval-focused, no re-documented history.
   progress: T(
@@ -214,7 +214,7 @@ export const TEMPLATES = {
   ),
   // Focused follow-up on a prior problem, result, or intervention.
   follow_up: T(
-    ['chiefComplaint', 'interval', 'vitals', 'exam', 'results', 'assessment', 'plan', 'timeSpent'],
+    ['chiefComplaint', 'interval', 'vitals', 'exam', 'results', 'assessment', 'mdm', 'plan', 'timeSpent'],
     { chiefComplaintLabel: 'Reason for Follow-Up', intervalLabel: 'Interval Since Last Evaluation', examLabel: 'Focused Physical Examination', resultsLabel: 'Results / Findings Followed Up' },
   ),
   // Required periodic physician visit — care-plan review + regulatory attestation.
@@ -239,7 +239,7 @@ export const TEMPLATES = {
   ),
   // Wound care — detailed wound assessment + treatment.
   wound_care: T(
-    ['chiefComplaint', 'wound', 'interval', 'vitals', 'exam', 'treatment', 'assessment', 'plan', 'timeSpent'],
+    ['chiefComplaint', 'interval', 'wound', 'vitals', 'exam', 'treatment', 'assessment', 'plan', 'timeSpent'],
     { chiefComplaintLabel: 'Reason for Wound Care', intervalLabel: 'Wound Progress Since Last Visit', examLabel: 'Relevant Physical Examination' },
   ),
   // Advance care planning (99497–99498) — discussion + time-based.
@@ -249,8 +249,8 @@ export const TEMPLATES = {
   ),
   // Discharge summary (99315–99316) — summary of stay + transition of care.
   discharge: T(
-    ['dischargeDiagnoses', 'hospitalCourse', 'procedures', 'functionalStatus', 'dischargeMeds', 'disposition', 'followUp', 'dischargeInstructions', 'timeSpent'],
-    { hospitalCourseLabel: 'Summary of SNF Stay', functionalStatusLabel: 'Functional Status at Discharge' },
+    ['dischargeDiagnoses', 'hospitalCourse', 'procedures', 'functionalStatus', 'dischargeMeds', 'disposition', 'followUp', 'careCoordination', 'dischargeInstructions', 'timeSpent'],
+    { hospitalCourseLabel: 'Summary of SNF Stay', functionalStatusLabel: 'Functional Status at Discharge', careCoordinationLabel: 'Transition of Care / Handoff' },
   ),
   // Bedside procedure (Part B) — procedure-note documentation, not E/M.
   procedure_note: T(

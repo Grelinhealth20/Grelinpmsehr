@@ -10,6 +10,7 @@ import { useToast } from '../../components/Toast.jsx';
 import { useIdleTimeout } from '../../hooks/useIdleTimeout.js';
 import { usersApi, facilitiesApi, toApiError } from '../../lib/api.js';
 import AuditLogs from './AuditLogs.jsx';
+import SystemSettings from './SystemSettings.jsx';
 
 const TABS = [
   { key: 'super', label: 'Super Admins', roles: ['super_admin', 'master_admin'], createRole: 'super_admin', createLabel: '+ Create Super Admin' },
@@ -38,6 +39,7 @@ export default function SuperAdminPanel() {
   const [modal, setModal] = useState(null);
   const isFacilities = tab === 'facilities';
   const isLogs = tab === 'logs';
+  const isSettings = tab === 'settings';
 
   // Facilities state (loaded on demand when the Facilities tab is opened).
   const [facilities, setFacilities] = useState([]);
@@ -132,9 +134,9 @@ export default function SuperAdminPanel() {
 
       <main className="admin-main">
         <div className="admin-head">
-          <span className="admin-eyebrow">// {isLogs ? 'AUDIT & COMPLIANCE CONSOLE' : isFacilities ? 'FACILITY MANAGEMENT CONSOLE' : 'USER MANAGEMENT CONSOLE'}</span>
-          <h1>{isLogs ? 'Audit Logs' : isFacilities ? 'Facilities' : 'User Management'}</h1>
-          <p>{isLogs ? 'Monitor, filter, and download the activity trail across every account, role, and facility.' : isFacilities ? 'Manage facilities and provider assignments.' : 'Create and govern accounts across roles.'}</p>
+          <span className="admin-eyebrow">// {isSettings ? 'SYSTEM CONFIGURATION CONSOLE' : isLogs ? 'AUDIT & COMPLIANCE CONSOLE' : isFacilities ? 'FACILITY MANAGEMENT CONSOLE' : 'USER MANAGEMENT CONSOLE'}</span>
+          <h1>{isSettings ? 'System Settings' : isLogs ? 'Audit Logs' : isFacilities ? 'Facilities' : 'User Management'}</h1>
+          <p>{isSettings ? 'Enable or disable platform features across the EHR. Changes apply system-wide and are enforced on the server.' : isLogs ? 'Monitor, filter, and download the activity trail across every account, role, and facility.' : isFacilities ? 'Manage facilities and provider assignments.' : 'Create and govern accounts across roles.'}</p>
         </div>
 
         {/* Centered role tabs */}
@@ -168,9 +170,19 @@ export default function SuperAdminPanel() {
           >
             Audit Logs
           </button>
+          <button
+            role="tab"
+            aria-selected={isSettings}
+            className={`sa-tab ${isSettings ? 'active' : ''}`}
+            onClick={() => setTab('settings')}
+          >
+            Settings
+          </button>
         </div>
 
-        {isLogs ? (
+        {isSettings ? (
+          <SystemSettings />
+        ) : isLogs ? (
           <AuditLogs users={all} facilities={facilities} />
         ) : isFacilities ? (
           <FacilitiesView

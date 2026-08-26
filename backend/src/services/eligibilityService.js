@@ -276,11 +276,25 @@ export function normalize271(resp) {
   // Plan.
   const pdi = resp?.planDateInformation || {};
   const umbrella = bi.find((b) => b.code === '1' && b.planCoverage) || bi.find((b) => b.code === '1' && b.insuranceType);
+  // Coverage period. For ACTIVE coverage the dates come from planDateInformation;
+  // for INACTIVE / TERMINATED coverage the effective + termination dates usually ride
+  // on the coverage status line's benefitsDateInformation (eligibility/benefit/plan
+  // begin+end) instead — so we look in both places and take the first date present.
+  const STATUS_CODES = new Set(['1', '2', '3', '4', '5', '6', '7', '8']);
+  const statusLine = bi.find((b) => STATUS_CODES.has(b.code)) || null;
+  const sdi = statusLine?.benefitsDateInformation || {};
+  const pickDate = (o, keys) => { for (const k of keys) { const v = yyyymmdd(o?.[k]); if (v) return v; } return ''; };
+  const beginDate = pickDate(pdi, ['planBegin', 'eligibilityBegin', 'benefitBegin'])
+    || pickDate(sdi, ['planBegin', 'eligibilityBegin', 'benefitBegin', 'plan', 'eligibility']);
+  const endDate = pickDate(pdi, ['planEnd', 'eligibilityEnd', 'benefitEnd'])
+    || pickDate(sdi, ['planEnd', 'eligibilityEnd', 'benefitEnd']);
   const plan = {
     name: ps?.planDetails || umbrella?.planCoverage || umbrella?.insuranceType || '',
     type: umbrella?.insuranceType || '',
-    begin: yyyymmdd(pdi.planBegin),
-    end: yyyymmdd(pdi.planEnd),
+    begin: beginDate,
+    end: endDate,
+    effective: beginDate,   // explicit alias for the UI/record
+    termination: endDate,   // shown when coverage is inactive/terminated
     serviceDate: yyyymmdd(pdi.service || resp?.encounter?.dateOfService),
     coverageLevel: umbrella?.coverageLevel || '',
   };

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { patientsApi, toApiError } from '../lib/api.js';
 import { useToast } from './Toast.jsx';
+import { useAuth } from '../context/AuthContext.jsx';
 
 /**
  * Benefits Verification — a clean, provider-focused view of a real-time eligibility
@@ -122,11 +123,16 @@ function BenefitsView({ s, verifiedAt }) {
   const procMatched = procs.map((p) => ({ proc: p, svc: services.find((x) => x.code === p.stc) || null }));
 
   // Compact member/plan facts — only fields present.
+  const inactive = s.status === 'inactive';
   const facts = [
     ['Member', m.name], ['Member ID', m.memberId], m.mbi && ['MBI / HIC', m.mbi],
     m.dob && ['Date of birth', fmtDate(m.dob)],
     m.group && ['Group', `${m.group}${m.groupDescription ? ` · ${m.groupDescription}` : ''}`],
     plan.type && ['Plan type', plan.type],
+    // Coverage period — always show the effective date; the termination date is the
+    // key fact when coverage is inactive/terminated.
+    plan.begin && ['Effective date', fmtDate(plan.begin)],
+    plan.end && ['Termination date', fmtDate(plan.end)],
     s.payer?.name && ['Payer', `${s.payer.name}${s.payer.id ? ` · ${s.payer.id}` : ''}`],
     s.pcp?.name && ['Primary care provider', s.pcp.name],
   ].filter(Boolean);
@@ -139,7 +145,12 @@ function BenefitsView({ s, verifiedAt }) {
         <div className="bx-head-plan">
           <span className="bx-head-nm">{plan.name || s.payer?.name || 'Coverage'}</span>
           <span className="bx-head-meta">
-            {[plan.type, plan.begin ? `Eff ${fmtDate(plan.begin)}` : null, plan.serviceDate ? `DOS ${fmtDate(plan.serviceDate)}` : null].filter(Boolean).join('  ·  ')}
+            {[
+              plan.type,
+              plan.begin ? `Eff ${fmtDate(plan.begin)}` : null,
+              plan.end ? `${inactive ? 'Terminated' : 'Through'} ${fmtDate(plan.end)}` : null,
+              plan.serviceDate ? `DOS ${fmtDate(plan.serviceDate)}` : null,
+            ].filter(Boolean).join('  ·  ')}
           </span>
         </div>
       </div>
@@ -272,6 +283,7 @@ function PolicyActions({ patientUuid, policyIndex, hasExisting, onDone, onPatien
 /* -------- Main ---------------------------------------------------------- */
 export default function BenefitsVerification({ patientUuid, insurance, onPatientUpdated }) {
   const toast = useToast();
+  const { eligibilityEnabled } = useAuth();
   const [byPolicy, setByPolicy] = useState({});
   const [loading, setLoading] = useState(true);
   const [dlPolicy, setDlPolicy] = useState(null);
@@ -327,9 +339,17 @@ export default function BenefitsVerification({ patientUuid, insurance, onPatient
               )}
             </div>
             {s ? <BenefitsView s={s} verifiedAt={check.verifiedAt} /> : (
-              <div className="bx-none">Not verified yet. Run a real-time check to pull plan status, copay, coinsurance, deductible, out-of-pocket, and per-service benefits directly from the payer.</div>
+              <div className="bx-none">
+                {eligibilityEnabled
+                  ? 'Not verified yet. Run a real-time check to pull plan status, copay, coinsurance, deductible, out-of-pocket, and per-service benefits directly from the payer.'
+                  : 'Not verified. Eligibility verification is currently disabled by your administrator.'}
+              </div>
             )}
-            <PolicyActions patientUuid={patientUuid} policyIndex={i} hasExisting={!!s} onDone={load} onPatientUpdated={onPatientUpdated} />
+            {eligibilityEnabled ? (
+              <PolicyActions patientUuid={patientUuid} policyIndex={i} hasExisting={!!s} onDone={load} onPatientUpdated={onPatientUpdated} />
+            ) : (
+              <div className="bx-disabled-note">Eligibility verification is disabled by your administrator.</div>
+            )}
           </div>
         );
       })}
