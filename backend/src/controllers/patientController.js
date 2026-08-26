@@ -11,7 +11,7 @@ import {
 } from '../services/s3Service.js';
 import { extractDocument, ocrEnabled } from '../services/docExtractService.js';
 import { saveCheck, listChecks, mergeVerificationIntoPatient } from '../services/eligibilityService.js';
-import { verifyPatientEligibility, autoVerifyOnCreate, latestCheckForPolicy } from '../services/eligibilityWorkflow.js';
+import { verifyPatientEligibility, latestCheckForPolicy } from '../services/eligibilityWorkflow.js';
 import { isEligibilityEnabled } from '../services/settingsService.js';
 import { stediEnabled } from '../services/stediService.js';
 import { recordAudit } from '../services/auditService.js';
@@ -66,36 +66,17 @@ export async function create(req, res, next) {
     const patient = await createPatient({ providerId: req.authUserId, demographics, insurance, facility, emergencyContact, emergencyContacts, createdBy: req.authUserId });
     await recordAudit({ actorUserId: req.authUserId, action: 'patient.create', entityType: 'patient', entityId: patient.uuid, ...ctx(req), metadata: { mrn: patient.mrn } });
 
-    // Respond IMMEDIATELY after the DB write — the save never waits on S3 folder
-    // creation or the real-time eligibility call (which take seconds). Both run in
-    // the BACKGROUND; the payer-confirmed Face Sheet + benefits appear on the next
-    // load / the Benefits tab. This keeps patient creation instant.
+    // Respond IMMEDIATELY after the DB write — the save never waits on the S3 folder
+    // marker (which runs in the BACKGROUND). NO automatic eligibility is triggered on
+    // create: a live 271 is only ever made by a MANUAL "Verify Benefits" action.
     res.status(201).json({ patient });
 
-    const auditCtx = ctx(req); const actorUserId = req.authUserId;
     setImmediate(async () => {
-      // Best-effort S3 folder marker.
+      // Best-effort S3 folder marker (facility → provider → patient).
       if (s3Enabled()) {
         try { const s3ctx = await getPatientS3Ctx(patient.uuid); if (s3ctx) await ensurePatientFolder(s3ctx); }
         catch (e) { logger.warn({ err: e.message }, 'patient folder create failed'); }
       }
-      // Auto-trigger real-time eligibility (server-side). Non-fatal; writes back the
-      // confirmed Face Sheet + benefits onto the patient record. Skipped entirely
-      // when a super admin has disabled eligibility verification EHR-wide.
-      try {
-        if (!(await isEligibilityEnabled())) return;
-        const row = await getRawByUuid(patient.uuid);
-        if (row) {
-          const r = await autoVerifyOnCreate({ patient: toPublicPatient(row), patientId: row.id, providerId: row.provider_id });
-          // Log EVERY live payer call by user: a success (check) or an attempted call
-          // that the payer/clearinghouse errored. Pre-call skips make no live call.
-          if (r?.check) {
-            await recordAudit({ actorUserId, action: 'patient.eligibility.verify', entityType: 'patient', entityId: patient.uuid, ...auditCtx, metadata: { auto: true, live: true, status: r.check.status, payer: r.payer?.name } });
-          } else if (r?.skipped === 'error') {
-            await recordAudit({ actorUserId, action: 'patient.eligibility.verify', entityType: 'patient', entityId: patient.uuid, outcome: 'error', ...auditCtx, metadata: { auto: true, live: true, error: r.error } });
-          }
-        }
-      } catch (e) { logger.warn({ err: e.message }, 'auto eligibility on create failed'); }
     });
   } catch (err) { next(err); }
 }

@@ -156,9 +156,8 @@ export async function create(req, res, next) {
           apptDate: appt.date, mrn: p.mrn, createdBy: req.authUserId,
         });
       }
-      // Eligibility runs in the BACKGROUND — booking returns immediately (no waiting
-      // on the payer). The tag appears on the next refresh. Audited; never blocks create.
-      if (apptRaw) auditedEligibility(req, apptRaw, { trigger: 'create' }).catch(() => {});
+      // NO automatic eligibility on booking — a live 271 is only ever triggered by a
+      // MANUAL verify. Benefits are shown from saved data until then.
     }
     await recordAudit({
       actorUserId: req.authUserId, action: 'appointment.create', entityType: 'appointment', entityId: appt.uuid,
@@ -197,15 +196,8 @@ export async function update(req, res, next) {
       }
     }
     const appt = await updateAppointment(req.params.uuid, b);
-    // Eligibility on update: idempotent by default (won't re-call if benefits exist),
-    // but a CHANGE OF PATIENT (insurance may differ) forces a fresh check. Background.
-    if (b.date !== undefined || b.procedureCode !== undefined || b.patientUuid !== undefined) {
-      const apptRaw = await getRawByUuid(req.params.uuid);
-      if (apptRaw?.patient_uuid) {
-        const patientChanged = b.patientUuid !== undefined;
-        auditedEligibility(req, apptRaw, { trigger: patientChanged ? 'patient_change' : (b.date !== undefined ? 'reschedule' : 'procedure_change'), opts: { force: patientChanged } }).catch(() => {});
-      }
-    }
+    // NO automatic eligibility on reschedule / patient / procedure change — a live 271
+    // is only ever triggered by a MANUAL verify.
     await recordAudit({
       actorUserId: req.authUserId, action, entityType: 'appointment', entityId: appt.uuid,
       ip: req.ip, userAgent: req.get('user-agent'), metadata: { fields: Object.keys(b) },
