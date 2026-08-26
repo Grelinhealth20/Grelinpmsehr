@@ -31,15 +31,34 @@ export function isMdCredentials(raw) {
  *   set of facilities whose records they may see. Empty otherwise.
  */
 export async function viewerScope(userId) {
-  const [rows] = await execute(`SELECT credentials FROM users WHERE id = :id LIMIT 1`, { id: userId });
+  const [rows] = await execute(
+    `SELECT u.credentials, s.service_line AS service_line FROM users u
+       LEFT JOIN specialties s ON s.id = u.specialty_id WHERE u.id = :id LIMIT 1`,
+    { id: userId },
+  );
   const isMD = isMdCredentials(rows[0]?.credentials);
   const facilityIds = isMD ? await providerFacilityIds(userId) : [];
-  return { isMD, facilityIds };
+  // The viewer's SERVICE LINE (snf | pain) — read from the specialty's STORED, admin-set
+  // service_line column (authoritative; no name-string inference in the security path). A
+  // facility-wide MD's cross-provider access is bounded to their own service line, so a
+  // Pain MD never sees SNF records and vice versa even at a shared facility. A provider
+  // with no specialty defaults to 'snf'.
+  const serviceLine = rows[0]?.service_line || 'snf';
+  return { isMD, facilityIds, serviceLine };
 }
 
 /** True when the viewer's scope is facility-wide (an MD with ≥1 assigned facility). */
 export function isFacilityWide(scope) {
   return !!(scope.isMD && scope.facilityIds.length);
+}
+
+/**
+ * SQL predicate restricting a note (aliased `alias`) to the viewer's OWN service line,
+ * used together with facility-wide access. All Pain note types are prefixed `pain_`;
+ * SNF types are not — so the split is a clean, index-friendly prefix test.
+ */
+export function noteServiceLineWhere(scope, alias = 'n') {
+  return scope.serviceLine === 'pain' ? `${alias}.note_type LIKE 'pain%'` : `${alias}.note_type NOT LIKE 'pain%'`;
 }
 
 /**
@@ -67,7 +86,15 @@ export function patientScopeWhere(scope, providerId, alias = 'p') {
   if (isFacilityWide(scope)) {
     const params = {};
     const ph = scope.facilityIds.map((id, i) => { params[`sf${i}`] = id; return `:sf${i}`; }).join(',');
-    return { sql: `${alias}.facility_id IN (${ph})`, params };
+    // Bound to the viewer's SERVICE LINE: a facility-wide MD sees only patients whose
+    // OWNING provider is in the same service line (a Pain MD never sees SNF-owned patients
+    // and vice-versa). A patient owned by a provider with no/other specialty counts as SNF,
+    // consistent with serviceForSpecialty(''). PK-indexed EXISTS — negligible per-row cost.
+    // Bound by the OWNING provider's STORED service line (authoritative, admin-set) —
+    // deterministic, no name-string matching in the security path.
+    const painOwned = `EXISTS (SELECT 1 FROM users pu JOIN specialties ps ON ps.id = pu.specialty_id WHERE pu.id = ${alias}.provider_id AND ps.service_line = 'pain')`;
+    const sl = scope.serviceLine === 'pain' ? painOwned : `NOT ${painOwned}`;
+    return { sql: `${alias}.facility_id IN (${ph}) AND ${sl}`, params };
   }
   return { sql: `${alias}.provider_id = :scopePid`, params: { scopePid: providerId } };
 }

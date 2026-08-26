@@ -2,16 +2,18 @@ import { v4 as uuidv4 } from 'uuid';
 import { execute } from '../db/pool.js';
 import { encrypt, decrypt } from '../utils/crypto.js';
 import { getOwnedEncounterId, getAccessibleEncounterId } from './encounterService.js';
-import { viewerScope, isFacilityWide } from './accessScope.js';
+import { viewerScope, isFacilityWide, noteServiceLineWhere } from './accessScope.js';
 import { storeSignedNoteDoc } from './noteDocumentService.js';
 
-// Build the READ-access SQL condition for a note by the viewer's scope:
-// own note, OR a facility-wide MD whose facilities include the patient's facility.
+// Build the READ-access SQL condition for a note by the viewer's scope: own note, OR a
+// facility-wide MD whose facilities include the patient's facility AND whose SERVICE
+// LINE matches the note (a Pain MD never sees SNF notes and vice versa). Own notes are
+// always the viewer's own service line, so they are unaffected.
 function noteAccess(scope, userId, params) {
   params.pid = userId;
   if (!isFacilityWide(scope)) return 'e.provider_id = :pid';
   const ph = scope.facilityIds.map((id, i) => { params[`nf${i}`] = id; return `:nf${i}`; }).join(',');
-  return `(e.provider_id = :pid OR p.facility_id IN (${ph}))`;
+  return `(e.provider_id = :pid OR (p.facility_id IN (${ph}) AND ${noteServiceLineWhere(scope, 'n')}))`;
 }
 
 /**
@@ -35,13 +37,21 @@ export function canSign(credentials) {
 
 export async function listNotes(encounterUuid, providerId) {
   // Read access: own encounter, or a facility-wide MD's facility encounter.
-  const encId = await getAccessibleEncounterId(encounterUuid, providerId);
+  const scope = await viewerScope(providerId);
+  const encId = await getAccessibleEncounterId(encounterUuid, providerId, scope);
   if (!encId) return null;
+  // A facility-wide MD viewing an encounter they DON'T own sees only notes of their own
+  // service line (no cross-specialty note content). Own encounters are unrestricted.
+  let slFilter = '';
+  if (isFacilityWide(scope)) {
+    const [own] = await execute('SELECT 1 FROM encounters WHERE id = :e AND provider_id = :pid LIMIT 1', { e: encId, pid: providerId });
+    if (!own.length) slFilter = `AND ${noteServiceLineWhere(scope, 'encounter_notes')}`;
+  }
   const [rows] = await execute(
     `SELECT uuid, note_type, reason, status, billing_ready, signed_by_name,
         DATE_FORMAT(signed_at, '%Y-%m-%dT%H:%i:%sZ') AS signed_at,
         DATE_FORMAT(updated_at, '%Y-%m-%dT%H:%i:%sZ') AS updated_at
-      FROM encounter_notes WHERE encounter_id = :e ORDER BY created_at DESC`,
+      FROM encounter_notes WHERE encounter_id = :e ${slFilter} ORDER BY created_at DESC`,
     { e: encId },
   );
   return rows.map((r) => ({

@@ -42,7 +42,11 @@ export const NOTE_TEMPLATE_REGISTRY = [
   ['pain_si_joint', 'pain', 'Sacroiliac Joint Injection', 'Pain Management — Interventional', '27096 · 64451', 'more', 110],
   ['pain_tpi', 'pain', 'Trigger Point Injection', 'Pain Management — Interventional', '20552–20553', 'more', 120],
   ['pain_nerve_block', 'pain', 'Peripheral / Sympathetic Nerve Block', 'Pain Management — Interventional', '64400–64530', 'more', 130],
-  ['pain_scs', 'pain', 'Spinal Cord Stimulator (Trial / Implant)', 'Pain Management — Neuromodulation', '63650 · 63685', 'more', 140],
+  ['pain_scs', 'pain', 'Neurostimulator — SCS / PNS (Trial / Implant)', 'Pain Management — Neuromodulation', '63650 · 63685 · 64555 · 64575', 'more', 140],
+  ['pain_pump', 'pain', 'Intrathecal Pump — Trial / Implant / Refill', 'Pain Management — Neuromodulation', '62362 · 62367–62370 · 95990–95991', 'more', 141],
+  ['pain_kypho', 'pain', 'Vertebral Augmentation (Kyphoplasty / Vertebroplasty)', 'Pain Management — Interventional', '22510–22515', 'more', 142],
+  ['pain_joint', 'pain', 'Peripheral Joint / Bursa Injection', 'Pain Management — Interventional', '20600–20611', 'more', 143],
+  ['pain_botox', 'pain', 'Botulinum Toxin Injection', 'Pain Management — Interventional', '64615 · 64642–64647', 'more', 144],
   ['pain_uds', 'pain', 'Urine Drug Screen / Toxicology Review', 'Pain Management — Monitoring', '80305–80307 (review)', 'more', 150],
   ['pain_discharge', 'pain', 'Pain Management Discharge / Transition', 'Pain Management — Transition', 'Transition of care', 'more', 160],
 ];
@@ -59,13 +63,13 @@ export function serviceForSpecialty(specialtyName) {
   return /\bpain\b/i.test(String(specialtyName || '')) ? 'pain' : 'snf';
 }
 
-/** Resolve a provider's service line from their assigned specialty. */
+/** Resolve a provider's service line from their assigned specialty's STORED service_line. */
 export async function providerServiceLine(providerId) {
   const [rows] = await execute(
-    `SELECT s.name AS specialty FROM users u LEFT JOIN specialties s ON s.id = u.specialty_id WHERE u.id = :id LIMIT 1`,
+    `SELECT s.service_line AS service_line FROM users u LEFT JOIN specialties s ON s.id = u.specialty_id WHERE u.id = :id LIMIT 1`,
     { id: providerId },
   );
-  return serviceForSpecialty(rows[0]?.specialty);
+  return rows[0]?.service_line || 'snf';
 }
 
 /** The service line a note type belongs to (null if unknown). */
@@ -80,20 +84,31 @@ export async function providerCanUseNoteType(providerId, noteType) {
   return (await providerServiceLine(providerId)) === typeLine;
 }
 
-/** Templates available to a service line, ordered for the picker (from the DB table). */
-export async function listTemplatesForServiceLine(serviceLine) {
+// Pre-built, per-service-line template lists (immutable static reference data). Built
+// ONCE at module load from the registry so the hot path (every note-picker open,
+// potentially thousands of concurrent providers) is served from MEMORY with zero DB
+// round-trips. The note_templates DB table remains the durable/seeded source of truth;
+// it and this const are populated from the SAME registry, so they never disagree.
+const TEMPLATES_BY_LINE = (() => {
+  const by = { snf: [], pain: [] };
+  for (const r of NOTE_TEMPLATE_REGISTRY) {
+    by[r[1]].push({ noteType: r[0], serviceLine: r[1], label: r[2], category: r[3], cpt: r[4], menuGroup: r[5], sortOrder: r[6] });
+  }
+  for (const k of Object.keys(by)) {
+    by[k].sort((a, b) => (Number(b.menuGroup === 'common') - Number(a.menuGroup === 'common')) || a.sortOrder - b.sortOrder);
+    Object.freeze(by[k]);
+  }
+  return by;
+})();
+
+/**
+ * Templates available to a service line, ordered for the picker. Served from the
+ * in-memory registry (no DB query) — a fresh array copy per call so a caller can never
+ * mutate the shared list (no cross-request leakage of the reference data).
+ */
+export function listTemplatesForServiceLine(serviceLine) {
   const line = serviceLine === 'pain' ? 'pain' : 'snf';
-  const [rows] = await execute(
-    `SELECT note_type, service_line, label, category, cpt, menu_group, sort_order
-       FROM note_templates
-      WHERE service_line = :line AND active = 1
-      ORDER BY (menu_group = 'common') DESC, sort_order ASC`,
-    { line },
-  );
-  return rows.map((r) => ({
-    noteType: r.note_type, serviceLine: r.service_line, label: r.label,
-    category: r.category, cpt: r.cpt, menuGroup: r.menu_group, sortOrder: r.sort_order,
-  }));
+  return (TEMPLATES_BY_LINE[line] || []).map((t) => ({ ...t }));
 }
 
 /** Idempotently seed/refresh the registry table (called on migration/boot). */

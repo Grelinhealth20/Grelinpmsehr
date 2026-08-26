@@ -84,11 +84,12 @@ export const SCHEMA_STATEMENTS = [
 
   // --- Specialties (managed list, wired to provider users) -------------------
   `CREATE TABLE IF NOT EXISTS specialties (
-    id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    uuid        CHAR(36)        NOT NULL,
-    name        VARCHAR(120)    NOT NULL,
-    created_by  BIGINT UNSIGNED NULL,
-    created_at  DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    uuid         CHAR(36)        NOT NULL,
+    name         VARCHAR(120)    NOT NULL,
+    service_line ENUM('snf','pain') NOT NULL DEFAULT 'snf',
+    created_by   BIGINT UNSIGNED NULL,
+    created_at   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
     UNIQUE KEY uq_spec_uuid (uuid),
     UNIQUE KEY uq_spec_name (name),

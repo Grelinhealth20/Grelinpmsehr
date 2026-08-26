@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { execute } from '../db/pool.js';
 import { decrypt, blindIndex } from '../utils/crypto.js';
-import { viewerScope, patientScopeWhere, isFacilityWide } from './accessScope.js';
+import { viewerScope, patientScopeWhere, isFacilityWide, noteServiceLineWhere } from './accessScope.js';
 
 /**
  * Encounter worklist. Each of a provider's appointments is presented as an
@@ -391,8 +391,10 @@ export async function listClinicalRecords(userId, { page = 1, pageSize = 25, q =
   const params = {};
   let where;
   if (isFacilityWide(scope)) {
+    // Facility-wide MD: every note for patients at their facilities — BUT only within
+    // the MD's own service line (a Pain MD never sees SNF records and vice versa).
     const ph = scope.facilityIds.map((id, i) => { params[`sf${i}`] = id; return `:sf${i}`; }).join(',');
-    where = `p.facility_id IN (${ph})`;
+    where = `p.facility_id IN (${ph}) AND ${noteServiceLineWhere(scope, 'n')}`;
   } else {
     where = `n.provider_id = :uid`;
     params.uid = userId;

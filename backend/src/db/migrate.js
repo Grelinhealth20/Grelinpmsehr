@@ -51,7 +51,9 @@ async function ensureColumn(table, column, definition, fkClause) {
     await pool.query(`ALTER TABLE \`${table}\` ADD COLUMN ${definition}`);
     if (fkClause) await pool.query(`ALTER TABLE \`${table}\` ADD ${fkClause}`);
     logger.info({ table, column }, 'Added column via migration');
+    return true; // column was newly added (caller may backfill)
   }
+  return false;
 }
 
 export async function runMigrations() {
@@ -162,6 +164,25 @@ export async function runMigrations() {
        \`rotated_at\` DATETIME NOT NULL
      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
   );
+  // Explicit SERVICE LINE per specialty (snf | pain) — the authoritative source for
+  // clinical data-isolation, replacing name-string inference in the security path. On
+  // first add, backfill existing rows by their name (word-boundary "pain"); thereafter
+  // it is admin-controlled and never re-derived, so an admin override sticks.
+  {
+    const added = await ensureColumn(
+      'specialties',
+      'service_line',
+      "`service_line` ENUM('snf','pain') NOT NULL DEFAULT 'snf' AFTER `name`",
+    );
+    if (added) {
+      // Pad + non-letter boundaries == JS serviceForSpecialty()'s /\bpain\b/i, ICU-safe.
+      const [r] = await pool.query(
+        "UPDATE `specialties` SET `service_line` = 'pain' WHERE CONCAT(' ', LOWER(`name`), ' ') REGEXP '[^a-z]pain[^a-z]'",
+      );
+      logger.info({ painRows: r.affectedRows }, 'Backfilled specialties.service_line');
+    }
+  }
+
   // Seed/refresh the note-template registry (SNF + Pain service lines).
   try { const n = await seedNoteTemplates(); logger.info({ templates: n }, 'Note-template registry seeded'); }
   catch (err) { logger.warn({ err: err.message }, 'Note-template registry seed skipped'); }

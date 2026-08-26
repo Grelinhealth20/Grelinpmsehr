@@ -137,6 +137,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   const [amendModal, setAmendModal] = useState(false); // reason prompt for amendment
   const [amendReason, setAmendReason] = useState('');
   const skipSave = useRef(true); // skip the save that a fresh load/open would trigger
+  const createToken = useRef(0); // guards the async Rx merge to the LATEST note created
 
   async function loadNotes({ autoOpen = false } = {}) {
     setLoading(true);
@@ -177,36 +178,47 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   }
 
   async function createNote(noteType) {
-    setPicking(false);
-    setBusy(true);
+    setBusy(true); // keep the picker open with its loading animation until the note is ready
+    const myToken = ++createToken.current; // only THIS creation may merge its Rx later
     try {
       const order = (TEMPLATES[noteType] || []).map((s) => s.key);
-      // Carry forward the patient's current medication list + pull the pharmacy/PBM
-      // vendor from their benefits, so a new encounter starts with the active meds.
-      let carriedRx = []; let pharm = null; let carrySrc = null;
-      try {
-        if (encounter.patientUuid) {
-          const rc = await encountersApi.rxContext(encounter.patientUuid);
-          carriedRx = rc.data.prescriptions || [];
-          pharm = rc.data.pharmacy || null;
-          if (carriedRx.length) carrySrc = { date: rc.data.sourceDate };
-        }
-      } catch { /* best-effort — a new note simply starts empty */ }
-      const initContent = { vitals: {}, sections: {}, prescriptions: carriedRx, sectionOrder: order };
-      const { data } = await encountersApi.createNote(encounter.encounterUuid, { noteType, content: initContent });
-      // Show the template immediately (single round-trip) — refresh the tab list
-      // in the background so there's no perceived wait.
+      const initContent = { vitals: {}, sections: {}, prescriptions: [], sectionOrder: order };
+      // Create the note and fetch the carry-forward Rx context (current meds +
+      // pharmacy/PBM vendor) IN PARALLEL — the editor opens as soon as the note exists;
+      // carried meds fill in a moment later without blocking the template from showing.
+      const createP = encountersApi.createNote(encounter.encounterUuid, { noteType, content: initContent });
+      const rxP = encounter.patientUuid
+        ? encountersApi.rxContext(encounter.patientUuid).then((rc) => rc.data).catch(() => null)
+        : Promise.resolve(null);
+
+      const { data } = await createP;
+      // Show the template immediately — do NOT wait on the Rx context.
       skipSave.current = true;
       setAutoState('idle');
       setActive(data.note);
       setContent(initContent);
-      setPharmacy(pharm);
-      setRxCarry(carrySrc);
+      setPharmacy(null);
+      setRxCarry(null);
       setReason('');
       setTab('note');
+      setPicking(false); // close the picker now that the editor is ready
+      setBusy(false);
       loadNotes();
       onChanged?.();
-    } catch (e) { toast.error(toApiError(e).message); } finally { setBusy(false); }
+
+      // Merge carried meds + pharmacy when they arrive (non-blocking; auto-save persists).
+      // Guard: only apply to the note THIS click created — a fast switch to another
+      // template must never receive the previous note's carried medications.
+      const rc = await rxP;
+      if (rc && createToken.current === myToken) {
+        if (rc.pharmacy) setPharmacy(rc.pharmacy);
+        const carriedRx = rc.prescriptions || [];
+        if (carriedRx.length) {
+          setRxCarry({ date: rc.sourceDate });
+          setContent((c) => ({ ...c, prescriptions: carriedRx }));
+        }
+      }
+    } catch (e) { toast.error(toApiError(e).message); setBusy(false); }
   }
 
   const signed = active?.status === 'signed';
@@ -583,6 +595,13 @@ function NoteTypePicker({ onPick, onClose, busy }) {
       <button className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
     </>}>
       <div className="ntp">
+        {busy && (
+          <div className="ntp-busy" role="status" aria-live="polite">
+            <div className="ntp-busy-orb"><span /><span /><span /></div>
+            <div className="ntp-busy-t">Preparing your template…</div>
+            <div className="ntp-busy-s">Setting up the note and carrying forward the current medications</div>
+          </div>
+        )}
         <div className="ntp-search">
           <svg className="ntp-search-ic" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.2-3.2" /></svg>
           <input className="ntp-search-in" autoFocus placeholder="Search note templates by name, category or CPT…" value={q} onChange={(e) => setQ(e.target.value)} />

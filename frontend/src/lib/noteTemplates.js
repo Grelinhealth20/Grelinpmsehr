@@ -36,7 +36,11 @@ export const NOTE_TYPES = {
   pain_si_joint: { label: 'Sacroiliac Joint Injection', category: 'Pain Management — Interventional', cpt: '27096 · 64451', service: 'pain' },
   pain_tpi: { label: 'Trigger Point Injection', category: 'Pain Management — Interventional', cpt: '20552–20553', service: 'pain' },
   pain_nerve_block: { label: 'Peripheral / Sympathetic Nerve Block', category: 'Pain Management — Interventional', cpt: '64400–64530', service: 'pain' },
-  pain_scs: { label: 'Spinal Cord Stimulator (Trial / Implant)', category: 'Pain Management — Neuromodulation', cpt: '63650 · 63685', service: 'pain' },
+  pain_scs: { label: 'Neurostimulator — SCS / PNS (Trial / Implant)', category: 'Pain Management — Neuromodulation', cpt: '63650 · 63685 · 64555 · 64575', service: 'pain' },
+  pain_pump: { label: 'Intrathecal Pump — Trial / Implant / Refill', category: 'Pain Management — Neuromodulation', cpt: '62362 · 62367–62370 · 95990–95991', service: 'pain' },
+  pain_kypho: { label: 'Vertebral Augmentation (Kyphoplasty / Vertebroplasty)', category: 'Pain Management — Interventional', cpt: '22510–22515', service: 'pain' },
+  pain_joint: { label: 'Peripheral Joint / Bursa Injection', category: 'Pain Management — Interventional', cpt: '20600–20611', service: 'pain' },
+  pain_botox: { label: 'Botulinum Toxin Injection', category: 'Pain Management — Interventional', cpt: '64615 · 64642–64647', service: 'pain' },
   pain_uds: { label: 'Urine Drug Screen / Toxicology Review', category: 'Pain Management — Monitoring', cpt: '80305–80307 (review)', service: 'pain' },
   pain_discharge: { label: 'Pain Management Discharge / Transition', category: 'Pain Management — Transition', cpt: 'Transition of care', service: 'pain' },
 };
@@ -50,7 +54,7 @@ export const SERVICE_MENUS = {
   },
   pain: {
     common: ['pain_consult', 'pain_followup', 'pain_med_mgmt', 'pain_esi', 'pain_facet_mbb', 'pain_rfa'],
-    more: ['pain_si_joint', 'pain_tpi', 'pain_nerve_block', 'pain_scs', 'pain_uds', 'pain_discharge'],
+    more: ['pain_si_joint', 'pain_tpi', 'pain_nerve_block', 'pain_scs', 'pain_pump', 'pain_kypho', 'pain_joint', 'pain_botox', 'pain_uds', 'pain_discharge'],
   },
 };
 
@@ -465,9 +469,9 @@ export const TEMPLATES = {
   pain_nerve_block: T(
     ['procedureName', 'indication', 'consent', 'procTechnique', 'injectate', 'procFindings', 'complications', 'postProcedure', 'timeSpent'],
     {
-      procedureNameLabel: 'Procedure Performed (Nerve Block) + CPT',
-      procedureNamePrompt: 'Peripheral or sympathetic nerve block — specific nerve/plexus (e.g. stellate ganglion, lumbar sympathetic, genicular, occipital, intercostal), laterality, and CPT…',
-      indicationPrompt: 'Diagnostic and/or therapeutic block for the named neuropathic / sympathetically-mediated pain; failed conservative therapy…',
+      procedureNameLabel: 'Procedure Performed (Nerve / Fascial Plane Block) + CPT',
+      procedureNamePrompt: 'Peripheral, sympathetic, or fascial plane block — specific nerve/plexus/plane (e.g. stellate ganglion, lumbar sympathetic, genicular, occipital, intercostal, ESP, TAP), laterality, and CPT…',
+      indicationPrompt: 'Diagnostic and/or therapeutic block for the named neuropathic / sympathetically-mediated / truncal pain; failed conservative therapy…',
       consentLabel: 'Informed Consent & Pre-Procedure Time-Out',
       procTechniqueLabel: 'Technique (Target / Guidance / Confirmation)',
       procTechniquePrompt: 'Sterile prep; sedation; target nerve/plexus and side; imaging guidance (fluoroscopy/US); needle placement and confirmation…',
@@ -475,17 +479,79 @@ export const TEMPLATES = {
       timeSpentLabel: 'Total Procedure Time & Attestation',
     },
   ),
-  // Spinal cord stimulator trial / implant (63650 · 63685).
+  // Neurostimulator — spinal cord (63650 · 63685) or peripheral nerve (64555 · 64575) trial / implant.
   pain_scs: T(
     ['procedureName', 'indication', 'consent', 'procTechnique', 'procFindings', 'complications', 'postProcedure', 'timeSpent'],
     {
-      procedureNameLabel: 'Procedure Performed (Spinal Cord Stimulator — Trial / Implant) + CPT',
-      procedureNamePrompt: 'SCS percutaneous trial (63650) or permanent implant (63685) — lead level(s), target, and device / manufacturer…',
-      indicationPrompt: 'FBSS / CRPS / refractory neuropathic pain; failed conservative & interventional therapy; psychological clearance; (implant) trial ≥50% relief…',
+      procedureNameLabel: 'Procedure Performed (SCS / PNS — Trial / Implant) + CPT',
+      procedureNamePrompt: 'Spinal cord stimulator percutaneous trial (63650) or implant (63685), OR peripheral nerve stimulator trial/implant (64555 / 64575) — target nerve/level(s), lead(s), and device / manufacturer…',
+      indicationPrompt: 'FBSS / CRPS / refractory neuropathic or peripheral nerve pain; failed conservative & interventional therapy; psychological clearance; (implant) documented trial ≥50% relief…',
       consentLabel: 'Informed Consent & Pre-Procedure Time-Out',
       procTechniqueLabel: 'Technique (Lead Placement / Guidance / Mapping / Programming)',
-      procTechniquePrompt: 'Sterile prep; sedation; epidural access; lead advancement to target level under fluoroscopy; paresthesia mapping / coverage; anchoring (implant); programming parameters…',
+      procTechniquePrompt: 'Sterile prep; sedation; access; lead advancement to target under fluoroscopy / ultrasound; paresthesia mapping / coverage; anchoring (implant); programming parameters…',
       postProcedureLabel: 'Post-Procedure Condition & Trial Instructions',
+      timeSpentLabel: 'Total Procedure Time & Attestation',
+    },
+  ),
+  // Intrathecal drug delivery pump — trial / implant / refill (62362 · 62367–62370 · 95990–95991).
+  pain_pump: T(
+    ['procedureName', 'indication', 'consent', 'procTechnique', 'injectate', 'procFindings', 'complications', 'postProcedure', 'timeSpent'],
+    {
+      procedureNameLabel: 'Procedure Performed (Intrathecal Pump — Trial / Implant / Refill) + CPT',
+      procedureNamePrompt: 'Intrathecal drug delivery — trial (62362), pump/catheter implant (62362 + 62350/62351), or refill & reprogramming (95990–95991) — device / manufacturer, catheter tip level…',
+      indicationPrompt: 'Refractory cancer or non-cancer pain (or spasticity) failing systemic therapy; (implant) successful trial; documented goals of intrathecal therapy…',
+      consentLabel: 'Informed Consent & Pre-Procedure Time-Out',
+      procTechniqueLabel: 'Technique (Access / Catheter Tip Level / Guidance / Programming)',
+      procTechniquePrompt: 'Sterile prep; sedation; intrathecal access under fluoroscopy; catheter tip level; pocket (implant); pump programming (rate / dose)…',
+      injectateLabel: 'Intrathecal Medication, Concentration & Dose',
+      injectatePrompt: 'Agent (preservative-free morphine / ziconotide / baclofen / bupivacaine), concentration, daily dose (mcg or mg/day), reservoir volume, and any dose change…',
+      postProcedureLabel: 'Post-Procedure Condition & Plan',
+      timeSpentLabel: 'Total Procedure Time & Attestation',
+    },
+  ),
+  // Vertebral augmentation — kyphoplasty / vertebroplasty (22510–22515).
+  pain_kypho: T(
+    ['procedureName', 'indication', 'consent', 'procTechnique', 'procFindings', 'complications', 'postProcedure', 'timeSpent'],
+    {
+      procedureNameLabel: 'Procedure Performed (Kyphoplasty / Vertebroplasty) + CPT',
+      procedureNamePrompt: 'Vertebral augmentation — kyphoplasty (balloon) or vertebroplasty; level(s) treated (e.g. T12, L1), approach (uni-/bipedicular), with CPT (22510–22515)…',
+      indicationPrompt: 'Painful osteoporotic / neoplastic vertebral compression fracture with concordant point tenderness and MRI/CT edema (acute/subacute); failed conservative therapy…',
+      consentLabel: 'Informed Consent & Pre-Procedure Time-Out',
+      procTechniqueLabel: 'Technique (Approach / Guidance / Cavity Creation / Cement Fill)',
+      procTechniquePrompt: 'Sterile prep; sedation; fluoroscopic guidance; trocar placement per level; (kypho) balloon inflation & cavity; cement (PMMA) volume per level; extravasation check…',
+      postProcedureLabel: 'Post-Procedure Condition & Plan',
+      timeSpentLabel: 'Total Procedure Time & Attestation',
+    },
+  ),
+  // Peripheral joint / bursa injection (20600–20611).
+  pain_joint: T(
+    ['procedureName', 'indication', 'consent', 'procTechnique', 'injectate', 'complications', 'postProcedure', 'timeSpent'],
+    {
+      procedureNameLabel: 'Procedure Performed (Joint / Bursa Injection) + CPT',
+      procedureNamePrompt: 'Joint or bursa injection — site (shoulder / knee / hip / greater trochanteric bursa / small joint), laterality, and with/without ultrasound guidance (20600–20611)…',
+      indicationPrompt: 'Osteoarthritis / bursitis / synovitis with concordant exam; failed conservative therapy (NSAIDs, activity modification, PT)…',
+      consentLabel: 'Informed Consent & Time-Out',
+      procTechniqueLabel: 'Technique (Site / Approach / Guidance / Aspiration)',
+      procTechniquePrompt: 'Sterile prep; site and side; ultrasound or landmark guidance; aspiration if effusion; confirmation of intra-articular / intra-bursal placement…',
+      injectateLabel: 'Medications Injected',
+      injectatePrompt: 'Corticosteroid (agent & mg), local anesthetic (agent, %, mL), or viscosupplement; total volume…',
+      postProcedureLabel: 'Post-Procedure Condition & Plan',
+      timeSpentLabel: 'Total Procedure Time & Attestation',
+    },
+  ),
+  // Botulinum toxin injection — chronic migraine (64615) / limb spasticity (64642–64647).
+  pain_botox: T(
+    ['procedureName', 'indication', 'consent', 'procTechnique', 'injectate', 'complications', 'postProcedure', 'timeSpent'],
+    {
+      procedureNameLabel: 'Procedure Performed (Botulinum Toxin Injection) + CPT',
+      procedureNamePrompt: 'Botulinum toxin injection — indication & site: chronic migraine (64615, PREEMPT protocol) or limb/muscle spasticity (64642–64647); number of muscles/regions, with CPT…',
+      indicationPrompt: 'Chronic migraine (≥15 headache days/month) failing preventives, OR focal spasticity/dystonia; document diagnosis and prior therapy…',
+      consentLabel: 'Informed Consent & Time-Out',
+      procTechniqueLabel: 'Technique (Muscles / Sites / Guidance)',
+      procTechniquePrompt: 'Muscles/sites injected; anatomic vs EMG/ultrasound guidance for spasticity; injection pattern (e.g. PREEMPT for migraine)…',
+      injectateLabel: 'Botulinum Toxin — Product, Total Units & Units per Site',
+      injectatePrompt: 'Product (onabotulinumtoxinA / others), total units, and units per muscle/site; reconstitution…',
+      postProcedureLabel: 'Post-Procedure Condition & Plan',
       timeSpentLabel: 'Total Procedure Time & Attestation',
     },
   ),

@@ -118,7 +118,7 @@ export const usersApi = {
 // --- Specialties (admin) ---------------------------------------------------
 export const specialtiesApi = {
   list: () => api.get('/specialties'),
-  create: (name) => api.post('/specialties', { name }),
+  create: (name, serviceLine) => api.post('/specialties', serviceLine ? { name, serviceLine } : { name }),
 };
 
 // --- Providers (picker for appointments) -----------------------------------

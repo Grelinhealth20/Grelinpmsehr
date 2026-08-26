@@ -22,11 +22,11 @@ router.get('/', async (req, res, next) => {
 
 router.post('/', csrfProtection, validate(createSpecialtySchema), async (req, res, next) => {
   try {
-    const { name } = req.body;
+    const { name, serviceLine } = req.body;
     if (await specialtyNameExists(name)) {
       return res.status(409).json({ error: 'A specialty with this name already exists.', code: 'SPECIALTY_EXISTS' });
     }
-    const specialty = await createSpecialty(name, req.authUserId);
+    const specialty = await createSpecialty(name, req.authUserId, serviceLine);
     await recordAudit({
       actorUserId: req.authUserId,
       action: 'specialty.create',
@@ -34,7 +34,7 @@ router.post('/', csrfProtection, validate(createSpecialtySchema), async (req, re
       entityId: specialty.uuid,
       ip: req.ip,
       userAgent: req.get('user-agent'),
-      metadata: { name },
+      metadata: { name, serviceLine: specialty.serviceLine },
     });
     res.status(201).json({ specialty });
   } catch (err) {

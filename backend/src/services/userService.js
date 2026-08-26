@@ -14,7 +14,9 @@ export function toPublicUser(row) {
     status: row.status,
     accessLevel: row.access_level ? safeJson(row.access_level) : null,
     credentials: row.credentials ? (safeJson(row.credentials) || []) : [],
-    specialty: row.specialty_uuid ? { uuid: row.specialty_uuid, name: row.specialty_name } : null,
+    specialty: row.specialty_uuid
+      ? { uuid: row.specialty_uuid, name: row.specialty_name, serviceLine: row.specialty_service_line || 'snf' }
+      : null,
     npi: row.npi || null,
     taxonomy: row.taxonomy || null,
     taxonomyCode: row.taxonomy_code || null,
@@ -39,7 +41,7 @@ const USER_SELECT = `SELECT u.id, u.uuid, u.email_enc, u.email_bidx, u.full_name
   u.access_level, u.credentials, u.npi, u.taxonomy, u.taxonomy_code, u.password_hash, u.must_reset_password,
   u.failed_login_attempts, u.locked_until,
   u.last_login_at, u.password_changed_at, u.created_at, u.updated_at, u.specialty_id,
-  s.uuid AS specialty_uuid, s.name AS specialty_name
+  s.uuid AS specialty_uuid, s.name AS specialty_name, s.service_line AS specialty_service_line
   FROM users u LEFT JOIN specialties s ON s.id = u.specialty_id`;
 
 export async function findRawByEmail(email) {

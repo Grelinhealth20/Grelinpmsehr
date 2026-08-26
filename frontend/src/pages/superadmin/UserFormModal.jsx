@@ -90,6 +90,7 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
   const [specialties, setSpecialties] = useState([]);
   const [specialtyUuid, setSpecialtyUuid] = useState(user?.specialty?.uuid || null);
   const [newSpec, setNewSpec] = useState('');
+  const [newSpecLine, setNewSpecLine] = useState('snf'); // service line for a newly added specialty
   const [addingSpec, setAddingSpec] = useState(false);
 
   useEffect(() => {
@@ -110,10 +111,11 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
     if (name.length < 2) return;
     setAddingSpec(true);
     try {
-      const { data } = await specialtiesApi.create(name);
+      const { data } = await specialtiesApi.create(name, newSpecLine);
       setSpecialties((s) => [...s, data.specialty].sort((a, b) => a.name.localeCompare(b.name)));
       setSpecialtyUuid(data.specialty.uuid);
       setNewSpec('');
+      setNewSpecLine('snf');
     } catch (e) {
       setErr(toApiError(e).message);
     } finally {
@@ -348,6 +350,9 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
                   onClick={() => setSpecialtyUuid(specialtyUuid === s.uuid ? null : s.uuid)}
                 >
                   {s.name}
+                  <span className={`line-tag ${s.serviceLine === 'pain' ? 'pain' : 'snf'}`}>
+                    {s.serviceLine === 'pain' ? 'Pain' : 'SNF'}
+                  </span>
                 </button>
               ))}
               {specialties.length === 0 && <span className="hint">No specialties yet — add one below.</span>}
@@ -358,13 +363,23 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
                 value={newSpec}
                 maxLength={120}
                 placeholder="Add a new specialty…"
-                onChange={(e) => setNewSpec(e.target.value)}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setNewSpec(v);
+                  // Auto-derive the default service line from the name (admin can override below).
+                  setNewSpecLine(/\bpain\b/i.test(v) ? 'pain' : 'snf');
+                }}
                 onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addSpecialty(); } }}
               />
+              <div className="line-toggle" role="group" aria-label="Service line">
+                <button type="button" className={newSpecLine === 'snf' ? 'active' : ''} onClick={() => setNewSpecLine('snf')}>SNF</button>
+                <button type="button" className={newSpecLine === 'pain' ? 'active' : ''} onClick={() => setNewSpecLine('pain')}>Pain</button>
+              </div>
               <button type="button" className="btn ghost sm" onClick={addSpecialty} disabled={addingSpec || newSpec.trim().length < 2}>
                 {addingSpec ? <span className="spinner dark" /> : '+ Add'}
               </button>
             </div>
+            <span className="hint">Service line governs clinical data isolation — SNF and Pain providers never see each other's records.</span>
           </div>
         )}
 

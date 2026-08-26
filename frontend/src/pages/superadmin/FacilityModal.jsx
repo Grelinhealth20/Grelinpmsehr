@@ -26,7 +26,8 @@ export default function FacilityModal({ facility = null, onClose, onSaved }) {
   const [verified, setVerified] = useState(editing); // a facility is chosen/verified
   const [saving, setSaving] = useState(false);
   // Logo: null = unchanged, a data URI = new upload, '' = remove. The existing logo
-  // (form.logo) is a signed URL for display only and is never sent back.
+  // (form.logo) is an inline data URI for display only (served by getFacility from the
+  // facility's S3 object) and is never sent back.
   const [logoData, setLogoData] = useState(null);
 
   function onLogoFile(e) {

@@ -8,10 +8,15 @@ import {
   updateNote as updateNoteSvc, signNote as signNoteSvc, amendSignedNote as amendNoteSvc,
 } from '../services/encounterNoteService.js';
 import {
-  providerServiceLine, listTemplatesForServiceLine, providerCanUseNoteType,
+  serviceForNoteType, listTemplatesForServiceLine,
 } from '../services/noteTemplateService.js';
 import { recordAudit } from '../services/auditService.js';
 import { notePdf } from '../services/pdfExport.js';
+
+// The current provider's service line — the STORED, admin-set service_line ALREADY loaded
+// on req.user.specialty by the auth middleware (cached), so it costs no extra DB round-trip
+// and matches the authoritative column used everywhere else. No specialty → 'snf'.
+const reqServiceLine = (req) => req.user?.specialty?.serviceLine || 'snf';
 
 /**
  * Note templates AVAILABLE to the current provider — filtered to their service line
@@ -20,7 +25,7 @@ import { notePdf } from '../services/pdfExport.js';
  */
 export async function noteTemplates(req, res, next) {
   try {
-    const serviceLine = await providerServiceLine(req.authUserId);
+    const serviceLine = reqServiceLine(req);
     const templates = await listTemplatesForServiceLine(serviceLine);
     res.json({ serviceLine, templates });
   } catch (err) { next(err); }
@@ -125,8 +130,8 @@ export async function createNote(req, res, next) {
   try {
     const { noteType, reason, content } = req.body;
     // SERVICE-LINE ACCESS: a provider may create ONLY the note templates for their own
-    // specialty's service line (SNF vs Pain). Server-enforced — no cross-over.
-    if (!(await providerCanUseNoteType(req.authUserId, noteType))) {
+    // specialty's service line (SNF vs Pain). Server-enforced, in-memory (no DB round-trip).
+    if (serviceForNoteType(noteType) !== reqServiceLine(req)) {
       return res.status(403).json({ error: 'This note template is not available for your specialty.', code: 'TEMPLATE_FORBIDDEN' });
     }
     const note = await createNoteSvc({ encounterUuid: req.params.encounterUuid, providerId: req.authUserId, noteType, reason, content, createdBy: req.authUserId });
@@ -147,8 +152,8 @@ export async function getNote(req, res, next) {
 export async function updateNote(req, res, next) {
   try {
     // If the note type is being changed, it must still belong to the provider's own
-    // service line (SNF vs Pain) — no switching a note across service lines.
-    if (req.body.noteType && !(await providerCanUseNoteType(req.authUserId, req.body.noteType))) {
+    // service line (SNF vs Pain) — no switching a note across service lines. In-memory.
+    if (req.body.noteType && serviceForNoteType(req.body.noteType) !== reqServiceLine(req)) {
       return res.status(403).json({ error: 'This note template is not available for your specialty.', code: 'TEMPLATE_FORBIDDEN' });
     }
     const result = await updateNoteSvc(req.params.noteUuid, req.authUserId, req.body);

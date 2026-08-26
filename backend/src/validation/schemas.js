@@ -78,7 +78,11 @@ export const updateUserSchema = z
   .refine((v) => Object.keys(v).length > 0, { message: 'No fields to update.' });
 
 export const createSpecialtySchema = z
-  .object({ name: z.string().trim().min(2, 'Name is too short.').max(120) })
+  .object({
+    name: z.string().trim().min(2, 'Name is too short.').max(120),
+    // Optional admin override of the clinical service line. Omitted → derived from the name.
+    serviceLine: z.enum(['snf', 'pain']).optional(),
+  })
   .strict();
 
 export const statusSchema = z
@@ -225,6 +229,7 @@ export const NOTE_TYPES = [
   // Pain Management
   'pain_consult', 'pain_followup', 'pain_med_mgmt', 'pain_esi', 'pain_facet_mbb',
   'pain_rfa', 'pain_si_joint', 'pain_tpi', 'pain_nerve_block', 'pain_scs',
+  'pain_pump', 'pain_kypho', 'pain_joint', 'pain_botox',
   'pain_uds', 'pain_discharge',
 ];
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be YYYY-MM-DD');
