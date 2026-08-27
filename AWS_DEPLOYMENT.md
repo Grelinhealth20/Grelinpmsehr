@@ -78,6 +78,16 @@ containers off the ALB target groups entirely.
    - `sg-redis` — inbound `6379` from `sg-app` only.
 3. Prefer **VPC endpoints** for S3, Secrets Manager, and CloudWatch so that traffic never
    leaves the AWS network (and to drop NAT cost/exposure).
+4. **Outbound internet egress is REQUIRED** for the external registries/APIs the app calls
+   server-side over HTTPS (443). If the app runs in a private subnet, it needs a **NAT
+   gateway** (VPC endpoints do not cover these public third parties), and `sg-app` must
+   allow outbound 443:
+   - **NPPES NPI Registry** — `https://npiregistry.cms.hhs.gov` (provider/facility lookup).
+   - **Stedi** — `https://healthcare.us.stedi.com` (real-time eligibility + payer search).
+   > Symptom when egress is missing: NPPES lookups return **"The NPPES registry could not
+   > be reached"** (the service now distinguishes an unreachable registry from a genuine
+   > no-match) and eligibility checks time out. Verify egress from the task with
+   > `curl -sS https://npiregistry.cms.hhs.gov/api/?version=2.1\&number=1548758857`.
 
 ---
 

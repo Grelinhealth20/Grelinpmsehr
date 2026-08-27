@@ -15,6 +15,14 @@ export const nppesEnabled = () => config.nppes.enabled;
 
 const SUFFIX = /\b(LLC|INC|LP|LLP|LTD|PLLC|CORP|CO|PA|PC|THE|II|III)\b/g;
 
+// Professional credentials and name suffixes NPPES stores SEPARATELY from the name —
+// stripped from the tail of a provider name query so the surname isn't mistaken for one.
+const CREDENTIAL_TOKENS = new Set([
+  'MD', 'DO', 'MBBS', 'NP', 'APRN', 'PA', 'PAC', 'DDS', 'DMD', 'DPM', 'DC', 'OD', 'DNP',
+  'CRNA', 'RN', 'LPN', 'PHD', 'PHARMD', 'PSYD', 'MSN', 'MPH', 'FNP', 'ANP', 'AGNP',
+  'PMHNP', 'AGACNP', 'FACP', 'FAAP', 'MSW', 'LCSW', 'JR', 'SR', 'II', 'III', 'IV',
+]);
+
 function normName(s) {
   return String(s || '').toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').replace(SUFFIX, ' ').replace(/\s+/g, ' ').trim();
 }
@@ -22,18 +30,25 @@ function titleCase(s) { return String(s || '').toLowerCase().replace(/\b[a-z]/g,
 function locOf(r) { return (r.addresses || []).find((a) => a.address_purpose === 'LOCATION') || (r.addresses || [])[0] || null; }
 function addrKey(a) { return a ? `${(a.address_1 || '').toUpperCase().trim()}|${(a.city || '').toUpperCase()}|${(a.state || '').toUpperCase()}|${(a.postal_code || '').slice(0, 5)}` : ''; }
 
+/** Thrown when NPPES cannot be reached (network/egress/timeout) — distinct from an
+ *  empty-but-successful result, so the UI can say "unreachable" not "no match". */
+function unavailable(msg) { const e = new Error(msg); e.code = 'NPPES_UNAVAILABLE'; return e; }
+
 async function query(params) {
   const url = `${config.nppes.baseUrl}?${params.toString()}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.nppes.timeoutMs);
   try {
     const resp = await fetch(url, { signal: controller.signal, headers: { Accept: 'application/json' } });
-    if (!resp.ok) return [];
+    if (!resp.ok) throw unavailable(`NPPES HTTP ${resp.status}`);
     const data = await resp.json();
-    return Array.isArray(data.results) ? data.results : [];
+    return Array.isArray(data.results) ? data.results : []; // 200 with 0 results = genuine no-match
   } catch (e) {
-    logger.warn({ err: e.message }, 'NPPES query failed');
-    return [];
+    if (e.code === 'NPPES_UNAVAILABLE') { logger.warn({ err: e.message }, 'NPPES unavailable'); throw e; }
+    // Network error, DNS failure, timeout/abort — on AWS this usually means no outbound
+    // egress from the task's subnet to npiregistry.cms.hhs.gov (NAT gateway / SG).
+    logger.warn({ err: e.message, url: config.nppes.baseUrl }, 'NPPES unreachable (network/egress)');
+    throw unavailable(`NPPES unreachable: ${e.message}`);
   } finally { clearTimeout(timer); }
 }
 
@@ -143,10 +158,17 @@ export async function searchProviders({ q = '', npi = '', state = '', limit = 15
   if (cleanNpi.length === 10) {
     results = await query(new URLSearchParams({ ...base, number: cleanNpi }));
   } else {
-    const clean = String(q || '').replace(/[.,]+$/, '').trim();
+    // Drop periods WITHIN tokens ("M.D." → "MD") and treat commas as separators, so a
+    // typed credential collapses to a single recognizable token instead of splitting.
+    const clean = String(q || '').replace(/\./g, '').replace(/,/g, ' ').replace(/\s+/g, ' ').trim();
     if (clean.length < 2) return [];
     if (state) base.state = state;
-    const toks = clean.split(/\s+/).filter(Boolean);
+    let toks = clean.split(/\s+/).filter(Boolean);
+    // NPPES stores the name and the professional credential SEPARATELY, so strip any
+    // trailing credential/suffix tokens a user typed (e.g. "Jenakan Jeramian Dev MD" →
+    // surname is "Dev", not "MD"). Only strip from the end, and never the last remaining
+    // token, so a real surname is never removed.
+    while (toks.length > 1 && CREDENTIAL_TOKENS.has(toks[toks.length - 1].toUpperCase())) toks.pop();
     const params = { ...base };
     if (toks.length >= 2) {
       // "First Last" (or more) — first token → first name, last token → last name.
@@ -179,11 +201,14 @@ export async function lookupFacility({ name, city, state }) {
   if (state) base.state = state;
   if (city) base.city = city;
 
-  let results = await query(new URLSearchParams({ ...base, organization_name: `${cleanName}*` }));
+  // Best-effort auto-fill: a registry outage must never block facility creation,
+  // so treat "unreachable" as "no match" here (unlike the explicit search endpoints).
+  const safe = (p) => query(p).catch(() => []);
+  let results = await safe(new URLSearchParams({ ...base, organization_name: `${cleanName}*` }));
   if (!results.length) {
     // Fallback: first significant tokens only (handles trailing OCR noise).
     const toks = normName(cleanName).split(' ').filter(Boolean).slice(0, 3).join(' ');
-    if (toks && toks !== normName(cleanName)) results = await query(new URLSearchParams({ ...base, organization_name: `${toks}*` }));
+    if (toks && toks !== normName(cleanName)) results = await safe(new URLSearchParams({ ...base, organization_name: `${toks}*` }));
   }
   if (!results.length) return null;
 

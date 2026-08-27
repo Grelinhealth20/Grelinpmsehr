@@ -1367,6 +1367,7 @@
 .fac-result-npi { font-size: 11px; font-weight: 800; color: var(--c-blue); font-family: var(--font-mono, ui-monospace, monospace); letter-spacing: 0.02em; }
 .fac-result-tax { font-size: 10.5px; font-weight: 700; color: var(--c-ink-3); background: rgba(9,17,33,0.05); border-radius: 999px; padding: 3px 9px; white-space: nowrap; }
 .fac-empty { padding: 16px; text-align: center; color: var(--c-ink-3); font-size: 12.5px; font-weight: 600; border: 1px dashed var(--c-line); border-radius: 12px; }
+.fac-empty.fac-error { color: #c0392b; border-color: rgba(192,57,43,0.3); background: rgba(192,57,43,0.05); border-style: solid; }
 
 .fac-verify { border: 1px solid var(--c-line); border-radius: 14px; padding: 16px; background: #fbfcfe; }
 .fac-verify-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }

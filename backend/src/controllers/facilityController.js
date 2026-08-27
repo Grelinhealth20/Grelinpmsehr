@@ -14,7 +14,15 @@ export async function nppesSearch(req, res, next) {
     const { q = '', npi = '', state = '', city = '' } = req.query;
     const results = await searchFacilities({ q, npi, state, city });
     res.json({ results });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.code === 'NPPES_UNAVAILABLE') {
+      return res.status(502).json({
+        error: 'The NPPES registry could not be reached. Check the server’s internet access and try again.',
+        code: 'NPPES_UNAVAILABLE',
+      });
+    }
+    next(err);
+  }
 }
 
 export async function list(req, res, next) {

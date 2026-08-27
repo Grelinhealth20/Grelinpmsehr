@@ -26,7 +26,15 @@ export async function nppesProviderSearch(req, res, next) {
     const { q = '', npi = '', state = '' } = req.query;
     const results = await searchProviders({ q, npi, state });
     res.json({ results });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.code === 'NPPES_UNAVAILABLE') {
+      return res.status(502).json({
+        error: 'The NPPES registry could not be reached. Check the server’s internet access and try again.',
+        code: 'NPPES_UNAVAILABLE',
+      });
+    }
+    next(err);
+  }
 }
 
 /** The configured master-admin account — protected from demotion/deletion. */

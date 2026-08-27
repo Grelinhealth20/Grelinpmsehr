@@ -65,6 +65,7 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
   const [npiTerm, setNpiTerm] = useState('');
   const [npiResults, setNpiResults] = useState([]);
   const [npiSearching, setNpiSearching] = useState(false);
+  const [npiError, setNpiError] = useState('');
   const npiDebounce = useRef(null);
 
   // Facility assignment (providers + billing users) — governs their billing
@@ -137,15 +138,23 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
     const t = npiTerm.trim();
     const digits = t.replace(/\D/g, '');
     const ready = digits.length === 10 || t.length >= 2;
-    if (!ready) { setNpiResults([]); setNpiSearching(false); return undefined; }
+    if (!ready) { setNpiResults([]); setNpiSearching(false); setNpiError(''); return undefined; }
     setNpiSearching(true);
+    setNpiError('');
     clearTimeout(npiDebounce.current);
     npiDebounce.current = setTimeout(async () => {
       try {
         const params = digits.length === 10 ? { npi: digits } : { q: t };
         const { data } = await usersApi.nppes(params);
         setNpiResults(data.results || []);
-      } catch { setNpiResults([]); }
+        setNpiError('');
+      } catch (e) {
+        setNpiResults([]);
+        // Distinguish a registry outage / blocked egress from a genuine no-match.
+        setNpiError(e?.response?.data?.code === 'NPPES_UNAVAILABLE'
+          ? 'The NPPES registry could not be reached. Check the server’s internet connection and try again.'
+          : '');
+      }
       finally { setNpiSearching(false); }
     }, 400);
     return () => clearTimeout(npiDebounce.current);
@@ -291,7 +300,10 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
                 ))}
               </div>
             )}
-            {!npiSearching && npiTerm.trim().length >= 2 && npiResults.length === 0 && (
+            {!npiSearching && npiError && (
+              <div className="fac-empty fac-error">{npiError}</div>
+            )}
+            {!npiSearching && !npiError && npiTerm.trim().length >= 2 && npiResults.length === 0 && (
               <div className="fac-empty">No matching providers found in the NPPES registry.</div>
             )}
             <div className="fac-grid" style={{ marginTop: 10 }}>
