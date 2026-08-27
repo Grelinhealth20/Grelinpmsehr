@@ -267,9 +267,12 @@ export async function buildNoteDocx({ patient, encounterDate, note, signerName, 
   // Render in the note's OWN template order (matches the editor + the PDF exactly);
   // fall back to the canonical clinical order for legacy notes without a stored order.
   const storedOrder = note.content?.sectionOrder;
-  const order = Array.isArray(storedOrder) && storedOrder.length
+  const base = Array.isArray(storedOrder) && storedOrder.length
     ? [...storedOrder, ...SECTION_ORDER.filter((k) => !storedOrder.includes(k))]
     : SECTION_ORDER;
+  // Append ANY saved section not already ordered, so a filled-in field is NEVER dropped
+  // from the record — even a legacy/unknown key (matches the PDF's never-drop guarantee).
+  const order = [...base, ...Object.keys(sections).filter((k) => !base.includes(k))];
   for (const key of order) {
     const val = sections[key];
     if (val && String(val).trim()) { children.push(heading(overrides[key] || SECTION_LABELS[key] || key)); children.push(...body(val)); }

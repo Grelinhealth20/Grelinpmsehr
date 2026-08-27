@@ -1315,6 +1315,8 @@
 .nt-autosave::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .nt-autosave.saving { color: var(--c-accent); }
 .nt-autosave.saved { color: #10a34a; }
+.nt-autosave.error { color: #c0392b; }
+.nt-autosave.error::before { animation: corePulse 1s ease-in-out infinite; }
 /* MD amendment of a signed note */
 .nt-amend-flag { font-size: 12px; font-weight: 800; color: #b45309; background: rgba(217,119,6,0.12); padding: 5px 12px; border-radius: 20px; margin-left: 16px; display: inline-flex; align-items: center; gap: 6px; }
 .nt-amend-flag::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }

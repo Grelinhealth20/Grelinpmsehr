@@ -138,6 +138,14 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   const [amendReason, setAmendReason] = useState('');
   const skipSave = useRef(true); // skip the save that a fresh load/open would trigger
   const createToken = useRef(0); // guards the async Rx merge to the LATEST note created
+  // Auto-save engine refs — persistence must never silently drop an edit.
+  const contentRef = useRef(content); // always the LATEST content (avoids stale closures)
+  const reasonRef = useRef(reason);
+  const savingRef = useRef(false);    // a save request is in flight
+  const dirtyRef = useRef(false);     // edits exist that are not yet confirmed saved
+  const retryRef = useRef(null);      // pending retry timer after a failed save
+  contentRef.current = content;
+  reasonRef.current = reason;
 
   async function loadNotes({ autoOpen = false } = {}) {
     setLoading(true);
@@ -233,26 +241,57 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   const addRx = () => setContent((c) => ({ ...c, prescriptions: [...c.prescriptions, blankRx()] }));
   const removeRx = (i) => setContent((c) => ({ ...c, prescriptions: c.prescriptions.filter((_, idx) => idx !== i) }));
 
-  // Auto-save: debounced persistence of EVERY edit (vitals, sections, Rx, reason)
-  // so nothing is ever lost. Skips signed (immutable) notes and the initial load.
+  // Persist the LATEST edit. Coalesces concurrent calls (last-write-wins by always
+  // sending contentRef/reasonRef), and NEVER swallows a failure: a failed save moves
+  // to the 'error' state and auto-retries, and the dirty flag stays set until the
+  // server confirms — so a transient blip can never silently drop a medical-record edit.
+  async function flushSave() {
+    if (!active || active.status === 'signed' || active.isOwner === false) return true;
+    if (savingRef.current) { dirtyRef.current = true; return false; } // fold into the in-flight save
+    if (retryRef.current) { clearTimeout(retryRef.current); retryRef.current = null; }
+    savingRef.current = true;
+    setAutoState('saving');
+    try {
+      await encountersApi.updateNote(active.uuid, { content: contentRef.current, reason: reasonRef.current });
+      savingRef.current = false;
+      if (dirtyRef.current) { dirtyRef.current = false; return flushSave(); } // edits arrived mid-save
+      setAutoState('saved');
+      return true;
+    } catch {
+      savingRef.current = false;
+      setAutoState('error'); // visible: "Not saved — retrying" — never silent
+      retryRef.current = setTimeout(() => { flushSave(); }, 3000); // auto-recover
+      return false;
+    }
+  }
+
+  // Auto-save: debounced persistence of EVERY edit (vitals, sections, Rx, reason).
+  // Skips signed (immutable) notes, read-only viewers, and the initial load.
   useEffect(() => {
-    // Never auto-save a signed note or a note the viewer does not own (read-only).
     if (!active || active.status === 'signed' || active.isOwner === false) return undefined;
     if (skipSave.current) { skipSave.current = false; return undefined; }
+    dirtyRef.current = true;
     setAutoState('saving');
-    const t = setTimeout(async () => {
-      try {
-        await encountersApi.updateNote(active.uuid, { content, reason });
-        setAutoState('saved');
-      } catch { setAutoState('idle'); }
-    }, 800);
+    const t = setTimeout(() => { flushSave(); }, 800);
     return () => clearTimeout(t);
   }, [content, reason]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Flush any pending edit before closing (covers the debounce window).
+  // Warn before leaving with unsaved edits (tab close / refresh within the save window).
+  useEffect(() => {
+    const onBeforeUnload = (e) => {
+      if (dirtyRef.current || savingRef.current) { e.preventDefault(); e.returnValue = ''; }
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, []);
+
+  // Flush any pending edit before closing. If the final save FAILS, keep the editor
+  // open and tell the provider — never close over unsaved medical-record changes.
   async function closeWithSave() {
-    if (active && active.status !== 'signed' && active.isOwner !== false && !skipSave.current) {
-      try { await encountersApi.updateNote(active.uuid, { content, reason }); } catch { /* best-effort */ }
+    if (active && active.status !== 'signed' && active.isOwner !== false && !skipSave.current
+        && (dirtyRef.current || savingRef.current || autoState === 'error')) {
+      const ok = await flushSave();
+      if (!ok) { toast.error('Your last changes could not be saved yet — staying open so nothing is lost. Retrying…'); return; }
     }
     onClose();
   }
@@ -350,7 +389,10 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
       <span className="nt-foot-meta">Encounter {encNo(encounter.encounterNo)} · DOS {usDate(encounter.date)}</span>
       {active && !readOnly && !amending && (
         <span className={`nt-autosave ${autoState}`}>
-          {autoState === 'saving' ? 'Saving…' : autoState === 'saved' ? 'All changes saved' : 'Auto-saves as you type'}
+          {autoState === 'saving' ? 'Saving…'
+            : autoState === 'saved' ? 'All changes saved'
+            : autoState === 'error' ? 'Not saved — retrying…'
+            : 'Auto-saves as you type'}
         </span>
       )}
       {active && amending && (
