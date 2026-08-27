@@ -257,91 +257,258 @@ const T = (keys, over = {}) => keys.map((key) => ({
  * focused without losing compliance.
  */
 export const TEMPLATES = {
-  // Comprehensive initial evaluation (99304–99306) — comprehensive Hx + exam + MDM.
+  // Initial Nursing Facility Care (99304–99306) — comprehensive Hx + exam + MDM that
+  // establishes the skilled need and the individualized plan of care.
   hp_admission: T(
-    // Vitals lead as a quick-reference header (standard EHR layout), then the H&P
-    // narrative: CC → HPI → PMH → Meds → Allergies → ROS (last subjective, before the
-    // exam) → Exam → Data → Functional status → A → MDM → Plan → Code status →
-    // Advance directive → Attestation.
     ['vitals', 'chiefComplaint', 'hpi', 'pmh', 'medications', 'allergies', 'ros', 'exam', 'results', 'functionalStatus', 'assessment', 'mdm', 'plan', 'codeStatus', 'advanceDirective', 'timeSpent'],
-    { chiefComplaintLabel: 'Reason for Admission', resultsLabel: 'Diagnostic Data on Admission', medicationsLabel: 'Admission Medication Reconciliation', functionalStatusLabel: 'Functional / Rehabilitation Status' },
+    {
+      chiefComplaintLabel: 'Reason for Admission',
+      chiefComplaintPrompt: 'Reason for SNF admission, the qualifying 3-day inpatient stay (if Part A), and the SKILLED need justifying this level of care (skilled nursing and/or rehabilitation)…',
+      hpiPrompt: 'Full narrative of the illness/injury leading to admission — onset and course, the acute hospitalization and treatment, current clinical status, and the specific skilled services required…',
+      medicationsLabel: 'Admission Medication Reconciliation',
+      medicationsPrompt: 'Complete reconciled admission medication list — drug, dose, route, frequency; flag high-risk medications (anticoagulants, insulin, opioids, antipsychotics) with indication and monitoring…',
+      resultsLabel: 'Diagnostic Data on Admission',
+      resultsPrompt: 'Hospital/transfer and admission labs, imaging, and diagnostics with interpretation; note pending results and needed follow-up studies…',
+      functionalStatusLabel: 'Functional / Rehabilitation Status',
+      functionalStatusPrompt: 'Prior baseline vs current mobility, ADLs, cognition, continence, and swallow; rehabilitation potential and the PT/OT/ST plan that supports the skilled stay…',
+      assessmentPrompt: 'Numbered problem list — the primary reason for skilled care first; each active/chronic diagnosis with clinical status and ICD-10, linked to its plan…',
+      planPrompt: 'Individualized plan of care per problem — skilled interventions, medications, monitoring parameters, diet/activity, therapy orders, consults, and measurable rehab/recovery goals with target dates…',
+    },
   ),
-  // Routine subsequent visit (99307–99310) — focused interval, exam, A/MDM/P.
+  // Subsequent NF Care (99307–99310) — ROUTINE periodic visit reassessing ALL active
+  // problems. Distinct from Follow-Up (single problem) and Acute (new problem).
   progress: T(
-    ['vitals', 'chiefComplaint', 'interval', 'exam', 'assessment', 'mdm', 'plan', 'timeSpent'],
-    { chiefComplaintLabel: 'Reason for Visit', examLabel: 'Focused Physical Examination' },
+    ['vitals', 'chiefComplaint', 'interval', 'medChanges', 'exam', 'assessment', 'mdm', 'plan', 'timeSpent'],
+    {
+      chiefComplaintLabel: 'Reason for Visit',
+      chiefComplaintPrompt: 'Routine scheduled physician/NPP visit — no new acute complaint (if an acute change is present, use the Acute or Change-in-Condition note)…',
+      intervalLabel: 'Interval History (Since Last Visit)',
+      intervalPrompt: 'Status of EACH active/chronic problem (stable / improving / worsening); nursing & therapy reports, vitals/weight trend, intake & behavior, medication tolerance, and any new nursing concerns…',
+      medChangesPrompt: 'Medications started, stopped, titrated, or held since the last visit, with the clinical rationale for each…',
+      examLabel: 'Focused Interval Examination',
+      examPrompt: 'Problem-directed exam — general appearance, cardiopulmonary, abdomen, extremities/edema, skin, and neuro/mental status as indicated by the active problems…',
+      assessmentPrompt: 'Numbered active-problem list — each with current status (stable/improving/worsening/resolved) and ICD-10; note stable chronic problems being continued…',
+      mdmPrompt: 'MDM for a subsequent visit: number/complexity of problems reassessed, data reviewed, and risk (esp. ongoing medication management) supporting 99307–99310…',
+      planPrompt: 'Plan per active problem — continue vs adjust therapy, monitoring parameters, therapy/nursing orders, and follow-up interval…',
+    },
   ),
-  // New acute problem — HPI-driven, with SBAR notification.
+  // Acute / Sick Visit — a NEW acute complaint arising in the facility. HPI-driven, with
+  // SBAR notification of the responsible practitioner/family.
   acute_visit: T(
-    ['vitals', 'chiefComplaint', 'hpi', 'exam', 'assessment', 'mdm', 'plan', 'notifications', 'timeSpent'],
-    { chiefComplaintLabel: 'Presenting Problem', examLabel: 'Focused Physical Examination' },
+    ['vitals', 'chiefComplaint', 'hpi', 'exam', 'results', 'assessment', 'mdm', 'plan', 'notifications', 'timeSpent'],
+    {
+      chiefComplaintLabel: 'Presenting Acute Problem',
+      chiefComplaintPrompt: 'The NEW acute symptom or event prompting this visit (e.g. fever, fall, chest pain, shortness of breath, altered mental status)…',
+      hpiPrompt: 'OLDCARTS of the new problem — onset, location, duration, character, aggravating/relieving factors, timing, severity, and associated symptoms; pertinent negatives ruling in/out serious causes…',
+      examLabel: 'Focused Examination (Problem-Directed)',
+      examPrompt: 'Exam focused on the acute problem and the systems needed to exclude serious causes (e.g. cardiopulmonary + neuro for chest pain or a fall)…',
+      resultsLabel: 'Point-of-Care / STAT Data',
+      resultsPrompt: 'Any STAT labs, POC glucose, EKG, imaging, or vitals obtained for this acute problem, with interpretation…',
+      assessmentPrompt: 'Working diagnosis/differential for the acute problem with ICD-10; acuity and whether it can be managed in-house vs requires transfer…',
+      planPrompt: 'Acute management — orders, medications, monitoring frequency, return-precautions/parameters, and disposition (treat-in-place vs send-out)…',
+      notificationsPrompt: 'SBAR to the covering physician/NPP and family/responsible party — Situation, Background, Assessment, Recommendation; who was notified, when, and their response/orders…',
+    },
   ),
-  // CMS change-in-condition — change description, exam, and REQUIRED SBAR notification.
+  // Change in Condition — CMS-required documentation of a SIGNIFICANT decline: the change,
+  // interventions/STAT orders, and MANDATORY notification of family + attending.
   change_in_condition: T(
-    ['vitals', 'changeDescription', 'hpi', 'exam', 'assessment', 'mdm', 'plan', 'notifications', 'timeSpent'],
-    { examLabel: 'Focused Physical Examination' },
+    ['vitals', 'changeDescription', 'hpi', 'exam', 'assessment', 'orders', 'plan', 'notifications', 'timeSpent'],
+    {
+      changeDescriptionPrompt: 'The significant change — what changed, when, baseline vs current, severity, precipitating factors, and any red-flag findings (hypotension, hypoxia, new focal deficit, sepsis criteria)…',
+      hpiPrompt: 'Evolution of the change since onset — trajectory, prior interventions and response, and pertinent negatives…',
+      examLabel: 'Focused Examination',
+      examPrompt: 'Exam targeting the changed system(s) plus vital-sign trend, mental status, and perfusion — enough to gauge acuity and stability…',
+      assessmentPrompt: 'Clinical impression of the change and its likely cause with ICD-10; stability and risk determination (treat-in-place vs transfer)…',
+      ordersLabel: 'Interventions & STAT Orders',
+      ordersPrompt: 'Immediate interventions and STAT orders — labs, imaging, O₂, IV fluids/medications, monitoring frequency, and vitals parameters for re-evaluation…',
+      planPrompt: 'Ongoing plan, monitoring interval, escalation/transfer criteria, and re-evaluation timing…',
+      notificationsPrompt: 'REQUIRED SBAR notification of the attending physician/NPP AND the family/responsible party (42 CFR §483.10) — who, when, what was communicated, and the response/orders given…',
+    },
   ),
-  // Focused follow-up on a prior problem, result, or intervention.
+  // Follow-Up — FOCUSED re-evaluation of ONE prior problem, abnormal result, or
+  // intervention (distinct from the routine multi-problem Progress note).
   follow_up: T(
-    ['vitals', 'chiefComplaint', 'interval', 'exam', 'assessment', 'mdm', 'plan', 'timeSpent'],
-    { chiefComplaintLabel: 'Reason for Follow-Up', intervalLabel: 'Interval Since Last Evaluation', examLabel: 'Focused Physical Examination' },
+    ['vitals', 'chiefComplaint', 'interval', 'exam', 'results', 'assessment', 'mdm', 'plan', 'timeSpent'],
+    {
+      chiefComplaintLabel: 'Problem Being Followed Up',
+      chiefComplaintPrompt: 'The single specific problem, abnormal result, or intervention being re-evaluated (e.g. resolving pneumonia, wound healing, INR/warfarin titration, post-injection response)…',
+      intervalLabel: 'Response Since Last Evaluation',
+      intervalPrompt: 'Trajectory of THIS problem since it was last evaluated — symptom change, result trend, response to the treatment/intervention, adherence, and any side effects…',
+      examLabel: 'Focused Examination (Targeted to the Problem)',
+      examPrompt: 'Exam directed at the followed problem only (e.g. lungs for pneumonia, the wound, the injected joint)…',
+      resultsLabel: 'Repeat / Trending Results',
+      resultsPrompt: 'Repeat or trending labs/imaging for this problem (e.g. repeat INR, CXR, CBC), with interpretation vs the prior value…',
+      assessmentPrompt: 'Status of the followed problem — improving / stable / worsening / resolved — with ICD-10 and whether the current management is achieving the goal…',
+      planPrompt: 'Continue, adjust, or stop the treatment; next monitoring/recheck interval; and criteria for escalation or resolution…',
+    },
   ),
-  // Required periodic physician visit — care-plan review + regulatory attestation.
+  // Regulatory / Periodic Visit — the physician/NPP visit required at set intervals;
+  // its purpose is the interdisciplinary care-plan review + the 42 CFR §483.30 attestation.
   regulatory: T(
     ['vitals', 'chiefComplaint', 'interval', 'exam', 'carePlanReview', 'assessment', 'plan', 'regulatoryAttestation', 'timeSpent'],
-    { chiefComplaintLabel: 'Purpose of Periodic Visit' },
+    {
+      chiefComplaintLabel: 'Purpose of Periodic Visit',
+      chiefComplaintPrompt: 'Required periodic physician/NPP visit (42 CFR §483.30) — state the visit interval being satisfied…',
+      intervalLabel: 'Interval Since Last Required Visit',
+      intervalPrompt: 'Overall interval status across all active problems, significant events, hospitalizations/ED visits, and therapy/nursing progress since the last required visit…',
+      examLabel: 'Physical Examination',
+      carePlanReviewPrompt: 'Interdisciplinary care plan reviewed — measurable goals and target dates, interventions, progress toward each goal, and revisions ordered; coordination with nursing, therapy, dietary, pharmacy, and social services…',
+      planPrompt: 'Decisions to continue or change the program of care per problem, orders reviewed/renewed, and the next required-visit interval…',
+    },
   ),
-  // Return from hospital/ED — hospital course + medication reconciliation.
+  // Post-Hospital / Readmission — return from hospital/ED. The reconciliation of hospital
+  // vs SNF orders is the highest-risk, highest-value element.
   post_hospital: T(
     ['vitals', 'chiefComplaint', 'hospitalCourse', 'dischargeDiagnoses', 'medications', 'allergies', 'exam', 'assessment', 'mdm', 'plan', 'timeSpent'],
-    { chiefComplaintLabel: 'Reason for Readmission', dischargeDiagnosesLabel: 'Hospital Discharge Diagnoses', medicationsLabel: 'Medication Reconciliation (Post-Hospital)' },
+    {
+      chiefComplaintLabel: 'Reason for Return / Readmission',
+      chiefComplaintPrompt: 'Reason for the transfer out and the return — the acute event, the treating facility, and dates out/in…',
+      hospitalCoursePrompt: 'Transferring facility, admit/discharge dates, reason for hospitalization, key treatments/procedures, and the clinical course and stability on return…',
+      dischargeDiagnosesLabel: 'Hospital Discharge Diagnoses',
+      dischargeDiagnosesPrompt: 'Principal and secondary diagnoses from the hospital discharge summary (ICD-10), including any new diagnoses to add to the SNF problem list…',
+      medicationsLabel: 'Medication Reconciliation (Post-Hospital)',
+      medicationsPrompt: 'Reconcile hospital discharge medications against the prior SNF list — explicitly note each drug CONTINUED, CHANGED, STOPPED, or NEW, and resolve any discrepancies (esp. anticoagulants, antibiotics, insulin, opioids)…',
+      examPrompt: 'Exam focused on the readmitting condition and overall stability on return (cardiopulmonary, the affected system, wounds/lines, mental status)…',
+      assessmentPrompt: 'Updated problem list incorporating the hospitalization — status of the acute problem and reconciliation of chronic problems with ICD-10…',
+      planPrompt: 'Post-hospital plan — resumed/adjusted skilled services, new orders and monitoring, pending hospital follow-ups, and re-hospitalization risk-reduction…',
+    },
   ),
-  // Medication management — no exam; medication-focused.
+  // Medication Management / Monitoring — medication-focused review; no exam required.
   medication: T(
-    ['chiefComplaint', 'medications', 'medChanges', 'allergies', 'assessment', 'plan', 'timeSpent'],
-    { chiefComplaintLabel: 'Reason for Medication Review' },
+    ['chiefComplaint', 'medications', 'medChanges', 'adverseEffects', 'allergies', 'assessment', 'plan', 'timeSpent'],
+    {
+      chiefComplaintLabel: 'Reason for Medication Review',
+      chiefComplaintPrompt: 'Trigger for the review — routine regimen review, monitoring of a high-risk drug (anticoagulant, insulin, antipsychotic), a gradual-dose-reduction (GDR) assessment, or a new symptom/lab prompting a change…',
+      medicationsLabel: 'Current Medication Regimen',
+      medicationsPrompt: 'Current medications relevant to this review — drug, dose, route, frequency, and indication; highlight the drug(s) under review…',
+      medChangesPrompt: 'Medications started, stopped, titrated, or held today with the clinical rationale; for psychotropics document the GDR attempt or the clinical contraindication…',
+      adverseEffectsPrompt: 'Tolerability and any adverse effects; required monitoring performed or ordered (e.g. INR, drug level, glucose, renal function, AIMS for antipsychotics)…',
+      assessmentPrompt: 'Assessment of medication appropriateness, efficacy, and safety per the indication (ICD-10), including polypharmacy/deprescribing considerations…',
+      planPrompt: 'Medication plan — changes made, monitoring labs/parameters and their interval, and the next review date…',
+    },
   ),
-  // Clinically significant test-result review — result-focused, no exam.
+  // Lab / Imaging Review — physician review of a clinically significant result; no exam.
   lab_imaging: T(
     ['chiefComplaint', 'results', 'assessment', 'mdm', 'plan', 'timeSpent'],
-    { chiefComplaintLabel: 'Reason for Review', resultsLabel: 'Results Reviewed & Interpretation' },
+    {
+      chiefComplaintLabel: 'Result Being Reviewed',
+      chiefComplaintPrompt: 'The clinically significant lab or imaging result triggering this review (e.g. critical potassium, supratherapeutic INR, new infiltrate, positive culture)…',
+      resultsLabel: 'Result & Interpretation',
+      resultsPrompt: 'The specific result with value/finding and reference range, the collection date, comparison to prior, and your clinical interpretation (expected vs unexpected, critical vs actionable)…',
+      assessmentPrompt: 'Clinical significance of the result — the diagnosis or problem it reflects (ICD-10) and its urgency…',
+      mdmPrompt: 'Independent interpretation of the test and the medical decision making it drives (data reviewed + risk), supporting the E/M level…',
+      planPrompt: 'Action taken on the result — orders/medication changes, repeat/confirmatory testing, notifications, and monitoring interval…',
+    },
   ),
-  // Wound care — wound assessment + treatment (the wound IS the focused exam).
+  // Wound Care — the wound assessment IS the focused exam; treatment specifics drive
+  // medical necessity for continued skilled wound care.
   wound_care: T(
-    // Vitals header → reason → interval progress → wound assessment (the focused
-    // exam) → treatment → A → plan → time.
     ['vitals', 'chiefComplaint', 'interval', 'wound', 'treatment', 'assessment', 'plan', 'timeSpent'],
-    { chiefComplaintLabel: 'Reason for Wound Care', intervalLabel: 'Wound Progress Since Last Visit' },
+    {
+      chiefComplaintLabel: 'Reason for Wound Care',
+      chiefComplaintPrompt: 'The wound(s) being managed and the goal (healing, debridement, infection control) — the skilled need for physician wound management…',
+      intervalLabel: 'Wound Progress Since Last Visit',
+      intervalPrompt: 'Direction of healing since last assessment — improving / stable / deteriorating; change in size/depth, exudate, tissue, and pain; response to the current treatment…',
+      woundPrompt: 'For EACH wound: location, etiology (pressure/venous/arterial/diabetic/surgical), stage or classification, measurements L×W×D cm, wound bed (granulation/slough/eschar %), exudate amount & type, periwound skin, odor, and signs of infection…',
+      treatmentPrompt: 'Cleansing, debridement performed (type + tissue removed), dressing selected and change frequency, offloading/compression, and adjuncts (NPWT, etc.); orders for nursing…',
+      assessmentPrompt: 'Each wound with etiology and stage (ICD-10, e.g. L89.- pressure ulcer with stage), healing trajectory, and any complication (infection, undermining, tunneling)…',
+      planPrompt: 'Wound plan — treatment regimen, offloading/nutrition/moisture goals, monitoring interval, and criteria for escalation (culture, imaging, surgical/vascular referral)…',
+    },
   ),
-  // Advance care planning (99497–99498) — discussion + directives + time.
+  // Advance Care Planning (99497–99498) — the discussion, the decisions, and the TIME.
   advance_care: T(
-    ['chiefComplaint', 'goals', 'decisionsMade', 'codeStatus', 'advanceDirective', 'timeSpent'],
-    { chiefComplaintLabel: 'Reason for Advance Care Planning Discussion', timeSpentLabel: 'Total Time Spent (required for 99497/99498)' },
+    ['chiefComplaint', 'prognosis', 'goals', 'participants', 'decisionsMade', 'codeStatus', 'advanceDirective', 'timeSpent'],
+    {
+      chiefComplaintLabel: 'Reason for Advance Care Planning Discussion',
+      chiefComplaintPrompt: 'Why ACP is being addressed now — new diagnosis/prognosis, decline, family request, or routine review; voluntary and no treatment provided during the counseling…',
+      prognosisPrompt: 'Clinical condition, trajectory, and prognosis/life-expectancy considerations discussed with the patient/surrogate…',
+      goalsPrompt: 'Patient values and goals of care elicited — what matters most, acceptable vs unacceptable outcomes, and preferences for life-sustaining treatment…',
+      participantsPrompt: 'Who participated — patient, health care surrogate/POA, family, and staff; decision-making capacity of the patient…',
+      decisionsMadePrompt: 'Decisions reached on treatment intensity and specific interventions (CPR, intubation, hospitalization, artificial nutrition/hydration, comfort care)…',
+      timeSpentLabel: 'Total Face-to-Face Time (required for 99497/99498)',
+      timeSpentPrompt: 'Total time counseling/discussing ACP on this date — 99497 for the first 30 minutes; add 99498 for each additional 30 minutes. Attest personal performance…',
+    },
   ),
-  // Discharge summary (99315–99316) — summary of stay + transition of care.
+  // Discharge Summary (99315–99316) — summary of stay + a safe transition of care.
   discharge: T(
-    ['dischargeDiagnoses', 'hospitalCourse', 'functionalStatus', 'dischargeMeds', 'disposition', 'followUp', 'dischargeInstructions', 'timeSpent'],
-    { hospitalCourseLabel: 'Summary of SNF Stay', functionalStatusLabel: 'Functional Status at Discharge' },
+    ['dischargeDiagnoses', 'hospitalCourse', 'procedures', 'functionalStatus', 'dischargeMeds', 'disposition', 'followUp', 'dischargeInstructions', 'timeSpent'],
+    {
+      dischargeDiagnosesPrompt: 'Principal and secondary discharge diagnoses (ICD-10) and the condition of each at discharge (resolved/stable/ongoing)…',
+      hospitalCourseLabel: 'Summary of SNF Stay',
+      hospitalCoursePrompt: 'Admission reason, significant events and treatments during the stay, response to skilled/rehab services, and clinical status at discharge…',
+      proceduresLabel: 'Significant Treatments / Procedures During Stay',
+      proceduresPrompt: 'Significant procedures, therapies, and treatments provided during the SNF stay…',
+      functionalStatusLabel: 'Functional Status at Discharge',
+      functionalStatusPrompt: 'Discharge mobility, ADLs, cognition, continence, and swallow vs admission baseline; rehab goals met/not met and remaining needs…',
+      dischargeMedsPrompt: 'Final reconciled discharge medication list — continued, changed, and discontinued, with instructions; ensure equipment/supplies and prescriptions are arranged…',
+      dispositionPrompt: 'Discharge destination and level of care (home with services, ALF, home health, hospice), and the responsible receiving provider…',
+      followUpPrompt: 'Follow-up appointments, pending results to be tracked, and the provider handoff/communication completed…',
+      dischargeInstructionsPrompt: 'Instructions to patient/caregiver — diet, activity, medications, warning signs, and return/ER precautions…',
+    },
   ),
-  // Bedside procedure (Part B) — operative-note essentials.
+  // Procedure Note (Part B) — operative-note essentials for a bedside procedure.
   procedure_note: T(
-    ['procedureName', 'indication', 'consent', 'procTechnique', 'procFindings', 'complications', 'postProcedure', 'timeSpent'],
-    { timeSpentLabel: 'Total Procedure Time & Attestation' },
+    ['procedureName', 'indication', 'consent', 'procTechnique', 'procFindings', 'specimen', 'complications', 'postProcedure', 'timeSpent'],
+    {
+      procedureNamePrompt: 'Exact procedure(s) performed with laterality/site and CPT (e.g. selective debridement 97597–97598, joint aspiration/injection 20610, I&D 10060, simple laceration repair 12001)…',
+      indicationPrompt: 'Clinical indication and the medical necessity supporting the procedure (diagnosis + failed conservative care where applicable)…',
+      consentPrompt: 'Informed consent obtained — risks, benefits, and alternatives discussed; patient/surrogate agreement; and the pre-procedure time-out (correct patient, site, procedure)…',
+      procTechniquePrompt: 'Positioning, skin prep and anesthesia (agent, %, mL); step-by-step technique; instruments/materials and any imaging guidance; for debridement: tissue type, depth, and surface area (cm²) removed…',
+      procFindingsPrompt: 'Intra-procedure findings — wound bed, fluid/aspirate character, joint, mass, or lesion appearance…',
+      specimenPrompt: 'Specimens, cultures, or pathology sent and their destination, or “none”…',
+      complicationsPrompt: 'Complications encountered and how managed, or “none”…',
+      postProcedurePrompt: 'Patient tolerance and post-procedure condition; dressing/immobilization; and post-procedure orders, monitoring, and follow-up…',
+      timeSpentLabel: 'Total Procedure Time & Attestation',
+    },
   ),
-  // Behavioral health / psychiatric visit (Part B) — MSE + risk are the core.
+  // Behavioral Health / Psychiatric (Part B) — the MSE and risk assessment are the core.
   behavioral_health: T(
     ['chiefComplaint', 'interval', 'medications', 'mentalStatus', 'riskAssessment', 'assessment', 'mdm', 'plan', 'timeSpent'],
-    { chiefComplaintLabel: 'Reason for Psychiatric Visit', intervalLabel: 'Interval / Symptom Status', medicationsLabel: 'Current Psychotropic Medications', assessmentLabel: 'Psychiatric Assessment (DSM-5 / ICD-10)' },
+    {
+      chiefComplaintLabel: 'Reason for Psychiatric Visit',
+      chiefComplaintPrompt: 'Reason for the psychiatric encounter — new evaluation, medication management, behavioral disturbance, or follow-up of a psychiatric diagnosis…',
+      intervalLabel: 'Interval / Symptom Status',
+      intervalPrompt: 'Course since the last visit — target symptoms (mood, sleep, appetite, agitation, psychosis), response to current treatment, adherence, side effects, and any behavioral events…',
+      medicationsLabel: 'Current Psychotropic Medications',
+      medicationsPrompt: 'Current psychotropics with dose and indication; for antipsychotics note the target behavior, GDR status, and AIMS/EPS monitoring…',
+      mentalStatusPrompt: 'MSE — appearance, behavior, speech, mood & affect, thought process and content, perceptual disturbances, cognition/orientation, insight, and judgment…',
+      riskAssessmentPrompt: 'Suicidal/homicidal ideation (with plan/intent), self-harm, elopement, and aggression risk; the safety plan and precautions ordered…',
+      assessmentLabel: 'Psychiatric Assessment (DSM-5 / ICD-10)',
+      assessmentPrompt: 'Psychiatric diagnoses (DSM-5 / ICD-10) with current severity and the behavioral/medical factors contributing…',
+      planPrompt: 'Psychiatric plan — medication changes with rationale, non-pharmacologic/behavioral interventions, monitoring (target behaviors, labs, AIMS), and follow-up interval…',
+    },
   ),
-  // Cognitive assessment & care planning (99483) — CMS mandates these elements.
+  // Cognitive Assessment & Care Planning (99483) — CMS mandates each of these elements.
   cognitive_care: T(
     ['chiefComplaint', 'cognitiveAssessment', 'functionalStatus', 'medications', 'neuroPsych', 'safetyEval', 'caregiver', 'advanceDirective', 'dementiaPlan', 'timeSpent'],
-    { chiefComplaintLabel: 'Reason for Cognitive Assessment', functionalStatusLabel: 'Functional Assessment (ADL / IADL)', medicationsLabel: 'Medication Reconciliation (High-Risk Medications)', timeSpentLabel: 'Total Time (99483 is time-based) & Attestation' },
+    {
+      chiefComplaintLabel: 'Reason for Cognitive Assessment',
+      chiefComplaintPrompt: 'Cognitive concern prompting the comprehensive assessment (memory decline, new confusion, dementia staging/care planning)…',
+      cognitiveAssessmentPrompt: 'Standardized instrument used and score (MoCA, MMSE, Mini-Cog); staging of impairment and comparison to any prior testing…',
+      functionalStatusLabel: 'Functional Assessment (ADL / IADL)',
+      functionalStatusPrompt: 'Standardized ADL/IADL assessment and decision-making capacity; the functional impact of the cognitive impairment…',
+      medicationsLabel: 'Medication Reconciliation (High-Risk / Deliriogenic)',
+      medicationsPrompt: 'Reconcile medications with attention to high-risk/anticholinergic/deliriogenic drugs that impair cognition, and deprescribing opportunities…',
+      neuroPsychPrompt: 'Neuropsychiatric and behavioral symptoms (agitation, psychosis, depression, apathy, sleep) with validated severity where used…',
+      safetyEvalPrompt: 'Safety evaluation — wandering/elopement, falls, driving, home/room hazards, and medication self-administration…',
+      caregiverPrompt: 'Caregiver identity, knowledge, willingness, and needs; caregiver strain and the support/resources arranged…',
+      dementiaPlanPrompt: 'Individualized care plan — non-pharmacologic strategies, referrals, medication plan, and goals shared with the patient/caregiver…',
+      timeSpentLabel: 'Total Time (99483 is time-based) & Attestation',
+      timeSpentPrompt: 'Total time on the date of service performing the required elements (typically ≥60 minutes for 99483). Attest personal performance…',
+    },
   ),
-  // Death / expiration documentation.
+  // Death / Expiration — pronouncement, circumstances, exam, cause, and notifications.
   death: T(
     ['pronouncement', 'circumstances', 'exam', 'causeOfDeath', 'notifications'],
-    { examLabel: 'Examination Findings at Time of Death', notificationsLabel: 'Notifications (Family / Attending / Medical Examiner)' },
+    {
+      pronouncementPrompt: 'Date and time of death; absence of pulse, respiration, and heart/breath sounds; pupils fixed; and the name of the provider pronouncing…',
+      circumstancesPrompt: 'Circumstances and clinical events preceding death — expected vs unexpected, code status honored, and whether death was anticipated (hospice/comfort care)…',
+      examLabel: 'Examination Findings at Time of Death',
+      examPrompt: 'Confirmatory exam findings supporting the pronouncement (no spontaneous respirations, no heart sounds, no response, fixed pupils)…',
+      causeOfDeathPrompt: 'Immediate cause and the underlying/contributing cause(s) of death; whether the medical examiner’s office was notified if required…',
+      notificationsLabel: 'Notifications (Family / Attending / Medical Examiner)',
+      notificationsPrompt: 'Family/next of kin notified (who, when), attending physician notified, and — where applicable — the medical examiner and organ/tissue procurement organization…',
+    },
   ),
 
   /* ===================== Pain Management ===================== */
