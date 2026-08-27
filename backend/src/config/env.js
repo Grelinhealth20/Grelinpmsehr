@@ -46,7 +46,7 @@ export const config = {
   api: {
     host: process.env.API_HOST || '127.0.0.1',
     port: int('API_PORT', 4000),
-    gatewayOrigin: process.env.GATEWAY_ORIGIN || 'http://127.0.0.1:8080',
+    gatewayOrigin: process.env.GATEWAY_ORIGIN || 'http://127.0.0.1:6002',
     // Shared secret the gateway must present. Enforced in production only so
     // local direct testing stays convenient.
     internalKey: process.env.INTERNAL_API_KEY || '',
@@ -109,7 +109,7 @@ export const config = {
   // Document-AI extraction: open-source PP-StructureV2 + docTR, served by the
   // Python OCR microservice (ocr-service/). The Node API calls it over HTTP.
   ocr: {
-    serviceUrl: process.env.OCR_SERVICE_URL || 'http://127.0.0.1:8600',
+    serviceUrl: process.env.OCR_SERVICE_URL || 'http://127.0.0.1:6003',
     apiKey: process.env.OCR_API_KEY || '',
     timeoutMs: int('OCR_TIMEOUT_MS', 60000),
   },

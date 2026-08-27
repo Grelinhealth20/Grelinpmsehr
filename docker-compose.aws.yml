@@ -1,0 +1,119 @@
+version: "3.8"
+
+services:
+
+  # --- 1. OCR — Python document-AI microservice (no deps, start first) ------
+  grelin-ehr-pms-ocr:
+    image: 285529798033.dkr.ecr.us-east-2.amazonaws.com/grelin-health:grelin_ehr_pms_ocr_latest
+    container_name: grelin_ehr_pms_ocr
+    restart: always
+    expose:
+      - "6003"
+    environment:
+      - OCR_WARMUP=true
+      - OCR_API_KEY=
+    volumes:
+      - ocr-paddle:/root/.paddleocr
+      - ocr-doctr:/root/.cache/doctr
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:6003/health',timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # --- 2. Frontend — React SPA served by nginx (no deps) --------------------
+  grelin-ehr-pms-frontend:
+    image: 285529798033.dkr.ecr.us-east-2.amazonaws.com/grelin-health:grelin_ehr_pms_frontend_latest
+    container_name: grelin_ehr_pms_frontend
+    restart: always
+    expose:
+      - "6001"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # --- 3. Backend — Internal API (depends on OCR) ---------------------------
+  grelin-ehr-pms-backend:
+    image: 285529798033.dkr.ecr.us-east-2.amazonaws.com/grelin-health:grelin_ehr_pms_backend_latest
+    container_name: grelin_ehr_pms_backend
+    restart: always
+    depends_on:
+      - grelin-ehr-pms-ocr
+    expose:
+      - "6000"
+    environment:
+      # --- Runtime ---
+      - NODE_ENV=production
+      - API_HOST=0.0.0.0
+      - API_PORT=6000
+      - GATEWAY_ORIGIN=${GATEWAY_ORIGIN}
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      # --- Database (MySQL) ---
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT:-3306}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME:-grelin_pmsehr}
+      - DB_CONNECTION_LIMIT=25
+      - DB_SSL=false
+      # --- Cryptography (AES-256-GCM PHI encryption + HMAC blind index) ---
+      - PHI_ENC_KEY=${PHI_ENC_KEY}
+      - BLIND_INDEX_KEY=${BLIND_INDEX_KEY}
+      # --- JWT / Sessions ---
+      - JWT_ACCESS_SECRET=${JWT_ACCESS_SECRET}
+      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET}
+      - ACCESS_TOKEN_TTL=1800
+      - REFRESH_TOKEN_TTL=28800
+      # --- Security policy ---
+      - MAX_FAILED_LOGINS=5
+      - ACCOUNT_LOCK_MINUTES=15
+      - PASSWORD_MIN_LENGTH=12
+      - PASSWORD_HISTORY_SIZE=5
+      # --- AWS S3 ---
+      - S3_BUCKET=${S3_BUCKET:-pms-ehr}
+      - S3_REGION=${S3_REGION:-us-east-2}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      # --- OCR (connects via Docker service name) ---
+      - OCR_SERVICE_URL=http://grelin-ehr-pms-ocr:6003
+      - OCR_API_KEY=${OCR_API_KEY}
+      - OCR_TIMEOUT_MS=60000
+      # --- Master admin ---
+      - MASTER_ADMIN_EMAIL=${MASTER_ADMIN_EMAIL}
+      - MASTER_ADMIN_PASSWORD=${MASTER_ADMIN_PASSWORD}
+      - MASTER_ADMIN_NAME=${MASTER_ADMIN_NAME:-Master Administrator}
+      # --- Stedi (eligibility 270/271) ---
+      - STEDI_API_KEY=${STEDI_API_KEY}
+      - STEDI_BASE_URL=https://healthcare.us.stedi.com/2024-04-01
+      - STEDI_TIMEOUT_MS=20000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # --- 4. Gateway — PUBLIC edge (depends on backend + frontend) -------------
+  grelin-ehr-pms-gateway:
+    image: 285529798033.dkr.ecr.us-east-2.amazonaws.com/grelin-health:grelin_ehr_pms_gateway_latest
+    container_name: grelin_ehr_pms_gateway
+    restart: always
+    depends_on:
+      - grelin-ehr-pms-backend
+      - grelin-ehr-pms-frontend
+    ports:
+      - "6002:6002"
+      - "6004:6004"
+    environment:
+      - NODE_ENV=production
+      - GATEWAY_HOST=0.0.0.0
+      - GATEWAY_PORT=6002
+      - GATEWAY_HTTPS_PORT=6004
+      - INTERNAL_API_URL=http://grelin-ehr-pms-backend:6000
+      - FRONTEND_ORIGIN=http://grelin-ehr-pms-frontend:6001
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - GATEWAY_ORIGIN=${GATEWAY_ORIGIN}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  ocr-paddle:
+  ocr-doctr:

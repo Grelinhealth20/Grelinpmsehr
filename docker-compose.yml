@@ -1,0 +1,99 @@
+# ============================================================================
+# Grelin Health — PMS & EHR  ·  four images, one command
+#
+#   docker compose up --build -d
+#
+#   gateway   PUBLIC edge — WAF, CSP, rate limiting, reverse proxy.
+#             The ONLY service mapped to the host.
+#   frontend  React SPA served by nginx.        private
+#   backend   Internal API (MySQL, PHI, auth).  private
+#   ocr       Python document-AI microservice.  private
+#
+#            browser
+#               │
+#               ▼
+#          [ gateway :8080 ]
+#           ┌────┴─────┐
+#           ▼          ▼
+#      [ frontend ] [ backend ] ──► [ ocr ]
+#        :8081        :4000          :8600
+#                       └──► external MySQL (DB_* in .env)
+#
+# The database is EXTERNAL — connection details come from your .env.
+# ============================================================================
+
+services:
+  # --- PUBLIC edge ---------------------------------------------------------
+  gateway:
+    build:
+      context: ./gateway
+    image: grelin-gateway
+    restart: unless-stopped
+    depends_on:
+      - backend
+      - frontend
+    env_file:
+      - .env
+    environment:
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: "6002"
+      # Route by service name over the private compose network.
+      INTERNAL_API_URL: http://backend:6000
+      FRONTEND_ORIGIN: http://frontend:6001
+    ports:
+      - "6002:6002"     # HTTP  (redirects to HTTPS when NODE_ENV=production)
+      - "6004:6004"     # HTTPS (only used when NODE_ENV=production)
+
+  # --- private services (no host port mappings) ----------------------------
+  frontend:
+    build:
+      context: ./frontend
+    image: grelin-frontend
+    restart: unless-stopped
+    expose:
+      - "6001"
+
+  backend:
+    build:
+      context: ./backend
+    image: grelin-backend
+    restart: unless-stopped
+    depends_on:
+      - ocr
+    env_file:
+      - .env
+    environment:
+      # Inside a container the API must bind 0.0.0.0 so the gateway can reach
+      # it. It stays private because no port is published to the host.
+      API_HOST: 0.0.0.0
+      API_PORT: "6000"
+      OCR_SERVICE_URL: http://ocr:6003
+    expose:
+      - "6000"
+
+  ocr:
+    build:
+      context: ./ocr-service
+    image: grelin-ocr
+    restart: unless-stopped
+    environment:
+      OCR_WARMUP: "true"
+      # Must match OCR_API_KEY in .env so the backend authenticates to it.
+      OCR_API_KEY: ${OCR_API_KEY:-}
+    expose:
+      - "6003"
+    # The PaddleOCR / docTR weights are downloaded on first boot (~minutes).
+    # Persist them so recreating the container does not re-download everything.
+    volumes:
+      - ocr-paddle:/root/.paddleocr
+      - ocr-doctr:/root/.cache/doctr
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:6003/health',timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s   # generous: first boot downloads the model weights
+
+volumes:
+  ocr-paddle:
+  ocr-doctr:
