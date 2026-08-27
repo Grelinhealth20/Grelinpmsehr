@@ -177,12 +177,19 @@ export async function refresh(refreshToken, ctx = {}) {
   return { user, ...session };
 }
 
-export async function logout(refreshToken) {
+export async function logout(refreshToken, ctx = {}) {
   if (!refreshToken) return;
+  const hash = sha256Hex(refreshToken);
+  // Resolve who is signing out (for the audit trail) before revoking the token.
+  const [rows] = await execute(`SELECT user_id FROM refresh_tokens WHERE token_hash = :hash LIMIT 1`, { hash });
   await execute(
     `UPDATE refresh_tokens SET revoked_at = NOW() WHERE token_hash = :hash AND revoked_at IS NULL`,
-    { hash: sha256Hex(refreshToken) },
+    { hash },
   );
+  const userId = rows[0]?.user_id;
+  if (userId) {
+    await recordAudit({ actorUserId: userId, action: 'auth.logout', ip: ctx.ip, userAgent: ctx.userAgent });
+  }
 }
 
 export async function revokeAllSessions(userId) {

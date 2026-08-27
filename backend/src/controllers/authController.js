@@ -43,7 +43,7 @@ export async function refresh(req, res, next) {
 
 export async function logout(req, res, next) {
   try {
-    await authService.logout(req.cookies?.[COOKIE.REFRESH]);
+    await authService.logout(req.cookies?.[COOKIE.REFRESH], { ip: req.ip, userAgent: req.get('user-agent') });
     clearAuthCookies(res);
     res.json({ ok: true });
   } catch (err) {
