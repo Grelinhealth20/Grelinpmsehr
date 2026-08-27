@@ -50,7 +50,12 @@ export function createApp() {
   );
 
   app.use(compression());
-  app.use(express.json({ limit: '100kb' })); // small body cap (DoS resistance)
+  // Body cap sized for real clinical content: long-form notes (a 100k-word record is
+  // ~0.6 MB; the note schema caps content well under this) and facility-logo data URIs
+  // (~0.7 MB). Set ABOVE the note-content validation limit so an oversized note is
+  // rejected by validation (clear 400) rather than the parser (413). Authenticated +
+  // gateway-rate-limited, so the larger cap is not a meaningful DoS surface.
+  app.use(express.json({ limit: '6mb' }));
   app.use(cookieParser());
 
   // Loopback bootstrap: the gateway pulls the current (rotating) internal key from
