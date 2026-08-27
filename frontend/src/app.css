@@ -2082,13 +2082,16 @@ input::-ms-clear, input::-ms-reveal { display: none; width: 0; height: 0; }
 .is-editing .nt-sec-edit:hover { border: none; background: rgba(9,17,33,0.015); border-radius: 6px; }
 .is-editing .nt-sec-edit:focus { border: none; background: rgba(39,83,179,0.035); border-radius: 0 8px 8px 0; box-shadow: inset 3px 0 0 var(--c-blue); }
 /* Vitals: clean underline-style fields on one comfortable row (no boxes) */
+/* Editing mode: keep the 7 vitals on ONE line as compact, equal-width boxed fields
+   (the flex-wrap/underline variant made them oversized and wrapped to two rows). */
 .is-editing .nt-vitals-sec { background: none; }
-.is-editing .nt-vgrid { display: flex; flex-wrap: wrap; gap: 12px 26px; }
-.is-editing .nt-vfld { flex: 0 0 auto; min-width: 72px; gap: 4px; }
+.is-editing .nt-vgrid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; align-items: end; }
+.is-editing .nt-vfld { flex: initial; min-width: 0; gap: 4px; }
 .is-editing .nt-vfld label { font-size: 9px; }
-.is-editing .nt-vfld input { border: none; border-bottom: 1.5px solid #e2e8f2; border-radius: 0; background: transparent; text-align: left; padding: 5px 2px; font-size: 15px; font-weight: 700; color: var(--c-dark-blue); transition: border-color 0.15s var(--ease); }
-.is-editing .nt-vfld input:hover { border-bottom-color: #c9d5e8; }
-.is-editing .nt-vfld input:focus { border-bottom-color: var(--c-blue); box-shadow: none; background: transparent; }
+.is-editing .nt-vfld input { border: 1px solid #dde4ef; border-bottom: 1px solid #dde4ef; border-radius: 9px; background: #fff; text-align: center; padding: 8px 6px; font-size: 13.5px; font-weight: 800; color: var(--c-dark-blue); transition: border-color 0.15s var(--ease); }
+.is-editing .nt-vfld input:hover { border-color: rgba(39,83,179,0.4); }
+.is-editing .nt-vfld input:focus { border-color: var(--c-blue); box-shadow: none; background: #fff; }
+@media (max-width: 720px) { .is-editing .nt-vgrid { grid-template-columns: repeat(4, 1fr); } }
 
 /* Note-template picker — "preparing template" document-assembly loader (enterprise) */
 .ntp { position: relative; }
