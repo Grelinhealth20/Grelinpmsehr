@@ -3,7 +3,7 @@ import Modal from './Modal.jsx';
 import { useToast } from './Toast.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
 import { encountersApi, patientsApi, toApiError } from '../lib/api.js';
-import { NOTE_TYPES, TEMPLATES } from '../lib/noteTemplates.js';
+import { NOTE_TYPES, TEMPLATES, SERVICE_MENUS, serviceForSpecialty } from '../lib/noteTemplates.js';
 
 const today = () => new Date().toISOString().slice(0, 10);
 // Display DOS in US format (MM/DD/YYYY); inputs keep the ISO value they require.
@@ -584,6 +584,20 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
 
 const SERVICE_LABEL = { snf: 'Skilled Nursing Facility', pain: 'Pain Management' };
 
+// The bundled template catalog for a service line — the SAME authoritative reference data
+// the backend registry mirrors (labels/CPT/order from NOTE_TYPES + SERVICE_MENUS). Used as
+// a resilient fallback so a provider is never blocked from writing a note if the
+// note-templates endpoint is briefly unavailable; the server still enforces the service
+// line when the note is actually created (no security or data-integrity change).
+function bundledTemplatesFor(line) {
+  const svc = line === 'pain' ? 'pain' : 'snf';
+  const menu = SERVICE_MENUS[svc] || { common: [], more: [] };
+  const build = (types, group) => types
+    .filter((t) => NOTE_TYPES[t])
+    .map((t, i) => ({ noteType: t, serviceLine: svc, label: NOTE_TYPES[t].label, category: NOTE_TYPES[t].category, cpt: NOTE_TYPES[t].cpt, menuGroup: group, sortOrder: i }));
+  return [...build(menu.common, 'common'), ...build(menu.more, 'more')];
+}
+
 /**
  * Pop-up: choose the note template to create. The list is fetched from the note-
  * template registry (DB) filtered to the current provider's SERVICE LINE — an SNF
@@ -591,16 +605,36 @@ const SERVICE_LABEL = { snf: 'Skilled Nursing Facility', pain: 'Pain Management'
  * also enforced on the server when the note is created.
  */
 function NoteTypePicker({ onPick, onClose, busy }) {
+  const { user } = useAuth();
   const [q, setQ] = useState('');
   const [templates, setTemplates] = useState(null); // null = loading
   const [serviceLine, setServiceLine] = useState('snf');
+  // The provider's own service line, known client-side from their specialty.
+  const userLine = user?.specialty?.serviceLine || serviceForSpecialty(user?.specialty?.name);
 
   useEffect(() => {
     let active = true;
     encountersApi.noteTemplates()
-      .then(({ data }) => { if (active) { setTemplates(data.templates || []); setServiceLine(data.serviceLine || 'snf'); } })
-      .catch(() => { if (active) setTemplates([]); });
+      .then(({ data }) => {
+        if (!active) return;
+        const list = data.templates || [];
+        // A logged-in provider is always SNF or Pain, and both lines always have templates —
+        // so an EMPTY response means a backend/version problem, not a real "no templates".
+        if (list.length) { setTemplates(list); setServiceLine(data.serviceLine || userLine); }
+        else { setServiceLine(userLine); setTemplates(bundledTemplatesFor(userLine)); }
+      })
+      .catch((e) => {
+        if (!active) return;
+        // Endpoint unavailable (e.g. the API not yet redeployed). Fall back to the bundled
+        // catalog for the provider's line so they can still write a note; the server still
+        // enforces the service line when the note is created.
+        // eslint-disable-next-line no-console
+        console.warn('note-templates endpoint unavailable — using bundled catalog', e?.response?.status || e?.message);
+        setServiceLine(userLine);
+        setTemplates(bundledTemplatesFor(userLine));
+      });
     return () => { active = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const query = q.trim().toLowerCase();
