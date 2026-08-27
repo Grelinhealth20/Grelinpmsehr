@@ -947,7 +947,10 @@
 .al-date { height: 38px; width: 148px; font-size: 12.5px; }
 .al-date-sep { color: var(--c-ink-3); font-weight: 700; }
 .al-csv { height: 38px; }
-.al-count { font-size: 12.5px; color: var(--c-ink-3); font-weight: 600; }
+.al-count { font-size: 12.5px; color: var(--c-ink-3); font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.al-live { display: inline-flex; align-items: center; gap: 6px; font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; color: #10a34a; }
+.al-live::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: #10a34a; box-shadow: 0 0 0 0 rgba(16,163,74,0.5); animation: alPulse 2s ease-out infinite; }
+@keyframes alPulse { 0% { box-shadow: 0 0 0 0 rgba(16,163,74,0.5); } 70% { box-shadow: 0 0 0 6px rgba(16,163,74,0); } 100% { box-shadow: 0 0 0 0 rgba(16,163,74,0); } }
 .al-list { display: flex; flex-direction: column; border: 1px solid var(--c-line); border-radius: 14px; overflow: hidden; background: #fff; }
 .al-empty { padding: 40px; text-align: center; color: var(--c-ink-3); font-size: 13px; font-weight: 600; display: flex; align-items: center; justify-content: center; gap: 10px; }
 .ale { display: flex; align-items: center; gap: 14px; padding: 13px 16px; cursor: pointer; border-top: 1px solid #eef1f6; transition: background 0.13s var(--ease); }

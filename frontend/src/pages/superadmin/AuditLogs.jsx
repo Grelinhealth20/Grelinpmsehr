@@ -127,18 +127,25 @@ export default function AuditLogs({ users = [], facilities = [] }) {
 
   const setFilter = (k, v) => setF((s) => ({ ...s, [k]: v }));
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const params = { limit: 1000 };
       Object.entries(f).forEach(([k, v]) => { if (v) params[k] = v; });
       const { data } = await auditApi.list(params);
       setEntries(data.entries || []);
-    } catch (e) { toast.error(toApiError(e).message); setEntries([]); }
-    finally { setLoading(false); }
+    } catch (e) { if (!silent) { toast.error(toApiError(e).message); setEntries([]); } }
+    finally { if (!silent) setLoading(false); }
   }, [f, toast]);
 
   useEffect(() => { clearTimeout(tRef.current); tRef.current = setTimeout(load, 280); return () => clearTimeout(tRef.current); }, [load]);
+
+  // Real-time: silently refresh the trail every 15s so newly-captured events appear
+  // without a manual reload (no spinner flicker; expanded rows stay put by uuid).
+  useEffect(() => {
+    const id = setInterval(() => { if (document.visibilityState === 'visible') load(true); }, 15000);
+    return () => clearInterval(id);
+  }, [load]);
 
   const accounts = useMemo(
     () => users.filter((u) => u.uuid).map((u) => [u.uuid, `${u.fullName || u.email} · ${ROLE_LABEL[u.role] || u.role}`]),
@@ -242,6 +249,7 @@ export default function AuditLogs({ users = [], facilities = [] }) {
       </div>
 
       <div className="al-count">
+        {!loading ? <span className="al-live" title="Updating in real time">Live</span> : null}
         {loading ? 'Loading…' : `${shown.length.toLocaleString()} ${shown.length === 1 ? 'event' : 'events'}`}
         {entries.length >= 1000 ? ' · showing the latest 1,000 — narrow the dates for older activity' : ''}
       </div>
