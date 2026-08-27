@@ -262,10 +262,12 @@ app.get('/healthz', (req, res) => res.json({ status: 'ok', service: 'grelin-pms-
 // /api — WAF, then reverse-proxy to the internal API on loopback.
 // ---------------------------------------------------------------------------
 // Parse the JSON body ONLY for /api so the WAF can inspect it; fixRequestBody
-// re-streams it to the upstream. Small cap mirrors the backend (DoS resistance).
+// re-streams it to the upstream. The cap MIRRORS the backend (6 MB) so long clinical
+// notes (a 100k-word record is ~0.6 MB) and facility-logo data URIs pass through — a
+// smaller cap here would 413 large notes at the gateway before they ever reach the API.
 // Multipart file uploads are streamed RAW to the backend — never JSON-parsed,
 // WAF-buffered, or re-emitted — so the upload stream reaches multer intact.
-const jsonParser = express.json({ limit: '100kb' });
+const jsonParser = express.json({ limit: '6mb' });
 const isMultipart = (req) => (req.headers['content-type'] || '').toLowerCase().startsWith('multipart/form-data');
 const skipForUploads = (mw) => (req, res, next) => (isMultipart(req) ? next() : mw(req, res, next));
 
