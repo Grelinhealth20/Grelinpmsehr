@@ -77,9 +77,9 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
 
   useEffect(() => {
     if (!isAssignable) return;
-    facilitiesApi.list({ status: 'active' }).then(({ data }) => setAllFacilities(data.facilities || [])).catch(() => {});
+    facilitiesApi.list({ status: 'active' }).then(({ data }) => setAllFacilities(data.facilities || [])).catch((e) => setErr(toApiError(e).message));
     if (isEdit && user?.uuid) {
-      usersApi.facilities(user.uuid).then(({ data }) => setFacilityUuids((data.facilities || []).map((f) => f.uuid))).catch(() => {});
+      usersApi.facilities(user.uuid).then(({ data }) => setFacilityUuids((data.facilities || []).map((f) => f.uuid))).catch((e) => setErr(toApiError(e).message));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAssignable]);
@@ -100,7 +100,7 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
       specialtiesApi
         .list()
         .then(({ data }) => active && setSpecialties(data.specialties))
-        .catch(() => {});
+        .catch((e) => active && setErr(toApiError(e).message));
     }
     return () => {
       active = false;

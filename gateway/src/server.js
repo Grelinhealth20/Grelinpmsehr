@@ -32,7 +32,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // --- Config ----------------------------------------------------------------
 const isProd = process.env.NODE_ENV === 'production';
 const HOST = process.env.GATEWAY_HOST || '0.0.0.0';
-const PORT = Number.parseInt(process.env.GATEWAY_PORT || '8080', 10);
+const PORT = Number.parseInt(process.env.GATEWAY_PORT || '6002', 10);
 const INTERNAL_API_URL = process.env.INTERNAL_API_URL || 'http://127.0.0.1:6000';
 const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY || '';
 // The backend rotates the internal key ~every 40 min. We start with the env key
@@ -57,7 +57,7 @@ const WAF_IP_BLOCKLIST = new Set(parseList(process.env.WAF_IP_BLOCKLIST));
 
 // --- TLS (gateway terminates HTTPS itself when no external LB is in front) --
 const TLS_ENABLED = (process.env.GATEWAY_TLS || (isProd ? 'true' : 'false')).toLowerCase() === 'true';
-const HTTPS_PORT = Number.parseInt(process.env.GATEWAY_HTTPS_PORT || '8443', 10);
+const HTTPS_PORT = Number.parseInt(process.env.GATEWAY_HTTPS_PORT || '6004', 10);
 const CERT_DIR = path.resolve(__dirname, '..', 'certs');
 const CERT_PATH = process.env.TLS_CERT_PATH || path.join(CERT_DIR, 'gateway.crt');
 const KEY_PATH = process.env.TLS_KEY_PATH || path.join(CERT_DIR, 'gateway.key');

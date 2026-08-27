@@ -27,10 +27,10 @@ to real code, not a generic template.
             │  ECS Fargate service (private subnets)    │
             │  ┌─────────────┐  loopback  ┌───────────┐ │
             │  │  gateway     │──127.0.0.1─►  backend  │ │
-            │  │  :8080/:8443 │            │  :4000    │ │
+            │  │  :6002/:6004 │            │  :6000    │ │
             │  │  WAF+Helmet  │            └─────┬─────┘ │
             │  └─────────────┘   ┌──────────────►│       │
-            │                    │  ocr :8600    │       │
+            │                    │  ocr :6003    │       │
             │              ┌─────┴──────┐        │       │
             │              │ ocr-service│        │       │
             │              └────────────┘        │       │
@@ -50,7 +50,7 @@ to real code, not a generic template.
 ```
 
 **Isolation invariant (already enforced in code):** only the gateway is reachable from
-the ALB. The backend binds `127.0.0.1:4000` and, when `NODE_ENV=production`, rejects any
+the ALB. The backend binds `127.0.0.1:6000` and, when `NODE_ENV=production`, rejects any
 request missing the gateway-injected `INTERNAL_API_KEY`. Keep the backend and OCR
 containers off the ALB target groups entirely.
 
@@ -72,7 +72,7 @@ containers off the ALB target groups entirely.
    two AZs.
 2. **Security groups** (least privilege):
    - `sg-alb` — inbound `443` from the internet; outbound to `sg-app`.
-   - `sg-app` — inbound `8443`/`8080` from `sg-alb` only; outbound to `sg-db:3306`,
+   - `sg-app` — inbound `6004`/`6002` from `sg-alb` only; outbound to `sg-db:3306`,
      `sg-redis:6379`, and `443` (S3/Secrets/Stedi/NPPES via a NAT gateway or VPC endpoints).
    - `sg-db` — inbound `3306` from `sg-app` **only**. No public access.
    - `sg-redis` — inbound `6379` from `sg-app` only.
@@ -187,27 +187,22 @@ task role a least-privilege policy scoped to `arn:aws:s3:::pms-ehr/*` and
 
 ## 7. Compute — containerize and run under ECS Fargate
 
-There is no container/process-supervision artifact for the Node tiers yet (only
-`ocr-service/` has a Dockerfile). Add one per service and run them as a single ECS task
-(so the gateway can still reach the backend over loopback) or as separate services behind
-service discovery.
+**Container artifacts already exist in the repo:** `backend/Dockerfile`,
+`gateway/Dockerfile`, `frontend/Dockerfile` (+ `frontend/nginx.conf`),
+`ocr-service/Dockerfile`, plus `docker-compose.yml` (local) and
+`docker-compose.aws.yml` (AWS). Ports follow the merged internal scheme:
 
-**Backend `Dockerfile` (sketch):**
+| Service  | Internal port | Notes |
+|----------|---------------|-------|
+| backend  | **6000**      | loopback / private (`API_PORT`) |
+| frontend | **6001**      | static SPA (nginx), private |
+| gateway  | **6002** (HTTP) / **6004** (HTTPS) | the only public tier |
+| ocr      | **6003**      | private |
 
-```dockerfile
-FROM node:20-slim
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci --omit=dev
-COPY . .
-ENV NODE_ENV=production
-EXPOSE 4000
-CMD ["node", "src/server.js"]
-```
-
-**Gateway `Dockerfile`** is analogous (`EXPOSE 8080 8443`, `CMD ["node","src/server.js"]`),
-and must have the built SPA (`frontend/dist`) available at `FRONTEND_DIST`. Build the
-frontend in CI (`vite build`) and copy `dist/` into the gateway image.
+Build the frontend (`vite build`) and serve `dist/` — the compose does this via the
+frontend image + `nginx.conf`. Run the tiers as one ECS task (so the gateway reaches the
+backend over loopback) or as separate services behind service discovery; either way, only
+the gateway (`:6002`/`:6004`) is mapped into the ALB target group.
 
 **ECS task definition notes:**
 
@@ -233,7 +228,7 @@ frontend in CI (`vite build`) and copy `dist/` into the gateway image.
 
 - Request an **ACM certificate** for the domain; attach it to the **ALB** HTTPS listener
   (`:443`). The ALB terminates public TLS. Set `GATEWAY_TLS=false` and let the gateway
-  serve HTTP on `:8080` to the ALB inside the private subnet — or keep gateway TLS
+  serve HTTP on `:6002` to the ALB inside the private subnet — or keep gateway TLS
   (`GATEWAY_TLS=true`, self-signed internal cert) for end-to-end encryption.
 - The gateway already sends **HSTS** (1 year, preload) in production and pins **TLS 1.2**
   as the floor; keep `NODE_ENV=production`.
@@ -275,14 +270,14 @@ auto-scaling** on CPU/ALB-request-count.
 
 ## 11. Code touch-ups for AWS (small, tracked separately)
 
-These are the only application changes the AWS move requires; none alter functionality:
+The **Dockerfiles and compose files are already in the repo** (§7). The remaining
+application changes the AWS move needs — neither alters functionality — are:
 
-1. **IAM role instead of static keys.** Let the S3 client fall back to the default
-   credential provider chain when `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` are absent,
-   so the ECS task role is used. (Today S3 disables itself if the keys are unset.)
-2. **Redis-backed rate limiter** (§9), falling back to in-memory when `REDIS_URL` is unset
+1. **IAM role instead of static keys.** Let the S3 client use the default credential
+   provider chain when `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` are absent, so the ECS
+   task role is used. (Today S3 disables itself if the keys are unset.)
+2. **Redis-backed rate limiter** (§9), defaulting to in-memory when `REDIS_URL` is unset
    (keeps local dev unchanged).
-3. **Dockerfiles** for `backend/` and `gateway/` (§7).
 
 Ask and these can be implemented behind env flags so local development is untouched.
 

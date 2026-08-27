@@ -52,7 +52,7 @@ export default function FacilityModal({ facility = null, onClose, onSaved }) {
   useEffect(() => {
     usersApi.list().then(({ data }) => setAllProviders(
       (data.users || []).filter((u) => ['provider', 'billing'].includes(u.role) && u.status === 'active'),
-    )).catch(() => {});
+    )).catch((e) => toast.error(toApiError(e).message));
   }, []);
 
   // Managing an existing facility: load its full record (assigned members).
@@ -61,7 +61,7 @@ export default function FacilityModal({ facility = null, onClose, onSaved }) {
     facilitiesApi.get(uuid).then(({ data }) => {
       setForm({ ...BLANK, ...data.facility });
       setProviders(data.facility.providers || []);
-    }).catch(() => {});
+    }).catch((e) => toast.error(toApiError(e).message));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

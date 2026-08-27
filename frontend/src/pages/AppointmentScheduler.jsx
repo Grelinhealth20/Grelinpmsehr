@@ -103,7 +103,9 @@ export default function AppointmentScheduler() {
     let active = true;
     // Facility-scoped rendering providers the caller may schedule (front-desk/MD → their
     // facility's providers; a provider → their facility colleagues). No fallback list.
-    providersApi.schedulable().then(({ data }) => active && setProviders(data.providers || [])).catch(() => {});
+    providersApi.schedulable()
+      .then(({ data }) => active && setProviders(data.providers || []))
+      .catch((e) => { if (active) toast.error(toApiError(e).message); });
     return () => { active = false; };
   }, []);
 

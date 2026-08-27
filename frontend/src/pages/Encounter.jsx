@@ -131,7 +131,7 @@ function PatientRow({ p, open, onToggle, onView, onNotes, refreshKey }) {
     setELoading(true);
     encountersApi.patientEncounters(p.patientUuid, { page: ePage, pageSize: ENC_PER_PAGE })
       .then(({ data }) => { if (active) { setEncs(data.encounters || []); setEncTotal(data.total || 0); } })
-      .catch(() => { if (active) setEncs([]); })
+      .catch((e) => { if (active) { setEncs([]); toast.error(toApiError(e).message); } })
       .finally(() => { if (active) setELoading(false); });
     return () => { active = false; };
   }, [open, ePage, p.patientUuid, refreshKey]);

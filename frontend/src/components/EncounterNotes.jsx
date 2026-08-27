@@ -178,9 +178,12 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
       setReason(data.note.reason || '');
       setRxCarry(null);
       setTab('note');
-      // Load the pharmacy/PBM vendor from the patient's benefits (display only).
+      // Load the pharmacy/PBM vendor from the patient's benefits (display only). A failure
+      // is surfaced (never silent) so the provider knows the detail couldn't be loaded.
       if (encounter.patientUuid) {
-        encountersApi.rxContext(encounter.patientUuid).then((rc) => setPharmacy(rc.data.pharmacy || null)).catch(() => setPharmacy(null));
+        encountersApi.rxContext(encounter.patientUuid)
+          .then((rc) => setPharmacy(rc.data.pharmacy || null))
+          .catch((e) => { setPharmacy(null); toast.error(`Couldn’t load the pharmacy detail: ${toApiError(e).message}`); });
       }
     } catch (e) { toast.error(toApiError(e).message); }
   }
@@ -196,7 +199,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
       // carried meds fill in a moment later without blocking the template from showing.
       const createP = encountersApi.createNote(encounter.encounterUuid, { noteType, content: initContent });
       const rxP = encounter.patientUuid
-        ? encountersApi.rxContext(encounter.patientUuid).then((rc) => rc.data).catch(() => null)
+        ? encountersApi.rxContext(encounter.patientUuid).then((rc) => rc.data).catch((e) => ({ __error: e }))
         : Promise.resolve(null);
 
       const { data } = await createP;
@@ -218,12 +221,19 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
       // Guard: only apply to the note THIS click created — a fast switch to another
       // template must never receive the previous note's carried medications.
       const rc = await rxP;
+      // Only apply to the note THIS click created (guard against a fast template switch).
       if (rc && createToken.current === myToken) {
-        if (rc.pharmacy) setPharmacy(rc.pharmacy);
-        const carriedRx = rc.prescriptions || [];
-        if (carriedRx.length) {
-          setRxCarry({ date: rc.sourceDate });
-          setContent((c) => ({ ...c, prescriptions: carriedRx }));
+        if (rc.__error) {
+          // Carry-forward failed — surface it (never silent) so the provider knows the
+          // prior medications weren't loaded and can add them manually if needed.
+          toast.error(`Couldn’t carry forward prior medications: ${toApiError(rc.__error).message}. Add them manually if needed.`);
+        } else {
+          if (rc.pharmacy) setPharmacy(rc.pharmacy);
+          const carriedRx = rc.prescriptions || [];
+          if (carriedRx.length) {
+            setRxCarry({ date: rc.sourceDate });
+            setContent((c) => ({ ...c, prescriptions: carriedRx }));
+          }
         }
       }
     } catch (e) { toast.error(toApiError(e).message); setBusy(false); }

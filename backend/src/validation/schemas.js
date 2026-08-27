@@ -246,16 +246,22 @@ const vitalsSchema = z
     spo2: optStr(20), weight: optStr(20), pain: optStr(20),
   })
   .strict();
+// Long-form clinical notes: a single section may hold a very long narrative (~80k words)
+// and a whole note may reach ~660k words — well beyond the "100k words" real-world ceiling —
+// while the total stays safely under the MEDIUMBLOB (16 MB) content column after encryption.
+const NOTE_SECTION_MAX = 500_000; // chars per section
+const NOTE_TOTAL_MAX = 4_000_000; // chars per note
 const noteContentSchema = z
   .object({
     vitals: vitalsSchema.optional(),
-    sections: z.record(z.string().max(20000)).optional(),
+    sections: z.record(z.string().max(NOTE_SECTION_MAX)).optional(),
     prescriptions: z.array(prescriptionItem).max(40).optional(),
     // The template's clinical section order — so the record renders in the exact
     // provider order for this note type (dynamic per note type).
     sectionOrder: z.array(z.string().max(64)).max(80).optional(),
   })
   .strict()
+  .refine((c) => JSON.stringify(c).length <= NOTE_TOTAL_MAX, { message: 'Note content exceeds the maximum size.' })
   .optional();
 
 export const createEncounterSchema = z

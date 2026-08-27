@@ -97,7 +97,7 @@ export async function runMigrations() {
     'CONSTRAINT `fk_appt_rendering` FOREIGN KEY (`rendering_provider_id`) REFERENCES `users`(`id`) ON DELETE SET NULL',
   );
   // Emergency contact on the patient face sheet (encrypted PHI blob).
-  await ensureColumn('patients', 'emergency_enc', '`emergency_enc` VARBINARY(2048) NULL AFTER `facility_enc`');
+  await ensureColumn('patients', 'emergency_enc', '`emergency_enc` MEDIUMBLOB NULL AFTER `facility_enc`');
   // Human-readable encounter number per DOS, wired to the patient MRN.
   await ensureColumn('encounters', 'encounter_no', '`encounter_no` VARCHAR(48) NULL AFTER `uuid`');
   // Date of service for standalone (manually created) encounters not tied to an appointment.
@@ -164,6 +164,26 @@ export async function runMigrations() {
        \`rotated_at\` DATETIME NOT NULL
      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
   );
+  // Enlarge encrypted columns whose VALIDATION-allowed content can exceed the original
+  // fixed VARBINARY size (which caused "Data too long" and lost the save). MEDIUMBLOB is
+  // stored off-page (no row-size impact) and holds any validation-allowed value:
+  //  - encounter_notes.content_enc — long-form notes (many sections up to 500k chars)
+  //  - patients.insurance_enc      — up to 5 policies with full benefits (~12 KB)
+  //  - patients.emergency_enc      — up to 8 emergency contacts (~4 KB)
+  const ensureMediumblob = async (table, column) => {
+    const [c] = await pool.query(
+      `SELECT DATA_TYPE FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`, [table, column],
+    );
+    if (c[0] && String(c[0].DATA_TYPE).toLowerCase() !== 'mediumblob') {
+      await pool.query(`ALTER TABLE \`${table}\` MODIFY COLUMN \`${column}\` MEDIUMBLOB NULL`);
+      logger.info({ table, column }, 'Enlarged encrypted column → MEDIUMBLOB');
+    }
+  };
+  await ensureMediumblob('encounter_notes', 'content_enc');
+  await ensureMediumblob('patients', 'insurance_enc');
+  await ensureMediumblob('patients', 'emergency_enc');
+
   // Explicit SERVICE LINE per specialty (snf | pain) — the authoritative source for
   // clinical data-isolation, replacing name-string inference in the security path. On
   // first add, backfill existing rows by their name (word-boundary "pain"); thereafter
