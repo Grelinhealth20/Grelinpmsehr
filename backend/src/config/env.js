@@ -1,4 +1,13 @@
 import 'dotenv/config';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+// Pinned DB server CA (captured from the MySQL server's auto-generated CA). Its presence
+// lets the API verify the DB TLS chain against a known cert instead of the system roots.
+const DB_CA_PATH = process.env.DB_SSL_CA
+  ? process.env.DB_SSL_CA
+  : fileURLToPath(new URL('../../certs/db-ca.pem', import.meta.url));
+const DB_CA_EXISTS = (() => { try { return fs.existsSync(DB_CA_PATH); } catch { return false; } })();
 
 /**
  * Centralized, validated configuration. Fails fast on misconfiguration so the
@@ -50,7 +59,12 @@ export const config = {
     password: required('DB_PASSWORD'),
     database: required('DB_NAME'),
     connectionLimit: int('DB_CONNECTION_LIMIT', 10),
-    ssl: bool('DB_SSL', false),
+    // TLS to MySQL. Encryption-in-transit is ON by default whenever a pinned DB CA is
+    // present (DB_SSL can still force it on/off explicitly). With the pinned CA the chain
+    // is verified (rejectUnauthorized) — MITM with a different cert is rejected.
+    ssl: process.env.DB_SSL !== undefined ? bool('DB_SSL', false) : DB_CA_EXISTS,
+    sslCa: DB_CA_EXISTS ? DB_CA_PATH : '',
+    sslRejectUnauthorized: bool('DB_SSL_REJECT_UNAUTHORIZED', true),
   },
 
   crypto: {

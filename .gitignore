@@ -14,6 +14,9 @@ gateway/certs/
 *.crt
 *.key
 *.pem
+# Exception: the pinned DB server CA is a PUBLIC certificate (not a private key) and
+# must ship so the API can verify the MySQL TLS chain against it.
+!backend/certs/db-ca.pem
 
 # Logs
 *.log

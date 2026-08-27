@@ -1,6 +1,29 @@
+import fs from 'node:fs';
 import mysql from 'mysql2/promise';
 import { config } from '../config/env.js';
 import { logger } from '../config/logger.js';
+
+/**
+ * Build the MySQL TLS options. When a pinned DB CA is configured we verify the
+ * server's chain against it (rejectUnauthorized) and skip only the HOSTNAME check —
+ * MySQL's auto-generated server cert carries a fixed CN, not the host/IP, so identity
+ * is anchored by the pinned CA instead. Without a CA we fall back to the configured
+ * rejectUnauthorized (system roots). TLS 1.2 is the floor.
+ */
+function buildDbSsl() {
+  if (!config.db.ssl) return undefined;
+  const opts = { minVersion: 'TLSv1.2', rejectUnauthorized: config.db.sslRejectUnauthorized };
+  if (config.db.sslCa) {
+    try {
+      opts.ca = fs.readFileSync(config.db.sslCa);
+      opts.rejectUnauthorized = true; // pinned CA → always verify the chain
+      opts.checkServerIdentity = () => undefined; // CN is not the host; CA pinning is the anchor
+    } catch (err) {
+      logger.warn({ err: err.message, ca: config.db.sslCa }, 'DB CA not readable — TLS without pinned verification');
+    }
+  }
+  return opts;
+}
 
 /**
  * Single shared connection pool. Parameterized queries only (mysql2 prepared
@@ -24,7 +47,7 @@ export const pool = mysql.createPool({
   keepAliveInitialDelay: 10000, // TCP keepalive so idle sockets aren't dropped
   connectTimeout: 15000,
   namedPlaceholders: true,
-  ssl: config.db.ssl ? { rejectUnauthorized: true } : undefined,
+  ssl: buildDbSsl(),
 });
 
 // Swallow async pool-level socket errors (e.g. a remote-closed idle connection)
@@ -80,7 +103,12 @@ export async function assertDbConnection() {
   const conn = await pool.getConnection();
   try {
     await conn.ping();
-    logger.info({ host: config.db.host, db: config.db.database }, 'Database connection established');
+    let cipher = null;
+    try { const [r] = await conn.query("SHOW STATUS LIKE 'Ssl_cipher'"); cipher = r[0]?.Value || null; } catch { /* ignore */ }
+    logger.info(
+      { host: config.db.host, db: config.db.database, tls: cipher ? `on (${cipher})` : 'off' },
+      'Database connection established',
+    );
   } finally {
     conn.release();
   }

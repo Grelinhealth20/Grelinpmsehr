@@ -389,7 +389,7 @@ const banner = `→ API ${INTERNAL_API_URL} (env=${process.env.NODE_ENV || 'deve
 async function start() {
   if (TLS_ENABLED) {
     await ensureCertificate();
-    const creds = { key: fs.readFileSync(KEY_PATH), cert: fs.readFileSync(CERT_PATH) };
+    const creds = { key: fs.readFileSync(KEY_PATH), cert: fs.readFileSync(CERT_PATH), minVersion: 'TLSv1.2' };
     server = https.createServer(creds, app).listen(HTTPS_PORT, HOST, () => {
       logger.info(`Gateway listening on https://${HOST}:${HTTPS_PORT} ${banner}`);
       logger.info(`Serving SPA from ${FRONTEND_DIST}`);
