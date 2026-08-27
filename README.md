@@ -143,6 +143,10 @@ blank — header + session only — ready for clinical modules).
 
 ## Production hardening checklist
 
+> **Deploying on AWS?** See the full **[AWS Production Deployment Guide](AWS_DEPLOYMENT.md)** —
+> a system-specific runbook (RDS TLS, IAM roles, Secrets Manager, ECS/ALB + ACM, S3
+> posture already applied, ElastiCache-backed rate limiting, CloudWatch/CloudTrail).
+
 - [ ] Deploy from a path without spaces/`&`; run via `npm start` or a process manager (pm2/systemd).
 - [ ] Set `NODE_ENV=production` in both `.env` files (enables Secure cookies, HSTS, and gateway-key enforcement).
 - [ ] Terminate TLS in front of the gateway (nginx/ALB) or add TLS to it; set `DB_SSL=true`.
