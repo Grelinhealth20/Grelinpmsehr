@@ -33,7 +33,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isProd = process.env.NODE_ENV === 'production';
 const HOST = process.env.GATEWAY_HOST || '0.0.0.0';
 const PORT = Number.parseInt(process.env.GATEWAY_PORT || '8080', 10);
-const INTERNAL_API_URL = process.env.INTERNAL_API_URL || 'http://127.0.0.1:4000';
+const INTERNAL_API_URL = process.env.INTERNAL_API_URL || 'http://127.0.0.1:6000';
 const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY || '';
 // The backend rotates the internal key ~every 40 min. We start with the env key
 // (which the backend keeps permanently valid) and refresh to the current key from
@@ -323,25 +323,52 @@ app.use('/api/auth', authEdgeLimiter);
 app.use('/api', edgeLimiter, skipForUploads(jsonParser), skipForUploads(waf), apiProxy);
 
 // ---------------------------------------------------------------------------
-// Static SPA (React build) + history-API fallback for client-side routing.
+// SPA delivery. Two supported topologies — the gateway is the edge either way,
+// so the WAF, CSP and rate limits always sit in front of the app:
+//
+//   1. FRONTEND_ORIGIN set  → the React build lives in its own container (its
+//      own image, served by nginx). We reverse-proxy everything that is not
+//      /api to it; that container handles the history-API fallback.
+//   2. otherwise            → serve the build straight off disk (single-image
+//      or bare-metal deploys), with the history fallback handled here.
 // ---------------------------------------------------------------------------
-app.use(
-  express.static(FRONTEND_DIST, {
-    index: false,
-    maxAge: isProd ? '1h' : 0,
-    setHeaders: (res, filePath) => {
-      // Content-hashed assets can be cached hard; index.html must not be.
-      if (filePath.endsWith('index.html')) res.setHeader('Cache-Control', 'no-store');
-    },
-  }),
-);
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || '';
 
-app.get('*', (req, res, next) => {
-  if (req.method !== 'GET') return next();
-  res.sendFile(path.join(FRONTEND_DIST, 'index.html'), (err) => {
-    if (err) next(err);
+if (FRONTEND_ORIGIN) {
+  app.use(
+    createProxyMiddleware({
+      target: FRONTEND_ORIGIN,
+      changeOrigin: false,
+      xfwd: true,
+      on: {
+        error: (err, req, res) => {
+          logger.error({ err: err.message, url: req.originalUrl }, 'SPA proxy error');
+          if (res && !res.headersSent && typeof res.status === 'function') {
+            res.status(502).json({ error: 'Frontend unavailable.', code: 'BAD_GATEWAY' });
+          }
+        },
+      },
+    }),
+  );
+} else {
+  app.use(
+    express.static(FRONTEND_DIST, {
+      index: false,
+      maxAge: isProd ? '1h' : 0,
+      setHeaders: (res, filePath) => {
+        // Content-hashed assets can be cached hard; index.html must not be.
+        if (filePath.endsWith('index.html')) res.setHeader('Cache-Control', 'no-store');
+      },
+    }),
+  );
+
+  app.get('*', (req, res, next) => {
+    if (req.method !== 'GET') return next();
+    res.sendFile(path.join(FRONTEND_DIST, 'index.html'), (err) => {
+      if (err) next(err);
+    });
   });
-});
+}
 
 // 404 / error handlers.
 app.use((req, res) => res.status(404).json({ error: 'Not found.', code: 'NOT_FOUND' }));
@@ -392,7 +419,7 @@ async function start() {
     const creds = { key: fs.readFileSync(KEY_PATH), cert: fs.readFileSync(CERT_PATH), minVersion: 'TLSv1.2' };
     server = https.createServer(creds, app).listen(HTTPS_PORT, HOST, () => {
       logger.info(`Gateway listening on https://${HOST}:${HTTPS_PORT} ${banner}`);
-      logger.info(`Serving SPA from ${FRONTEND_DIST}`);
+      logger.info(FRONTEND_ORIGIN ? `Proxying SPA from ${FRONTEND_ORIGIN}` : `Serving SPA from ${FRONTEND_DIST}`);
     });
     // Plain-HTTP listener that permanently redirects to HTTPS.
     http
@@ -405,7 +432,7 @@ async function start() {
   } else {
     server = app.listen(PORT, HOST, () => {
       logger.info(`Gateway listening on http://${HOST}:${PORT} ${banner}`);
-      logger.info(`Serving SPA from ${FRONTEND_DIST}`);
+      logger.info(FRONTEND_ORIGIN ? `Proxying SPA from ${FRONTEND_ORIGIN}` : `Serving SPA from ${FRONTEND_DIST}`);
     });
   }
 }

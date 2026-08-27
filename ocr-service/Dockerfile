@@ -18,7 +18,7 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY extractor.py main.py ./
 
-EXPOSE 8600
+EXPOSE 6003
 # Single worker: each worker loads full models into memory. Scale horizontally
 # (more replicas) rather than many workers per container.
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8600", "--workers", "1"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "6003", "--workers", "1"]
