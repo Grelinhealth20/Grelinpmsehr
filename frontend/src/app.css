@@ -3,76 +3,109 @@
    ========================================================================== */
 
 /* ==========================================================================
-   SPLASH — futuristic enterprise boot loader (light, clean, AI-tech)
+   SPLASH — secure enterprise boot loader (precise, sleek, no glow)
    ========================================================================== */
 .splash {
   position: relative; min-height: 100vh; display: flex; flex-direction: column;
-  align-items: center; justify-content: center; background: #fff; overflow: hidden;
+  align-items: center; justify-content: center; overflow: hidden;
+  background:
+    radial-gradient(120% 90% at 50% -10%, #ffffff 0%, #f6f8fc 55%, #eef2f8 100%);
 }
-.splash-bg { position: absolute; inset: 0; pointer-events: none; z-index: 0; }
-.splash-bg .orb { position: absolute; border-radius: 50%; }
-.splash-bg .o1 {
-  width: 520px; height: 520px; top: -160px; left: 50%; margin-left: -420px;
-  background: radial-gradient(circle at 50% 50%, rgba(39, 83, 179, 0.07), transparent 68%);
-  animation: glideA 22s ease-in-out infinite;
+/* Faint technical grid — enterprise/instrument texture, very low contrast */
+.splash-grid {
+  position: absolute; inset: 0; z-index: 0; pointer-events: none;
+  background-image:
+    linear-gradient(rgba(9, 17, 33, 0.032) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(9, 17, 33, 0.032) 1px, transparent 1px);
+  background-size: 44px 44px; background-position: center;
+  -webkit-mask: radial-gradient(70% 60% at 50% 42%, #000 0%, transparent 75%);
+          mask: radial-gradient(70% 60% at 50% 42%, #000 0%, transparent 75%);
 }
-.splash-bg .o2 {
-  width: 460px; height: 460px; bottom: -170px; left: 50%; margin-left: 120px;
-  background: radial-gradient(circle at 50% 50%, rgba(207, 148, 85, 0.06), transparent 68%);
-  animation: glideB 26s ease-in-out infinite;
+/* Single soft central lift (not a blurry orb) */
+.splash-glow {
+  position: absolute; z-index: 0; top: 30%; left: 50%; width: 620px; height: 620px;
+  transform: translate(-50%, -50%); pointer-events: none;
+  background: radial-gradient(circle at 50% 50%, rgba(39, 83, 179, 0.06), transparent 62%);
 }
 
 .splash-core {
-  position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 26px;
-  animation: splashIn 0.5s var(--ease) both;
+  position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 30px;
+  animation: splashIn 0.55s var(--ease) both;
 }
-@keyframes splashIn { from { opacity: 0; transform: translateY(8px); } }
+@keyframes splashIn { from { opacity: 0; transform: translateY(10px); filter: blur(2px); } }
 .splash-logo .brand img { height: 40px; }
 .splash-logo .brand .divider { height: 26px; }
 .splash-logo .brand .sub { font-size: 13px; letter-spacing: 0.16em; color: var(--c-ink-2); }
 
-/* Dual concentric rings + core dot */
-.splash-loader { position: relative; width: 58px; height: 58px; display: grid; place-items: center; }
-.splash-ring {
+/* Secure aperture: thin track, a masked conic sweep, an orbiting node, a lock mark */
+.sx-loader { position: relative; width: 78px; height: 78px; display: grid; place-items: center; }
+.sx-track {
   position: absolute; inset: 0; border-radius: 50%;
-  border: 3px solid rgba(9, 17, 33, 0.1); border-top-color: var(--c-blue);
-  animation: spin 0.9s linear infinite;
+  border: 1.5px solid rgba(9, 17, 33, 0.09);
+  box-shadow: inset 0 0 0 6px rgba(255, 255, 255, 0.6);
 }
-.splash-ring.inner {
-  inset: 11px; border-width: 2.5px; border-top-color: var(--c-accent); border-right-color: transparent;
-  animation: spin 1.3s linear infinite reverse;
+.sx-sweep {
+  position: absolute; inset: 0; border-radius: 50%;
+  background: conic-gradient(from 90deg, transparent 0deg, rgba(39, 83, 179, 0.12) 180deg, var(--c-blue) 300deg, var(--c-accent) 352deg, transparent 360deg);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2.5px));
+          mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2.5px));
+  animation: spin 1.15s linear infinite;
 }
-.splash-core-dot {
-  width: 8px; height: 8px; border-radius: 50%; background: var(--c-dark-blue);
-  box-shadow: 0 0 12px rgba(39, 83, 179, 0.55); animation: corePulse 1.6s ease-in-out infinite;
+.sx-orbit { position: absolute; inset: 0; animation: spin 1.15s linear infinite; }
+.sx-orbit i {
+  position: absolute; top: -2px; left: 50%; width: 6px; height: 6px; margin-left: -3px;
+  border-radius: 50%; background: var(--c-accent);
 }
-@keyframes corePulse { 0%, 100% { transform: scale(0.7); opacity: 0.6; } 50% { transform: scale(1.15); opacity: 1; } }
+.sx-mark {
+  position: relative; z-index: 1; width: 46px; height: 46px; border-radius: 50%;
+  display: grid; place-items: center; color: var(--c-dark-blue);
+  background: #fff; border: 1px solid rgba(9, 17, 33, 0.07);
+  box-shadow: 0 2px 10px rgba(9, 17, 33, 0.06);
+}
+.sx-mark svg { animation: sxLock 2.6s var(--ease) infinite; }
+@keyframes sxLock { 0%, 72%, 100% { opacity: 0.9; } 82% { opacity: 0.45; } }
 
-.splash-status {
-  display: inline-flex; align-items: center; gap: 9px; font-size: 11px; font-weight: 700;
-  letter-spacing: 0.16em; text-transform: uppercase; color: var(--c-ink-2);
+.sx-status {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.24em; text-transform: uppercase; color: var(--c-ink-2);
+  font-family: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  position: relative; padding-right: 14px;
+}
+.sx-status::after {
+  content: ''; position: absolute; right: 0; top: 50%; width: 5px; height: 5px; margin-top: -2.5px;
+  border-radius: 50%; background: var(--c-blue); animation: sxBlink 1.4s steps(1) infinite;
+}
+@keyframes sxBlink { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0.2; } }
+
+/* Segmented boot sequence — nodes light in order, connectors fill */
+.sx-flow { display: flex; align-items: center; gap: 0; }
+.sx-step {
+  display: inline-flex; align-items: center; gap: 7px; font-size: 10px; font-weight: 700;
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--c-ink-3);
   font-family: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
 }
-.splash-status .splash-dot {
-  width: 7px; height: 7px; border-radius: 50%; background: var(--c-blue);
-  box-shadow: 0 0 8px rgba(39, 83, 179, 0.7); animation: corePulse 1.4s ease-in-out infinite;
+.sx-step i {
+  width: 8px; height: 8px; border-radius: 50%; background: #fff;
+  border: 1.5px solid rgba(9, 17, 33, 0.18); flex-shrink: 0;
+  animation: sxNode 2.4s var(--ease) infinite; animation-delay: calc(var(--i) * 0.32s);
 }
-
-/* Slim indeterminate progress bar */
-.splash-bar {
-  position: relative; width: 220px; height: 4px; border-radius: 999px; overflow: hidden;
-  background: rgba(9, 17, 33, 0.08); border: 1px solid rgba(9, 17, 33, 0.06);
+@keyframes sxNode {
+  0%, 100% { background: #fff; border-color: rgba(9, 17, 33, 0.18); transform: scale(1); }
+  18%, 42% { background: var(--c-blue); border-color: var(--c-blue); transform: scale(1.18); }
 }
-.splash-bar span {
-  position: absolute; top: 0; bottom: 0; width: 42%; border-radius: 999px;
-  background: linear-gradient(90deg, transparent, var(--c-blue), var(--c-accent), transparent);
-  animation: barSlide 1.4s var(--ease) infinite;
+.sx-seg {
+  width: 34px; height: 1.5px; margin: 0 10px; border-radius: 2px;
+  background: linear-gradient(90deg, var(--c-blue), rgba(9, 17, 33, 0.12));
+  background-size: 200% 100%; background-position: 100% 0;
+  animation: sxSeg 2.4s var(--ease) infinite;
 }
-@keyframes barSlide { 0% { left: -45%; } 100% { left: 100%; } }
+.sx-flow .sx-seg:nth-of-type(2) { animation-delay: 0.32s; }
+@keyframes sxSeg { 0%, 100% { background-position: 100% 0; } 40%, 60% { background-position: 0 0; } }
+@media (max-width: 520px) { .sx-step { font-size: 0; gap: 0; } .sx-step i { animation-delay: calc(var(--i) * 0.32s); } .sx-seg { width: 22px; margin: 0 6px; } }
 
 @media (prefers-reduced-motion: reduce) {
-  .splash-bg .orb, .splash-core-dot, .splash-dot { animation: none; }
-  .splash-bar span { animation-duration: 2.4s; }
+  .sx-sweep { animation: spin 3s linear infinite; }
+  .sx-orbit, .sx-mark svg, .sx-status::after, .sx-step i, .sx-seg { animation: none; }
+  .sx-step i { background: var(--c-blue); border-color: var(--c-blue); }
 }
 
 /* ---- Auth (login / reset) ---- */
@@ -2076,20 +2109,63 @@ input::-ms-clear, input::-ms-reveal { display: none; width: 0; height: 0; }
 .is-editing .nt-vfld input:hover { border-bottom-color: #c9d5e8; }
 .is-editing .nt-vfld input:focus { border-bottom-color: var(--c-blue); box-shadow: none; background: transparent; }
 
-/* Note-template picker — "preparing template" loading animation (provider-focused) */
+/* Note-template picker — "preparing template" document-assembly loader (enterprise) */
 .ntp { position: relative; }
-.ntp-busy { position: absolute; inset: 0; z-index: 20; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
-  background: rgba(255, 255, 255, 0.86); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); border-radius: 12px; animation: ntp-fade 0.16s var(--ease); }
-.ntp-busy-orb { display: flex; gap: 9px; }
-.ntp-busy-orb span { width: 13px; height: 13px; border-radius: 50%; background: linear-gradient(135deg, var(--c-blue), var(--c-dark-blue)); animation: ntp-bounce 1s ease-in-out infinite; }
-.ntp-busy-orb span:nth-child(2) { animation-delay: 0.15s; }
-.ntp-busy-orb span:nth-child(3) { animation-delay: 0.3s; }
-.ntp-busy-t { font-size: 15px; font-weight: 750; color: var(--c-dark-blue); letter-spacing: -0.01em; }
-.ntp-busy-s { font-size: 12.5px; color: var(--c-ink-3); }
-@keyframes ntp-bounce { 0%, 80%, 100% { transform: translateY(0) scale(0.78); opacity: 0.55; } 40% { transform: translateY(-9px) scale(1); opacity: 1; } }
+.ntp-busy { position: absolute; inset: 0; z-index: 20; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+  background: rgba(246, 248, 252, 0.9); backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px); border-radius: 12px; animation: ntp-fade 0.16s var(--ease); }
 @keyframes ntp-fade { from { opacity: 0; } to { opacity: 1; } }
+/* A miniature note "building itself": skeleton lines fill in under a scanning pass */
+.ntl-doc {
+  position: relative; width: 116px; height: 92px; border-radius: 12px; background: #fff;
+  border: 1px solid rgba(9, 17, 33, 0.08); box-shadow: 0 6px 20px rgba(9, 17, 33, 0.08);
+  padding: 16px 14px 0; overflow: hidden;
+}
+.ntl-accent { position: absolute; top: 0; left: 0; width: 3px; height: 100%; background: linear-gradient(180deg, var(--c-blue), var(--c-accent)); opacity: 0.9; }
+.ntl-line { display: block; height: 7px; border-radius: 4px; margin-bottom: 9px; transform-origin: left;
+  background: linear-gradient(90deg, #e4eaf3 0%, #eef3fa 40%, #e4eaf3 80%); background-size: 220% 100%;
+  animation: ntlShimmer 1.15s linear infinite, ntlGrow 1.9s var(--ease) infinite; }
+.ntl-line.l1 { width: 78%; animation-delay: 0s, 0s; }
+.ntl-line.l2 { width: 92%; animation-delay: 0.1s, 0.14s; }
+.ntl-line.l3 { width: 64%; animation-delay: 0.2s, 0.28s; }
+.ntl-line.l4 { width: 84%; animation-delay: 0.3s, 0.42s; }
+.ntl-scan { position: absolute; left: 0; right: 0; top: 0; height: 26px; pointer-events: none;
+  background: linear-gradient(180deg, transparent, rgba(39, 83, 179, 0.14), transparent);
+  animation: ntlScan 1.9s var(--ease) infinite; }
+@keyframes ntlShimmer { to { background-position: -220% 0; } }
+@keyframes ntlGrow { 0%, 100% { transform: scaleX(0.55); opacity: 0.5; } 45% { transform: scaleX(1); opacity: 1; } }
+@keyframes ntlScan { 0% { top: -26px; } 70%, 100% { top: 92px; } }
+.ntp-busy-t { font-size: 15px; font-weight: 750; color: var(--c-dark-blue); letter-spacing: -0.01em; }
+.ntp-busy-t::after { content: '…'; animation: ntlDots 1.4s steps(4) infinite; }
+@keyframes ntlDots { 0% { content: ''; } 25% { content: '.'; } 50% { content: '..'; } 75%, 100% { content: '…'; } }
+.ntp-busy-s { font-size: 12.5px; color: var(--c-ink-3); margin-top: -6px; }
+
+/* Initial template-list load — sleek skeleton rows (matches the real .ntp rows) */
+.ntp-skel { display: flex; flex-direction: column; gap: 6px; padding-top: 4px; }
+.ntp-skel-group { display: flex; align-items: center; gap: 10px; padding: 4px 2px 8px; }
+.ntp-skel-lbl { width: 74px; height: 9px; border-radius: 4px; background: #e4eaf3; }
+.ntp-skel-group i { flex: 1; height: 1px; background: rgba(9, 17, 33, 0.07); }
+.ntp-skel-row { display: flex; align-items: center; gap: 12px; padding: 11px 12px; border: 1px solid rgba(9, 17, 33, 0.06); border-radius: 12px; background: #fff; animation: ntp-fade 0.3s var(--ease) both; animation-delay: var(--d); }
+.ntp-skel-ic { width: 30px; height: 30px; border-radius: 9px; flex-shrink: 0; }
+.ntp-skel-main { flex: 1; display: flex; flex-direction: column; gap: 7px; }
+.ntp-skel-t { width: 58%; height: 9px; border-radius: 4px; }
+.ntp-skel-c { width: 34%; height: 7px; border-radius: 4px; }
+.ntp-skel-cpt { width: 62px; height: 8px; border-radius: 4px; flex-shrink: 0; }
+.ntp-skel-ic, .ntp-skel-t, .ntp-skel-c, .ntp-skel-cpt {
+  background: linear-gradient(90deg, #e7ecf4 0%, #f1f5fb 45%, #e7ecf4 80%); background-size: 220% 100%;
+  animation: ntlShimmer 1.25s linear infinite;
+}
+
 /* Note editor opens with a soft fade so the template appears smoothly, not abruptly. */
 .nt2 { animation: nt2-open 0.22s var(--ease); }
 @keyframes nt2-open { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
-@media (prefers-color-scheme: dark) { .ntp-busy { background: rgba(19, 28, 43, 0.86); } }
-@media (prefers-reduced-motion: reduce) { .ntp-busy-orb span, .nt2 { animation: none; } }
+@media (prefers-color-scheme: dark) {
+  .ntp-busy { background: rgba(19, 28, 43, 0.9); }
+  .ntl-doc { background: #131c2b; border-color: rgba(255, 255, 255, 0.08); }
+  .ntl-line { background: linear-gradient(90deg, #1e2a3e 0%, #26344a 45%, #1e2a3e 80%); background-size: 220% 100%; }
+  .ntp-skel-row { background: #131c2b; border-color: rgba(255, 255, 255, 0.07); }
+  .ntp-skel-ic, .ntp-skel-t, .ntp-skel-c, .ntp-skel-cpt, .ntp-skel-lbl { background: linear-gradient(90deg, #1e2a3e 0%, #26344a 45%, #1e2a3e 80%); background-size: 220% 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ntl-line, .ntl-scan, .ntp-busy-t::after, .ntp-skel-ic, .ntp-skel-t, .ntp-skel-c, .ntp-skel-cpt, .nt2 { animation: none; }
+  .ntl-line { transform: scaleX(1); opacity: 1; }
+}

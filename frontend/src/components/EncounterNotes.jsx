@@ -597,8 +597,15 @@ function NoteTypePicker({ onPick, onClose, busy }) {
       <div className="ntp">
         {busy && (
           <div className="ntp-busy" role="status" aria-live="polite">
-            <div className="ntp-busy-orb"><span /><span /><span /></div>
-            <div className="ntp-busy-t">Preparing your template…</div>
+            <div className="ntl-doc" aria-hidden="true">
+              <span className="ntl-accent" />
+              <span className="ntl-line l1" />
+              <span className="ntl-line l2" />
+              <span className="ntl-line l3" />
+              <span className="ntl-line l4" />
+              <span className="ntl-scan" />
+            </div>
+            <div className="ntp-busy-t">Preparing your template</div>
             <div className="ntp-busy-s">Setting up the note and carrying forward the current medications</div>
           </div>
         )}
@@ -607,7 +614,16 @@ function NoteTypePicker({ onPick, onClose, busy }) {
           <input className="ntp-search-in" autoFocus placeholder="Search note templates by name, category or CPT…" value={q} onChange={(e) => setQ(e.target.value)} />
         </div>
         {templates === null ? (
-          <div className="ntp-empty">Loading your templates…</div>
+          <div className="ntp-skel" role="status" aria-label="Loading templates">
+            <div className="ntp-skel-group"><span className="ntp-skel-lbl" /><i /></div>
+            {[0, 1, 2, 3, 4].map((n) => (
+              <div className="ntp-skel-row" key={n} style={{ '--d': `${n * 0.08}s` }}>
+                <span className="ntp-skel-ic" />
+                <span className="ntp-skel-main"><span className="ntp-skel-t" /><span className="ntp-skel-c" /></span>
+                <span className="ntp-skel-cpt" />
+              </div>
+            ))}
+          </div>
         ) : list.length === 0 ? (
           <div className="ntp-empty">No note templates are available for your specialty.</div>
         ) : searching ? (
