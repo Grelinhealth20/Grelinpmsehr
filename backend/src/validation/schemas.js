@@ -40,6 +40,9 @@ export const changePasswordSchema = z
   .strict();
 
 const specialtyUuid = z.string().uuid().nullable().optional();
+// MANY-TO-MANY: a provider may be granted MULTIPLE specialties (e.g. SNFs + Pain). Access
+// becomes the union of their service lines. Empty array clears all assignments.
+const specialtyUuids = z.array(z.string().uuid()).max(20).optional();
 // Provider credential tags (e.g. MD, DO, NP, APRN, ASNP, PA-C). Free-form but capped.
 const credentials = z.array(z.string().trim().min(1).max(20)).max(12).optional();
 // Individual-provider NPPES identity (NPI-1). NPI is 10 digits or empty; taxonomy is
@@ -56,6 +59,7 @@ export const createUserSchema = z
     accessLevel,
     credentials,
     specialtyUuid,
+    specialtyUuids,
     npi: providerNpi,
     taxonomy: taxonomyDesc,
     taxonomyCode,
@@ -70,6 +74,7 @@ export const updateUserSchema = z
     accessLevel,
     credentials,
     specialtyUuid,
+    specialtyUuids,
     npi: providerNpi,
     taxonomy: taxonomyDesc,
     taxonomyCode,
@@ -81,7 +86,7 @@ export const createSpecialtySchema = z
   .object({
     name: z.string().trim().min(2, 'Name is too short.').max(120),
     // Optional admin override of the clinical service line. Omitted → derived from the name.
-    serviceLine: z.enum(['snf', 'pain']).optional(),
+    serviceLine: z.enum(['snf', 'pain', 'tcm']).optional(),
   })
   .strict();
 

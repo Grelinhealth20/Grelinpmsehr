@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { execute } from '../db/pool.js';
 import { encrypt, decrypt, blindIndex } from '../utils/crypto.js';
 import { config } from '../config/env.js';
+import { invalidateServiceLines } from './accessScope.js';
 
 /** Map a raw DB row to a safe, decrypted DTO (never leaks the password hash). */
 export function toPublicUser(row) {
@@ -17,6 +18,12 @@ export function toPublicUser(row) {
     specialty: row.specialty_uuid
       ? { uuid: row.specialty_uuid, name: row.specialty_name, serviceLine: row.specialty_service_line || 'snf' }
       : null,
+    // ALL granted specialties (many-to-many). Falls back to the single primary for legacy rows.
+    specialties: (() => {
+      const arr = row.specialties_json ? (safeJson(row.specialties_json) || []) : [];
+      if (arr.length) return arr;
+      return row.specialty_uuid ? [{ uuid: row.specialty_uuid, name: row.specialty_name, serviceLine: row.specialty_service_line || 'snf' }] : [];
+    })(),
     npi: row.npi || null,
     taxonomy: row.taxonomy || null,
     taxonomyCode: row.taxonomy_code || null,
@@ -41,7 +48,9 @@ const USER_SELECT = `SELECT u.id, u.uuid, u.email_enc, u.email_bidx, u.full_name
   u.access_level, u.credentials, u.npi, u.taxonomy, u.taxonomy_code, u.password_hash, u.must_reset_password,
   u.failed_login_attempts, u.locked_until,
   u.last_login_at, u.password_changed_at, u.created_at, u.updated_at, u.specialty_id,
-  s.uuid AS specialty_uuid, s.name AS specialty_name, s.service_line AS specialty_service_line
+  s.uuid AS specialty_uuid, s.name AS specialty_name, s.service_line AS specialty_service_line,
+  (SELECT JSON_ARRAYAGG(JSON_OBJECT('uuid', sp.uuid, 'name', sp.name, 'serviceLine', sp.service_line))
+     FROM user_specialties us2 JOIN specialties sp ON sp.id = us2.specialty_id WHERE us2.user_id = u.id) AS specialties_json
   FROM users u LEFT JOIN specialties s ON s.id = u.specialty_id`;
 
 export async function findRawByEmail(email) {
@@ -96,6 +105,7 @@ export async function createUser({
   accessLevel = null,
   credentials = null,
   specialtyId = null,
+  specialtyIds = undefined,
   npi = null,
   taxonomy = null,
   taxonomyCode = null,
@@ -105,7 +115,7 @@ export async function createUser({
   status = 'active',
 }) {
   const uuid = uuidv4();
-  await execute(
+  const [ins] = await execute(
     `INSERT INTO users
        (uuid, email_enc, email_bidx, full_name_enc, role, status, access_level, credentials, specialty_id,
         npi, taxonomy, taxonomy_code, password_hash, must_reset_password, created_by, password_changed_at)
@@ -130,6 +140,10 @@ export async function createUser({
       createdBy,
     },
   );
+  // Persist the many-to-many specialty assignment (union access). Falls back to the single
+  // specialtyId when the caller used the legacy field, so both paths populate the join table.
+  const assign = specialtyIds !== undefined ? specialtyIds : (specialtyId ? [specialtyId] : []);
+  if (assign.length) await setUserSpecialties(ins.insertId, assign);
   return findRawByUuid(uuid);
 }
 
@@ -149,7 +163,35 @@ export async function listUsers({ role = null, status = null } = {}) {
   return rows.map(toPublicUser);
 }
 
-export async function updateUserProfile(uuid, { fullName, role, accessLevel, credentials, specialtyId, npi, taxonomy, taxonomyCode }) {
+/**
+ * Replace a provider's specialty assignments (MANY-TO-MANY). The Super Admin selects one or
+ * more specialties; access = the union of their service lines (see accessScope). The legacy
+ * users.specialty_id is kept in sync as the "primary" (first) for display/back-compat.
+ */
+export async function setUserSpecialties(userId, specialtyIds) {
+  const ids = [...new Set((specialtyIds || []).map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+  await execute('DELETE FROM user_specialties WHERE user_id = :u', { u: userId });
+  for (const sid of ids) {
+    await execute('INSERT IGNORE INTO user_specialties (user_id, specialty_id) VALUES (:u, :s)', { u: userId, s: sid });
+  }
+  await execute('UPDATE users SET specialty_id = :s WHERE id = :u', { u: userId, s: ids[0] ?? null });
+  invalidateServiceLines(userId); // specialties changed → refresh the cached access scope now
+}
+
+/** Resolve a user's numeric id from their uuid. */
+async function userIdByUuid(uuid) {
+  const [rows] = await execute('SELECT id FROM users WHERE uuid = :uuid LIMIT 1', { uuid });
+  return rows[0]?.id || null;
+}
+
+export async function updateUserProfile(uuid, { fullName, role, accessLevel, credentials, specialtyId, specialtyIds, npi, taxonomy, taxonomyCode }) {
+  // Multi-specialty assignment (join table) — handled separately from the users columns so a
+  // specialties-only edit still applies even when no other column changed.
+  if (specialtyIds !== undefined) {
+    const uid = await userIdByUuid(uuid);
+    if (uid) await setUserSpecialties(uid, specialtyIds);
+    invalidateUserCache(uuid);
+  }
   const sets = [];
   const params = { uuid };
   if (fullName !== undefined) {

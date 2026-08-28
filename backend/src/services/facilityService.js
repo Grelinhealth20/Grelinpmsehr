@@ -188,6 +188,7 @@ export async function assignProvider(facilityUuid, providerUuid, adminId) {
     `INSERT IGNORE INTO provider_facilities (provider_id, facility_id, assigned_by) VALUES (:pid, :fid, :aid)`,
     { pid: providerId, fid: facilityId, aid: adminId || null },
   );
+  invalidateFacilityIds(providerId); // assignment changed → refresh access scope now
   return { ok: true };
 }
 
@@ -195,6 +196,7 @@ export async function unassignProvider(facilityUuid, providerUuid) {
   const { facilityId, providerId } = await idsFor(facilityUuid, providerUuid);
   if (!facilityId || !providerId) return { notFound: true };
   await execute(`DELETE FROM provider_facilities WHERE provider_id = :pid AND facility_id = :fid`, { pid: providerId, fid: facilityId });
+  invalidateFacilityIds(providerId); // assignment changed → refresh access scope now
   return { ok: true };
 }
 
@@ -210,10 +212,31 @@ export async function listProviderFacilities(providerId) {
   return rows.map((r) => ({ ...toFacility(r), id: r.fid }));
 }
 
+/**
+ * Short-TTL cache for a provider's assigned-facility id set. This is read on the hot
+ * access-scope path (every notes list/get/sign, clinical records, patient list), and the
+ * remote DB has ~260ms round-trip latency — caching removes that per-request cost. The set
+ * changes only when an admin (un)assigns a provider, which invalidates the entry. A 20s TTL
+ * bounds staleness even if an invalidation is ever missed (matches the auth-cache TTL).
+ */
+const FAC_IDS_TTL_MS = 20_000;
+const facIdsCache = new Map(); // providerId -> { ids:number[], exp:number }
+export function invalidateFacilityIds(providerId) {
+  if (providerId != null) facIdsCache.delete(Number(providerId));
+  else facIdsCache.clear();
+}
+
 /** Internal-id set of a provider's assigned facilities (isolation checks). */
 export async function providerFacilityIds(providerId) {
+  const key = Number(providerId);
+  const now = Date.now();
+  const hit = facIdsCache.get(key);
+  if (hit && hit.exp > now) return hit.ids.slice();
   const [rows] = await execute(`SELECT facility_id FROM provider_facilities WHERE provider_id = :pid`, { pid: providerId });
-  return rows.map((r) => Number(r.facility_id));
+  const ids = rows.map((r) => Number(r.facility_id));
+  facIdsCache.set(key, { ids, exp: now + FAC_IDS_TTL_MS });
+  if (facIdsCache.size > 5000) facIdsCache.delete(facIdsCache.keys().next().value);
+  return ids.slice();
 }
 
 /**

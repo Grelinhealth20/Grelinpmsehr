@@ -200,19 +200,23 @@ export async function listProviderPatients(providerId, { page = 1, pageSize = 25
   const params = { ...sc.params };
   let where = sc.sql;
   if (q) {
-    // MRN is plaintext (partial match). Name is encrypted → searched via its blind
-    // index (exact full name). We index names as "last first", so also try the
-    // reversed order so the front office can type the name either way. Scales to any
-    // patient count (indexed equality lookup — no full-table name scan).
-    const norm = String(q).trim().toLowerCase().replace(/\s+/g, ' ');
-    const parts = norm.split(' ').filter(Boolean);
-    const variants = new Set([norm]);
-    if (parts.length === 2) variants.add(`${parts[1]} ${parts[0]}`);
-    const keys = [...variants];
-    const ph = keys.map((_, i) => `:qb${i}`);
-    where += ` AND (p.mrn LIKE :qlike OR p.name_bidx IN (${ph.join(', ')}))`;
-    params.qlike = `%${q}%`;
-    keys.forEach((v, i) => { params[`qb${i}`] = blindIndex(v); });
+    // FLEXIBLE, still-encrypted patient search — a single bar matches by last name, first
+    // name, first initial, or any prefix, OR by partial MRN:
+    //   • Name — each typed word is matched as a PREFIX blind index against the patient's
+    //     name-token table (a name STARTS WITH the word). Multiple words must ALL match
+    //     (e.g. "schwirian p" → last name Schwirian + first initial P). Indexed equality —
+    //     scales to any patient count, never a full-table name scan or decrypt.
+    //   • MRN — plaintext partial (LIKE). ORed with the name match.
+    // Names stay AES-GCM encrypted; only opaque prefix hashes are compared.
+    const raw = String(q).trim();
+    const words = raw.toLowerCase().split(/[\s\-]+/).map((w) => w.replace(/[^a-z0-9]/g, '')).filter(Boolean);
+    const nameConds = words.map((w, i) => {
+      params[`nt${i}`] = blindIndex(w);
+      return `EXISTS (SELECT 1 FROM patient_name_tokens t WHERE t.patient_id = p.id AND t.token_bidx = :nt${i})`;
+    });
+    params.qlike = `%${raw}%`;
+    const nameMatch = nameConds.length ? `(${nameConds.join(' AND ')})` : '0';
+    where += ` AND (${nameMatch} OR p.mrn LIKE :qlike)`;
   }
   const [[rows], [cnt]] = await Promise.all([
     execute(

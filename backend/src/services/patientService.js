@@ -104,6 +104,47 @@ const emgValue = (emergencyContacts, emergencyContact) => {
   return undefined;
 };
 
+/**
+ * Prefix search tokens for a patient's name — the enabler for flexible, still-encrypted
+ * search (by last name, first name, first initial, or any prefix) WITHOUT ever storing the
+ * plaintext name. For each name word we emit the blind index (keyed HMAC — irreversible
+ * without the server key) of every prefix (length 1..12). A query word matches a patient iff
+ * its blind index equals one of these, i.e. a name STARTS WITH the typed text. Compound names
+ * (spaces/hyphens) are split so each part is independently searchable. The names themselves
+ * stay AES-GCM encrypted in `demographics_enc`; this table holds only opaque hashes.
+ */
+const MAX_PREFIX = 12;
+function namePrefixStrings(demographics) {
+  const set = new Set();
+  for (const field of [demographics?.firstName, demographics?.middleName, demographics?.lastName]) {
+    for (const part of String(field || '').toLowerCase().split(/[\s\-]+/)) {
+      const w = part.replace(/[^a-z0-9]/g, '');
+      if (!w) continue;
+      for (let n = 1; n <= Math.min(w.length, MAX_PREFIX); n++) set.add(w.slice(0, n));
+    }
+  }
+  return [...set];
+}
+export function nameSearchTokens(demographics) {
+  return namePrefixStrings(demographics).map((t) => blindIndex(t));
+}
+
+/** Replace a patient's name-search tokens (delete + bulk insert). Idempotent. */
+export async function syncPatientNameTokens(patientId, demographics) {
+  const tokens = nameSearchTokens(demographics);
+  await execute('DELETE FROM patient_name_tokens WHERE patient_id = :pid', { pid: patientId });
+  if (!tokens.length) return;
+  const params = { pid: patientId };
+  const values = tokens.map((t, i) => { params[`t${i}`] = t; return `(:pid, :t${i})`; }).join(', ');
+  await execute(`INSERT IGNORE INTO patient_name_tokens (patient_id, token_bidx) VALUES ${values}`, params);
+}
+
+/** Backfill helper (migration): decrypt the stored demographics blob, then re-index tokens. */
+export async function syncPatientNameTokensFromEnc(patientId, demographicsEnc) {
+  const demo = safeParse(demographicsEnc);
+  if (demo) await syncPatientNameTokens(patientId, demo);
+}
+
 export async function createPatient({ providerId, demographics, insurance, facility, emergencyContact, emergencyContacts, createdBy }) {
   const uuid = uuidv4();
   const mrn = await generateMrn();
@@ -114,7 +155,7 @@ export async function createPatient({ providerId, demographics, insurance, facil
   // patient to a facility for billing and cross-facility isolation.
   const facIds = await providerFacilityIds(providerId);
   const facilityId = facIds.length ? facIds[0] : null;
-  await execute(
+  const [ins] = await execute(
     `INSERT INTO patients (uuid, provider_id, facility_id, mrn, name_bidx, demographics_enc, insurance_enc, facility_enc, emergency_enc, created_by)
      VALUES (:uuid, :pid, :facilityId, :mrn, :nameBidx, :demoEnc, :insEnc, :facEnc, :emgEnc, :createdBy)`,
     {
@@ -130,6 +171,8 @@ export async function createPatient({ providerId, demographics, insurance, facil
       createdBy,
     },
   );
+  // Index the name for prefix search (last name / first name / initial / partial).
+  if (ins?.insertId) await syncPatientNameTokens(ins.insertId, demographics);
   return toPublicPatient(await getRawByUuid(uuid));
 }
 
@@ -162,7 +205,10 @@ function buildPatientSets({ demographics, insurance, facility, emergencyContact,
 export async function updatePatient(uuid, fields) {
   const { sets, params } = buildPatientSets(fields);
   if (sets.length) await execute(`UPDATE patients SET ${sets.join(', ')} WHERE uuid = :uuid`, { ...params, uuid });
-  return toPublicPatient(await getRawByUuid(uuid));
+  const raw = await getRawByUuid(uuid);
+  // Re-index name tokens whenever demographics changed (name may have been edited).
+  if (fields.demographics !== undefined && raw?.id) await syncPatientNameTokens(raw.id, fields.demographics);
+  return toPublicPatient(raw);
 }
 
 /**
@@ -178,6 +224,16 @@ export async function applyPatientUpdateLocked(uuid, mergeFn) {
     const patch = mergeFn(toPublicPatient(rows[0])) || {};
     const { sets, params } = buildPatientSets(patch);
     if (sets.length) await exec(`UPDATE patients SET ${sets.join(', ')} WHERE uuid = :uuid`, { ...params, uuid });
+    // Keep name-search tokens consistent in-transaction if the name changed in the merge.
+    if (patch.demographics !== undefined) {
+      const tokens = nameSearchTokens(patch.demographics);
+      await exec('DELETE FROM patient_name_tokens WHERE patient_id = :pid', { pid: rows[0].id });
+      if (tokens.length) {
+        const p = { pid: rows[0].id };
+        const vals = tokens.map((t, i) => { p[`t${i}`] = t; return `(:pid, :t${i})`; }).join(', ');
+        await exec(`INSERT IGNORE INTO patient_name_tokens (patient_id, token_bidx) VALUES ${vals}`, p);
+      }
+    }
     const [after] = await exec(`${SELECT} WHERE p.uuid = :uuid LIMIT 1`, { uuid });
     return toPublicPatient(after[0]);
   });

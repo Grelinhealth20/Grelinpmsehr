@@ -45,6 +45,15 @@ export const NOTE_TITLES = {
   pain_botox: 'Botulinum Toxin Injection — Procedure Note',
   pain_uds: 'Urine Drug Screen / Toxicology Review',
   pain_discharge: 'Pain Management Discharge / Transition Note',
+  // Transitional Care Management (TCM 99495 / 99496)
+  tcm_face_to_face: 'Transitional Care Management — Face-to-Face Visit',
+  tcm_initial_contact: 'TCM Initial Interactive Contact',
+  tcm_discharge_review: 'TCM Discharge Information Review',
+  tcm_med_reconciliation: 'TCM Medication Reconciliation',
+  tcm_care_plan: 'Transitional Care Plan',
+  tcm_non_face_to_face: 'TCM Non-Face-to-Face Care Management',
+  tcm_follow_up: 'TCM Interim Follow-Up / Care Coordination',
+  tcm_closeout: 'TCM 30-Day Service Period Close-Out',
 };
 
 // Canonical section labels (must match the frontend note templates' section keys).
@@ -122,6 +131,15 @@ export const SECTION_LABELS = {
   opioidRisk: 'Opioid Risk Assessment',
   udsResult: 'Urine Drug Screen / Toxicology',
   injectate: 'Medications Administered (Injectate)',
+  // Transitional Care Management (TCM 99495 / 99496)
+  dischargeInfo: 'Discharge Information Reviewed',
+  interactiveContact: 'Interactive Contact (≤ 2 Business Days Post-Discharge)',
+  pendingFollowUp: 'Pending Tests, Referrals & Treatments',
+  communityServices: 'Community & Social Services Coordination',
+  caregiverEducation: 'Patient / Family / Caregiver Education',
+  tcmComplexity: 'Medical Decision Making & TCM Complexity (99495 / 99496)',
+  transitionGoals: 'Transition Goals & Self-Management Plan',
+  tcmAttestation: 'TCM Service Period, Timeline & Billing Attestation',
 };
 // Canonical clinical documentation order (Bates'/standard H&P). ROS is the LAST
 // subjective element, right before the objective exam; functional status sits with
@@ -130,6 +148,7 @@ export const SECTION_LABELS = {
 const SECTION_ORDER = [
   // Subjective
   'chiefComplaint', 'changeDescription', 'hpi', 'painHistory', 'painScale', 'interval', 'hospitalCourse',
+  'dischargeInfo', 'interactiveContact', 'transitionGoals',
   'pmh', 'psh', 'familyHistory', 'socialHistory', 'psychHistory',
   'medications', 'medChanges', 'allergies', 'adverseEffects', 'priorTreatments',
   'pdmpReview', 'udsResult', 'opioidRisk', 'ros',
@@ -141,14 +160,15 @@ const SECTION_ORDER = [
   // Assessment
   'prognosis', 'carePlanReview', 'riskAssessment', 'safetyEval', 'caregiver', 'assessment', 'mdm',
   // Plan
-  'plan', 'dementiaPlan', 'orders', 'notifications',
+  'tcmComplexity', 'plan', 'dementiaPlan', 'orders', 'notifications',
+  'pendingFollowUp', 'communityServices', 'caregiverEducation',
   'goals', 'participants', 'decisionsMade', 'codeStatus', 'advanceDirective', 'careCoordination',
   // Discharge block
   'dischargeDiagnoses', 'procedures', 'dischargeMeds', 'disposition', 'followUp', 'dischargeInstructions',
   // Death
   'pronouncement', 'circumstances', 'causeOfDeath',
   // Attestation
-  'regulatoryAttestation', 'timeSpent', 'addendum',
+  'regulatoryAttestation', 'tcmAttestation', 'timeSpent', 'addendum',
 ];
 
 // Note-type-specific section headings (mirror the UI templates so the Word
@@ -187,6 +207,15 @@ export const NOTE_LABEL_OVERRIDES = {
   pain_botox: { procedureName: 'Procedure Performed (Botulinum Toxin Injection) + CPT', consent: 'Informed Consent & Time-Out', procTechnique: 'Technique (Muscles / Sites / Guidance)', injectate: 'Botulinum Toxin — Product, Total Units & Units per Site', postProcedure: 'Post-Procedure Condition & Plan', timeSpent: 'Total Procedure Time & Attestation' },
   pain_uds: { chiefComplaint: 'Reason for Toxicology Review', medications: 'Prescribed Controlled Substances', assessment: 'Interpretation & Assessment', plan: 'Action & Plan' },
   pain_discharge: { chiefComplaint: 'Reason for Discharge / Transition', interval: 'Summary of Pain Management Course & Functional Status', medications: 'Discharge Medication Reconciliation', assessment: 'Final Pain Assessment', plan: 'Discharge Plan & Instructions', followUp: 'Follow-Up & Care Coordination' },
+  // Transitional Care Management (TCM 99495 / 99496) — headers mirror the UI templates exactly.
+  tcm_face_to_face: { chiefComplaint: 'Reason for Post-Discharge Visit', interval: 'Status Since Discharge', exam: 'Focused Examination', medications: 'Medication Reconciliation (completed by the F2F date — required)' },
+  tcm_initial_contact: { chiefComplaint: 'Purpose of Contact', medChanges: 'Immediate Medication Issues Identified', plan: 'Interim Plan & Next Steps' },
+  tcm_discharge_review: { chiefComplaint: 'Purpose of Review', medications: 'Discharge Medication List (as documented)' },
+  tcm_med_reconciliation: { chiefComplaint: 'Reason for Reconciliation', medications: 'Reconciled Medication List (Discharge vs Current)' },
+  tcm_care_plan: { chiefComplaint: 'Purpose of the Transitional Care Plan', plan: 'Interventions & Coordination', followUp: 'Follow-Up Schedule & Readmission Prevention' },
+  tcm_non_face_to_face: { chiefComplaint: 'Non-Face-to-Face Services Provided' },
+  tcm_follow_up: { chiefComplaint: 'Reason for Interim Follow-Up', interval: 'Status Since Last Contact', plan: 'Interim Plan & Escalation' },
+  tcm_closeout: { chiefComplaint: 'Purpose of Close-Out', interval: 'Summary of the 30-Day Transitional Period', medications: 'Final Reconciled Medication List', followUp: 'Ongoing Care Handoff' },
 };
 
 const BLUE = '2753B3';

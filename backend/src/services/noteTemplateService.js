@@ -1,4 +1,5 @@
 import { pool, execute } from '../db/pool.js';
+import { providerServiceLines } from './accessScope.js';
 
 /**
  * Note-template REGISTRY (the separate DB table that governs Pain vs SNF templates).
@@ -49,6 +50,17 @@ export const NOTE_TEMPLATE_REGISTRY = [
   ['pain_botox', 'pain', 'Botulinum Toxin Injection', 'Pain Management — Interventional', '64615 · 64642–64647', 'more', 144],
   ['pain_uds', 'pain', 'Urine Drug Screen / Toxicology Review', 'Pain Management — Monitoring', '80305–80307 (review)', 'more', 150],
   ['pain_discharge', 'pain', 'Pain Management Discharge / Transition', 'Pain Management — Transition', 'Transition of care', 'more', 160],
+  // ---- TCM (Transitional Care Management) — CMS 99495 / 99496 ----
+  // The TCM service is reported ONCE per 30-day period on the face-to-face visit; the other
+  // notes document the CMS-required elements that support that single billed service.
+  ['tcm_face_to_face', 'tcm', 'TCM Face-to-Face Visit', 'Transitional Care Management — face-to-face E/M (≤7d high · ≤14d moderate)', '99495 · 99496', 'common', 10],
+  ['tcm_initial_contact', 'tcm', 'Initial Interactive Contact (≤ 2 business days)', 'TCM required element', 'Supports 99495 / 99496', 'common', 20],
+  ['tcm_discharge_review', 'tcm', 'Discharge Information Review', 'TCM required element', 'Supports 99495 / 99496', 'common', 30],
+  ['tcm_med_reconciliation', 'tcm', 'Medication Reconciliation (by F2F date)', 'TCM required element', 'Supports 99495 / 99496', 'common', 40],
+  ['tcm_care_plan', 'tcm', 'Transitional Care Plan', 'Transitional Care Management', 'Supports 99495 / 99496', 'common', 50],
+  ['tcm_non_face_to_face', 'tcm', 'Non-Face-to-Face Care Management', 'TCM clinical-staff services (30-day period)', 'Supports 99495 / 99496', 'more', 110],
+  ['tcm_follow_up', 'tcm', 'Interim Follow-Up / Care Coordination', 'Transitional Care Management', 'Supports 99495 / 99496', 'more', 120],
+  ['tcm_closeout', 'tcm', '30-Day Service Period Close-Out', 'Transitional Care Management', '99495 · 99496 (DOS = F2F)', 'more', 130],
 ];
 
 // Fast in-memory map: note_type -> service_line (the registry is small & static).
@@ -60,28 +72,34 @@ const SERVICE_BY_TYPE = new Map(NOTE_TEMPLATE_REGISTRY.map((r) => [r[0], r[1]]))
  * frontend exactly so the two never disagree.
  */
 export function serviceForSpecialty(specialtyName) {
-  return /\bpain\b/i.test(String(specialtyName || '')) ? 'pain' : 'snf';
+  const n = String(specialtyName || '');
+  if (/\bpain\b/i.test(n)) return 'pain';
+  if (/\btcm\b|transitional care/i.test(n)) return 'tcm';
+  return 'snf';
 }
 
-/** Resolve a provider's service line from their assigned specialty's STORED service_line. */
+/** Resolve a provider's PRIMARY service line (first of their assigned lines) — display only.
+ *  Access decisions use the full set via providerServiceLines / providerCanUseNoteType. */
 export async function providerServiceLine(providerId) {
-  const [rows] = await execute(
-    `SELECT s.service_line AS service_line FROM users u LEFT JOIN specialties s ON s.id = u.specialty_id WHERE u.id = :id LIMIT 1`,
-    { id: providerId },
-  );
-  return rows[0]?.service_line || 'snf';
+  const lines = await providerServiceLines(providerId);
+  return lines[0] || null; // no fallback — null when the provider has no specialty
 }
+
+// Re-export the authoritative multi-line resolver so callers have one template API surface.
+export { providerServiceLines };
 
 /** The service line a note type belongs to (null if unknown). */
 export function serviceForNoteType(noteType) {
   return SERVICE_BY_TYPE.get(noteType) || null;
 }
 
-/** True iff this provider may create/edit a note of this type (same service line). */
+/** True iff this provider may create/edit a note of this type — i.e. the note type's
+ *  service line is among the provider's granted specialties (multi-specialty aware). */
 export async function providerCanUseNoteType(providerId, noteType) {
   const typeLine = serviceForNoteType(noteType);
   if (!typeLine) return false;
-  return (await providerServiceLine(providerId)) === typeLine;
+  const lines = await providerServiceLines(providerId);
+  return lines.includes(typeLine);
 }
 
 // Pre-built, per-service-line template lists (immutable static reference data). Built
@@ -90,7 +108,7 @@ export async function providerCanUseNoteType(providerId, noteType) {
 // round-trips. The note_templates DB table remains the durable/seeded source of truth;
 // it and this const are populated from the SAME registry, so they never disagree.
 const TEMPLATES_BY_LINE = (() => {
-  const by = { snf: [], pain: [] };
+  const by = { snf: [], pain: [], tcm: [] };
   for (const r of NOTE_TEMPLATE_REGISTRY) {
     by[r[1]].push({ noteType: r[0], serviceLine: r[1], label: r[2], category: r[3], cpt: r[4], menuGroup: r[5], sortOrder: r[6] });
   }
@@ -107,8 +125,31 @@ const TEMPLATES_BY_LINE = (() => {
  * mutate the shared list (no cross-request leakage of the reference data).
  */
 export function listTemplatesForServiceLine(serviceLine) {
-  const line = serviceLine === 'pain' ? 'pain' : 'snf';
+  const line = ['snf', 'pain', 'tcm'].includes(serviceLine) ? serviceLine : 'snf';
   return (TEMPLATES_BY_LINE[line] || []).map((t) => ({ ...t }));
+}
+
+/**
+ * Templates available across a SET of service lines (a multi-specialty provider) — the
+ * de-duplicated UNION, ordered common-first then by sort order. Fresh copies (no shared
+ * reference). A provider granted SNFs + Pain sees both lines' templates in one picker.
+ */
+export function listTemplatesForServiceLines(lines) {
+  const set = (Array.isArray(lines) ? lines : [lines]).filter(Boolean);
+  // NO FALLBACK: an empty set (provider with no specialty) yields NO templates.
+  const wanted = [...new Set(set)];
+  const seen = new Set();
+  const out = [];
+  for (const line of wanted) {
+    for (const t of listTemplatesForServiceLine(line)) {
+      if (seen.has(t.noteType)) continue;
+      seen.add(t.noteType);
+      out.push(t);
+    }
+  }
+  // Common group first, then by the registry sort order — stable across lines.
+  out.sort((a, b) => (Number(b.menuGroup === 'common') - Number(a.menuGroup === 'common')) || a.sortOrder - b.sortOrder);
+  return out;
 }
 
 /** Idempotently seed/refresh the registry table (called on migration/boot). */

@@ -56,6 +56,19 @@ async function resolveSpecialtyId(specialtyUuid) {
   return id;
 }
 
+/** Resolve an array of specialty UUIDs → numeric ids (multi-specialty assignment). Returns
+ *  undefined when not provided (no change); an empty array clears all assignments. */
+async function resolveSpecialtyIds(specialtyUuids) {
+  if (specialtyUuids === undefined) return undefined;
+  const ids = [];
+  for (const u of specialtyUuids) {
+    const id = await findSpecialtyIdByUuid(u);
+    if (!id) { const e = new Error('Unknown specialty.'); e.status = 400; e.code = 'UNKNOWN_SPECIALTY'; throw e; }
+    ids.push(id);
+  }
+  return ids;
+}
+
 function ctxOf(req) {
   return { ip: req.ip, userAgent: req.get('user-agent') };
 }
@@ -99,7 +112,7 @@ export async function list(req, res, next) {
 
 export async function create(req, res, next) {
   try {
-    const { email, fullName, role, accessLevel, credentials, specialtyUuid, npi, taxonomy, taxonomyCode, temporaryPassword } = req.body;
+    const { email, fullName, role, accessLevel, credentials, specialtyUuid, specialtyUuids, npi, taxonomy, taxonomyCode, temporaryPassword } = req.body;
     const isProvider = role === ROLES.PROVIDER;
 
     const policyErrors = validatePasswordPolicy(temporaryPassword);
@@ -114,6 +127,7 @@ export async function create(req, res, next) {
 
     // Specialty + NPPES identity (NPI / taxonomy) only apply to providers.
     const specialtyId = isProvider ? await resolveSpecialtyId(specialtyUuid) : null;
+    const specialtyIds = isProvider ? await resolveSpecialtyIds(specialtyUuids) : undefined;
 
     const passwordHash = await hashPassword(temporaryPassword);
     const row = await createUser({
@@ -123,6 +137,7 @@ export async function create(req, res, next) {
       accessLevel: accessLevel || null,
       credentials: isProvider ? (credentials || null) : null,
       specialtyId: specialtyId ?? null,
+      specialtyIds,
       npi: isProvider ? (npi || null) : null,
       taxonomy: isProvider ? (taxonomy || null) : null,
       taxonomyCode: isProvider ? (taxonomyCode || null) : null,
@@ -168,9 +183,10 @@ export async function update(req, res, next) {
       return res.status(400).json({ error: 'The master administrator role cannot be changed.', code: 'MASTER_PROTECTED' });
     }
 
-    const { specialtyUuid, ...rest } = req.body;
+    const { specialtyUuid, specialtyUuids, ...rest } = req.body;
     const specialtyId = await resolveSpecialtyId(specialtyUuid);
-    const updated = await updateUserProfile(req.params.uuid, { ...rest, specialtyId });
+    const specialtyIds = await resolveSpecialtyIds(specialtyUuids);
+    const updated = await updateUserProfile(req.params.uuid, { ...rest, specialtyId, specialtyIds });
     await recordAudit({
       actorUserId: req.authUserId,
       action: 'user.update',

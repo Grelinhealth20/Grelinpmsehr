@@ -8,26 +8,22 @@ import {
   updateNote as updateNoteSvc, signNote as signNoteSvc, amendSignedNote as amendNoteSvc,
 } from '../services/encounterNoteService.js';
 import {
-  serviceForNoteType, listTemplatesForServiceLine,
+  listTemplatesForServiceLines, providerServiceLines, providerCanUseNoteType,
 } from '../services/noteTemplateService.js';
 import { recordAudit } from '../services/auditService.js';
 import { notePdf } from '../services/pdfExport.js';
 
-// The current provider's service line — the STORED, admin-set service_line ALREADY loaded
-// on req.user.specialty by the auth middleware (cached), so it costs no extra DB round-trip
-// and matches the authoritative column used everywhere else. No specialty → 'snf'.
-const reqServiceLine = (req) => req.user?.specialty?.serviceLine || 'snf';
-
 /**
- * Note templates AVAILABLE to the current provider — filtered to their service line
- * (SNF vs Pain Management) from the note_templates registry. The provider sees only
- * their own service's templates; the picker renders exactly this list.
+ * Note templates AVAILABLE to the current provider — the UNION of ALL their granted
+ * specialties' service lines (a provider assigned SNFs + Pain sees both lines' templates).
+ * Read from the authoritative many-to-many assignment (dynamic — reflects the admin's
+ * current selection immediately). The picker renders exactly this de-duplicated list.
  */
 export async function noteTemplates(req, res, next) {
   try {
-    const serviceLine = reqServiceLine(req);
-    const templates = await listTemplatesForServiceLine(serviceLine);
-    res.json({ serviceLine, templates });
+    const serviceLines = await providerServiceLines(req.authUserId);
+    const templates = listTemplatesForServiceLines(serviceLines);
+    res.json({ serviceLines, serviceLine: serviceLines[0] || null, templates });
   } catch (err) { next(err); }
 }
 
@@ -129,9 +125,10 @@ export async function listNotes(req, res, next) {
 export async function createNote(req, res, next) {
   try {
     const { noteType, reason, content } = req.body;
-    // SERVICE-LINE ACCESS: a provider may create ONLY the note templates for their own
-    // specialty's service line (SNF vs Pain). Server-enforced, in-memory (no DB round-trip).
-    if (serviceForNoteType(noteType) !== reqServiceLine(req)) {
+    // SERVICE-LINE ACCESS: a provider may create ONLY note templates whose service line is
+    // among their granted specialties (multi-specialty aware; a SNF+Pain provider may create
+    // both, a single-specialty provider only their own). Server-enforced, authoritative.
+    if (!(await providerCanUseNoteType(req.authUserId, noteType))) {
       return res.status(403).json({ error: 'This note template is not available for your specialty.', code: 'TEMPLATE_FORBIDDEN' });
     }
     const note = await createNoteSvc({ encounterUuid: req.params.encounterUuid, providerId: req.authUserId, noteType, reason, content, createdBy: req.authUserId });
@@ -151,9 +148,9 @@ export async function getNote(req, res, next) {
 
 export async function updateNote(req, res, next) {
   try {
-    // If the note type is being changed, it must still belong to the provider's own
-    // service line (SNF vs Pain) — no switching a note across service lines. In-memory.
-    if (req.body.noteType && serviceForNoteType(req.body.noteType) !== reqServiceLine(req)) {
+    // If the note type is being changed, the new type must belong to one of the provider's
+    // granted service lines (multi-specialty aware) — no switching to a line they don't hold.
+    if (req.body.noteType && !(await providerCanUseNoteType(req.authUserId, req.body.noteType))) {
       return res.status(403).json({ error: 'This note template is not available for your specialty.', code: 'TEMPLATE_FORBIDDEN' });
     }
     const result = await updateNoteSvc(req.params.noteUuid, req.authUserId, req.body);

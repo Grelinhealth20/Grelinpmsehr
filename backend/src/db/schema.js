@@ -87,13 +87,28 @@ export const SCHEMA_STATEMENTS = [
     id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     uuid         CHAR(36)        NOT NULL,
     name         VARCHAR(120)    NOT NULL,
-    service_line ENUM('snf','pain') NOT NULL DEFAULT 'snf',
+    service_line ENUM('snf','pain','tcm') NOT NULL DEFAULT 'snf',
     created_by   BIGINT UNSIGNED NULL,
     created_at   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
     UNIQUE KEY uq_spec_uuid (uuid),
     UNIQUE KEY uq_spec_name (name),
     CONSTRAINT fk_spec_created_by FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+  // --- Provider ↔ Specialty (MANY-TO-MANY) -----------------------------------
+  // A provider may hold MULTIPLE specialties (e.g. SNFs + Pain). Their clinical
+  // access = the UNION of the service lines of these specialties. The legacy
+  // users.specialty_id remains the "primary" specialty for display; this table is
+  // the authoritative source for access decisions (see accessScope.providerServiceLines).
+  `CREATE TABLE IF NOT EXISTS user_specialties (
+    user_id      BIGINT UNSIGNED NOT NULL,
+    specialty_id BIGINT UNSIGNED NOT NULL,
+    created_at   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, specialty_id),
+    KEY idx_us_user (user_id),
+    CONSTRAINT fk_us_user      FOREIGN KEY (user_id)      REFERENCES users(id)       ON DELETE CASCADE,
+    CONSTRAINT fk_us_specialty FOREIGN KEY (specialty_id) REFERENCES specialties(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 
   // --- Appointments (EHR scheduler; patient fields ENCRYPTED as PHI) ---------
@@ -138,6 +153,16 @@ export const SCHEMA_STATEMENTS = [
     KEY idx_patient_name (name_bidx),
     CONSTRAINT fk_patient_provider FOREIGN KEY (provider_id) REFERENCES users(id) ON DELETE CASCADE,
     CONSTRAINT fk_patient_created_by FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+  // --- Patient name-search tokens (prefix blind indexes; enables flexible search
+  //     by last name / first name / initial / partial WITHOUT storing plaintext) ---
+  `CREATE TABLE IF NOT EXISTS patient_name_tokens (
+    patient_id  BIGINT UNSIGNED NOT NULL,
+    token_bidx  CHAR(64)        NOT NULL,
+    PRIMARY KEY (patient_id, token_bidx),
+    KEY idx_pnt_token (token_bidx),
+    CONSTRAINT fk_pnt_patient FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 
   // --- Patient documents (S3 object refs; scoped strictly per patient) -------
@@ -320,7 +345,7 @@ export const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS note_templates (
     id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     note_type     VARCHAR(60)     NOT NULL,
-    service_line  ENUM('snf','pain') NOT NULL,
+    service_line  ENUM('snf','pain','tcm') NOT NULL,
     label         VARCHAR(160)    NOT NULL,
     category      VARCHAR(160)    NULL,
     cpt           VARCHAR(160)    NULL,

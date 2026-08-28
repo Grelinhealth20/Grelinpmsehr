@@ -25,26 +25,71 @@ export function isMdCredentials(raw) {
 }
 
 /**
- * Resolve the viewer's scope.
- * @returns {Promise<{ isMD: boolean, facilityIds: number[] }>}
- *   `facilityIds` is populated only for an MD who has facility assignments — the
- *   set of facilities whose records they may see. Empty otherwise.
+ * Authoritative SET of service lines a provider may practice — the UNION of the service
+ * lines of ALL their assigned specialties (many-to-many `user_specialties`). A provider
+ * assigned SNFs + Pain returns ['snf','pain']; a single-specialty provider returns one
+ * line. Falls back to the legacy single `specialty_id` if the join table has no rows yet.
+ * A provider with NO specialty returns an EMPTY set (deny-by-default — no fallback). Read from
+ * the STORED, admin-set `service_line` column — no name-string inference in the security path.
+ * @returns {Promise<string[]>} distinct service lines (subset of {'snf','pain','tcm'})
  */
-export async function viewerScope(userId) {
+/**
+ * Short-TTL cache for a provider's service-line set. Read on the hot path (the note-template
+ * picker on every open, note create/update, and inside viewerScope for every notes op) and
+ * the remote DB has ~260-520ms round-trip latency — caching removes that per-request cost.
+ * The set changes only when an admin edits the provider's specialties, which invalidates the
+ * entry; a 20s TTL bounds staleness even if an invalidation is ever missed.
+ */
+const SL_TTL_MS = 20_000;
+const slCache = new Map(); // userId -> { lines:string[], exp:number }
+export function invalidateServiceLines(userId) {
+  if (userId != null) slCache.delete(Number(userId));
+  else slCache.clear();
+}
+
+export async function providerServiceLines(userId) {
+  const key = Number(userId);
+  const now = Date.now();
+  const cached = slCache.get(key);
+  if (cached && cached.exp > now) return cached.lines.slice();
   const [rows] = await execute(
-    `SELECT u.credentials, s.service_line AS service_line FROM users u
-       LEFT JOIN specialties s ON s.id = u.specialty_id WHERE u.id = :id LIMIT 1`,
+    `SELECT DISTINCT s.service_line AS sl
+       FROM user_specialties us JOIN specialties s ON s.id = us.specialty_id
+      WHERE us.user_id = :id`,
     { id: userId },
   );
+  let lines = rows.map((r) => r.sl).filter(Boolean);
+  if (!lines.length) {
+    // Legacy fallback: the single specialty_id (providers not migrated to the join table).
+    const [leg] = await execute(
+      `SELECT s.service_line AS sl FROM users u JOIN specialties s ON s.id = u.specialty_id WHERE u.id = :id`,
+      { id: userId },
+    );
+    lines = leg.map((r) => r.sl).filter(Boolean);
+  }
+  // NO FALLBACK: a provider with no assigned specialty gets an EMPTY set and is denied all
+  // clinical records (deny-by-default), rather than silently defaulting to a service line.
+  const distinct = [...new Set(lines)];
+  slCache.set(key, { lines: distinct, exp: now + SL_TTL_MS });
+  if (slCache.size > 5000) slCache.delete(slCache.keys().next().value);
+  return distinct.slice();
+}
+
+/**
+ * Resolve the viewer's scope.
+ * @returns {Promise<{ isMD: boolean, facilityIds: number[], serviceLines: string[] }>}
+ *   `facilityIds` is populated only for an MD who has facility assignments. `serviceLines`
+ *   is the union of the viewer's specialties' service lines — a facility-wide MD's
+ *   cross-provider access is bounded to exactly these lines (a Pain-only MD never sees SNF
+ *   records; a multi-specialty SNF+Pain MD sees both), so isolation never widens beyond the
+ *   admin-granted specialties.
+ */
+export async function viewerScope(userId) {
+  const [rows] = await execute(`SELECT credentials FROM users WHERE id = :id LIMIT 1`, { id: userId });
   const isMD = isMdCredentials(rows[0]?.credentials);
   const facilityIds = isMD ? await providerFacilityIds(userId) : [];
-  // The viewer's SERVICE LINE (snf | pain) — read from the specialty's STORED, admin-set
-  // service_line column (authoritative; no name-string inference in the security path). A
-  // facility-wide MD's cross-provider access is bounded to their own service line, so a
-  // Pain MD never sees SNF records and vice versa even at a shared facility. A provider
-  // with no specialty defaults to 'snf'.
-  const serviceLine = rows[0]?.service_line || 'snf';
-  return { isMD, facilityIds, serviceLine };
+  const serviceLines = await providerServiceLines(userId);
+  return { isMD, facilityIds, serviceLines };
 }
 
 /** True when the viewer's scope is facility-wide (an MD with ≥1 assigned facility). */
@@ -53,12 +98,35 @@ export function isFacilityWide(scope) {
 }
 
 /**
- * SQL predicate restricting a note (aliased `alias`) to the viewer's OWN service line,
- * used together with facility-wide access. All Pain note types are prefixed `pain_`;
- * SNF types are not — so the split is a clean, index-friendly prefix test.
+ * SQL predicate restricting a note (aliased `alias`) to the viewer's OWN service line(s),
+ * used together with facility-wide access. Pain note types are prefixed `pain_` and TCM types
+ * `tcm_`; SNF types carry no prefix (the residual) — a clean, index-friendly prefix split.
  */
+const SERVICE_LINES = ['snf', 'pain', 'tcm'];
+
+/** Per-line note-type predicate. Pain and TCM note types carry their line prefix (`pain_`,
+ *  `tcm_`); SNF is the RESIDUAL (no prefix), so a SNF viewer sees notes that are neither. */
+function lineNotePredicate(line, alias) {
+  if (line === 'pain') return `${alias}.note_type LIKE 'pain%'`;
+  if (line === 'tcm') return `${alias}.note_type LIKE 'tcm%'`;
+  return `(${alias}.note_type NOT LIKE 'pain%' AND ${alias}.note_type NOT LIKE 'tcm%')`; // snf residual
+}
+
 export function noteServiceLineWhere(scope, alias = 'n') {
-  return scope.serviceLine === 'pain' ? `${alias}.note_type LIKE 'pain%'` : `${alias}.note_type NOT LIKE 'pain%'`;
+  const lines = [...new Set(scope.serviceLines || [])].filter((l) => SERVICE_LINES.includes(l));
+  if (!lines.length) return '1=0'; // no granted service line → sees no notes (deny by default, no fallback)
+  // OR over the viewer's granted lines — a multi-specialty viewer sees the union.
+  return `(${lines.map((l) => lineNotePredicate(l, alias)).join(' OR ')})`;
+}
+
+/** EXISTS predicate: the owning provider (aliased row's `provider_id`) practises `line`.
+ *  SNF is the residual — an owner with a stored SNF specialty OR NO specialty at all counts
+ *  as SNF, matching the note-type residual so purely-SNF patients aren't stranded. */
+function ownerHasLinePredicate(line, alias) {
+  if (line === 'snf') {
+    return `(EXISTS (SELECT 1 FROM user_specialties pus JOIN specialties ps ON ps.id = pus.specialty_id WHERE pus.user_id = ${alias}.provider_id AND ps.service_line = 'snf') OR NOT EXISTS (SELECT 1 FROM user_specialties pus WHERE pus.user_id = ${alias}.provider_id))`;
+  }
+  return `EXISTS (SELECT 1 FROM user_specialties pus JOIN specialties ps ON ps.id = pus.specialty_id WHERE pus.user_id = ${alias}.provider_id AND ps.service_line = '${line}')`;
 }
 
 /**
@@ -86,14 +154,16 @@ export function patientScopeWhere(scope, providerId, alias = 'p') {
   if (isFacilityWide(scope)) {
     const params = {};
     const ph = scope.facilityIds.map((id, i) => { params[`sf${i}`] = id; return `:sf${i}`; }).join(',');
-    // Bound to the viewer's SERVICE LINE: a facility-wide MD sees only patients whose
-    // OWNING provider is in the same service line (a Pain MD never sees SNF-owned patients
-    // and vice-versa). A patient owned by a provider with no/other specialty counts as SNF,
-    // consistent with serviceForSpecialty(''). PK-indexed EXISTS — negligible per-row cost.
-    // Bound by the OWNING provider's STORED service line (authoritative, admin-set) —
-    // deterministic, no name-string matching in the security path.
-    const painOwned = `EXISTS (SELECT 1 FROM users pu JOIN specialties ps ON ps.id = pu.specialty_id WHERE pu.id = ${alias}.provider_id AND ps.service_line = 'pain')`;
-    const sl = scope.serviceLine === 'pain' ? painOwned : `NOT ${painOwned}`;
+    // Bound to the viewer's SERVICE-LINE SET by the OWNING provider's specialties
+    // (many-to-many, join-aware): a facility-wide MD sees a patient iff the owning provider
+    // practises at least one service line the viewer holds. A Pain-only MD never sees a
+    // purely-SNF-owned patient (and vice-versa); a multi-specialty SNF+Pain MD sees both.
+    // An owner with NO specialties counts as SNF (consistent with the default). Deterministic,
+    // admin-set service_line only — no name-string matching in the security path.
+    const lines = [...new Set(scope.serviceLines || [])].filter((l) => SERVICE_LINES.includes(l));
+    // Empty set (no specialty granted): deny — no fallback. Otherwise the viewer sees a patient
+    // iff the OWNING provider practises at least one of the viewer's granted lines (OR over lines).
+    const sl = lines.length ? `(${lines.map((l) => ownerHasLinePredicate(l, alias)).join(' OR ')})` : '1=0';
     return { sql: `${alias}.facility_id IN (${ph}) AND ${sl}`, params };
   }
   return { sql: `${alias}.provider_id = :scopePid`, params: { scopePid: providerId } };

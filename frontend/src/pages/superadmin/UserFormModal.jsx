@@ -16,6 +16,8 @@ const SCOPES = [
 ];
 // Common provider credentials; admins can also add custom tags.
 const CREDENTIALS = ['MD', 'DO', 'NP', 'APRN', 'ASNP', 'PA', 'PA-C', 'RN', 'DNP', 'DPM', 'PsyD', 'PhD', 'LCSW'];
+// Short service-line badge shown on each specialty chip.
+const LINE_TAG = { snf: 'SNF', pain: 'Pain', tcm: 'TCM' };
 
 function genPassword() {
   const sets = ['abcdefghijkmnpqrstuvwxyz', 'ABCDEFGHJKLMNPQRSTUVWXYZ', '23456789', '!@#$%^&*?-_'];
@@ -89,7 +91,14 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
   // Specialty (providers only)
   const isProvider = (isEdit ? role : lockedRole || role) === 'provider';
   const [specialties, setSpecialties] = useState([]);
-  const [specialtyUuid, setSpecialtyUuid] = useState(user?.specialty?.uuid || null);
+  // MANY-TO-MANY: a provider may hold multiple specialties (e.g. SNFs + Pain). Access
+  // becomes the union of their service lines. Initialise from the full list, falling back
+  // to the legacy single specialty for older records.
+  const [specialtyUuids, setSpecialtyUuids] = useState(
+    user?.specialties?.length ? user.specialties.map((s) => s.uuid)
+      : user?.specialty?.uuid ? [user.specialty.uuid] : [],
+  );
+  const toggleSpecialty = (uuid) => setSpecialtyUuids((prev) => (prev.includes(uuid) ? prev.filter((x) => x !== uuid) : [...prev, uuid]));
   const [newSpec, setNewSpec] = useState('');
   const [newSpecLine, setNewSpecLine] = useState('snf'); // service line for a newly added specialty
   const [addingSpec, setAddingSpec] = useState(false);
@@ -114,7 +123,7 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
     try {
       const { data } = await specialtiesApi.create(name, newSpecLine);
       setSpecialties((s) => [...s, data.specialty].sort((a, b) => a.name.localeCompare(b.name)));
-      setSpecialtyUuid(data.specialty.uuid);
+      setSpecialtyUuids((prev) => (prev.includes(data.specialty.uuid) ? prev : [...prev, data.specialty.uuid]));
       setNewSpec('');
       setNewSpecLine('snf');
     } catch (e) {
@@ -194,7 +203,7 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
           fullName: fullName.trim(),
           accessLevel,
           credentials: isProvider ? credentials : [],
-          specialtyUuid: isProvider ? specialtyUuid || null : null,
+          specialtyUuids: isProvider ? specialtyUuids : [],
           npi: isProvider ? npi.trim() : '',
           taxonomy: isProvider ? taxonomy.trim() : '',
           taxonomyCode: isProvider ? taxonomyCode.trim() : '',
@@ -209,7 +218,7 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
           role: lockedRole || role,
           accessLevel,
           credentials: isProvider ? credentials : undefined,
-          specialtyUuid: isProvider ? specialtyUuid || null : undefined,
+          specialtyUuids: isProvider ? specialtyUuids : undefined,
           npi: isProvider ? npi.trim() : undefined,
           taxonomy: isProvider ? taxonomy.trim() : undefined,
           taxonomyCode: isProvider ? taxonomyCode.trim() : undefined,
@@ -352,18 +361,18 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
 
         {isProvider && (
           <div className="field">
-            <label>Specialty</label>
+            <label>Specialties <span className="muted">(select one or more)</span></label>
             <div className="spec-chips">
               {specialties.map((s) => (
                 <button
                   key={s.uuid}
                   type="button"
-                  className={`spec-chip ${specialtyUuid === s.uuid ? 'active' : ''}`}
-                  onClick={() => setSpecialtyUuid(specialtyUuid === s.uuid ? null : s.uuid)}
+                  className={`spec-chip ${specialtyUuids.includes(s.uuid) ? 'active' : ''}`}
+                  onClick={() => toggleSpecialty(s.uuid)}
                 >
                   {s.name}
-                  <span className={`line-tag ${s.serviceLine === 'pain' ? 'pain' : 'snf'}`}>
-                    {s.serviceLine === 'pain' ? 'Pain' : 'SNF'}
+                  <span className={`line-tag ${LINE_TAG[s.serviceLine] ? s.serviceLine : 'snf'}`}>
+                    {(LINE_TAG[s.serviceLine] || LINE_TAG.snf)}
                   </span>
                 </button>
               ))}
@@ -379,19 +388,20 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
                   const v = e.target.value;
                   setNewSpec(v);
                   // Auto-derive the default service line from the name (admin can override below).
-                  setNewSpecLine(/\bpain\b/i.test(v) ? 'pain' : 'snf');
+                  setNewSpecLine(/\bpain\b/i.test(v) ? 'pain' : (/\btcm\b|transitional care/i.test(v) ? 'tcm' : 'snf'));
                 }}
                 onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addSpecialty(); } }}
               />
               <div className="line-toggle" role="group" aria-label="Service line">
                 <button type="button" className={newSpecLine === 'snf' ? 'active' : ''} onClick={() => setNewSpecLine('snf')}>SNF</button>
                 <button type="button" className={newSpecLine === 'pain' ? 'active' : ''} onClick={() => setNewSpecLine('pain')}>Pain</button>
+                <button type="button" className={newSpecLine === 'tcm' ? 'active' : ''} onClick={() => setNewSpecLine('tcm')}>TCM</button>
               </div>
               <button type="button" className="btn ghost sm" onClick={addSpecialty} disabled={addingSpec || newSpec.trim().length < 2}>
                 {addingSpec ? <span className="spinner dark" /> : '+ Add'}
               </button>
             </div>
-            <span className="hint">Service line governs clinical data isolation — SNF and Pain providers never see each other's records.</span>
+            <span className="hint">Selecting multiple specialties grants access to all their note templates — a provider set to SNFs + Pain sees both. Service line governs clinical data isolation, so a provider only ever sees records for the lines they are granted.</span>
           </div>
         )}
 

@@ -43,6 +43,15 @@ export const NOTE_TYPES = {
   pain_botox: { label: 'Botulinum Toxin Injection', category: 'Pain Management — Interventional', cpt: '64615 · 64642–64647', service: 'pain' },
   pain_uds: { label: 'Urine Drug Screen / Toxicology Review', category: 'Pain Management — Monitoring', cpt: '80305–80307 (review)', service: 'pain' },
   pain_discharge: { label: 'Pain Management Discharge / Transition', category: 'Pain Management — Transition', cpt: 'Transition of care', service: 'pain' },
+  // ---- Transitional Care Management (TCM) — CMS 99495 / 99496 ----
+  tcm_face_to_face: { label: 'TCM Face-to-Face Visit', category: 'Transitional Care Management — face-to-face E/M (≤7d high · ≤14d moderate)', cpt: '99495 · 99496', service: 'tcm' },
+  tcm_initial_contact: { label: 'Initial Interactive Contact (≤ 2 business days)', category: 'TCM required element', cpt: 'Supports 99495 / 99496', service: 'tcm' },
+  tcm_discharge_review: { label: 'Discharge Information Review', category: 'TCM required element', cpt: 'Supports 99495 / 99496', service: 'tcm' },
+  tcm_med_reconciliation: { label: 'Medication Reconciliation (by F2F date)', category: 'TCM required element', cpt: 'Supports 99495 / 99496', service: 'tcm' },
+  tcm_care_plan: { label: 'Transitional Care Plan', category: 'Transitional Care Management', cpt: 'Supports 99495 / 99496', service: 'tcm' },
+  tcm_non_face_to_face: { label: 'Non-Face-to-Face Care Management', category: 'TCM clinical-staff services (30-day period)', cpt: 'Supports 99495 / 99496', service: 'tcm' },
+  tcm_follow_up: { label: 'Interim Follow-Up / Care Coordination', category: 'Transitional Care Management', cpt: 'Supports 99495 / 99496', service: 'tcm' },
+  tcm_closeout: { label: '30-Day Service Period Close-Out', category: 'Transitional Care Management', cpt: '99495 · 99496 (DOS = F2F)', service: 'tcm' },
 };
 
 // Per-service menus — the "Common" primary choices and the rest under "More". The
@@ -56,19 +65,27 @@ export const SERVICE_MENUS = {
     common: ['pain_consult', 'pain_followup', 'pain_med_mgmt', 'pain_esi', 'pain_facet_mbb', 'pain_rfa'],
     more: ['pain_si_joint', 'pain_tpi', 'pain_nerve_block', 'pain_scs', 'pain_pump', 'pain_kypho', 'pain_joint', 'pain_botox', 'pain_uds', 'pain_discharge'],
   },
+  tcm: {
+    common: ['tcm_face_to_face', 'tcm_initial_contact', 'tcm_discharge_review', 'tcm_med_reconciliation', 'tcm_care_plan'],
+    more: ['tcm_non_face_to_face', 'tcm_follow_up', 'tcm_closeout'],
+  },
 };
 
 // Deterministic service line for a provider's specialty NAME. A specialty containing
-// "pain" → Pain Management; everything else → SNF (the default). Mirrors the server.
+// "pain" → Pain Management; "tcm"/"transitional care" → TCM; everything else → SNF (the
+// default). Mirrors the server (accessScope decisions use the STORED service_line, not this).
 export function serviceForSpecialty(specialtyName) {
-  return /\bpain\b/i.test(String(specialtyName || '')) ? 'pain' : 'snf';
+  const n = String(specialtyName || '');
+  if (/\bpain\b/i.test(n)) return 'pain';
+  if (/\btcm\b|transitional care/i.test(n)) return 'tcm';
+  return 'snf';
 }
 
 // Back-compat: the default (SNF) menus, still imported by name elsewhere.
 export const NOTE_MENU = SERVICE_MENUS.snf.common;
 export const NOTE_MENU_MORE = SERVICE_MENUS.snf.more;
 
-// Reason-for-encounter options for a Progress Note (structured coding data).
+// Reason-for-encounter options for a Progress Note (structured documentation data).
 export const PROGRESS_REASONS = [
   'Routine follow-up', 'Change in condition', 'Medication management', 'Lab / imaging review',
   'Diabetes management', 'Hypertension', 'CHF', 'COPD', 'Pain management', 'Fall follow-up',
@@ -149,6 +166,15 @@ export const SECTION_LABELS = {
   opioidRisk: 'Opioid Risk Assessment',
   udsResult: 'Urine Drug Screen / Toxicology',
   injectate: 'Medications Administered (Injectate)',
+  // Transitional Care Management (TCM 99495 / 99496)
+  dischargeInfo: 'Discharge Information Reviewed',
+  interactiveContact: 'Interactive Contact (≤ 2 Business Days Post-Discharge)',
+  pendingFollowUp: 'Pending Tests, Referrals & Treatments',
+  communityServices: 'Community & Social Services Coordination',
+  caregiverEducation: 'Patient / Family / Caregiver Education',
+  tcmComplexity: 'Medical Decision Making & TCM Complexity (99495 / 99496)',
+  transitionGoals: 'Transition Goals & Self-Management Plan',
+  tcmAttestation: 'TCM Service Period, Timeline & Billing Attestation',
 };
 
 export const SECTION_PROMPTS = {
@@ -225,12 +251,22 @@ export const SECTION_PROMPTS = {
   opioidRisk: 'Risk stratification (ORT / DIRE / SOAPP-R score), history of substance use, aberrant drug-related behaviors, and controlled-substance agreement status…',
   udsResult: 'Urine drug screen date & result — expected vs unexpected findings, presence/absence of prescribed and non-prescribed substances, and the clinical action taken…',
   injectate: 'Medications injected per level — corticosteroid (agent & mg), local anesthetic (agent, %, mL), contrast, and any adjuncts; total volumes…',
+  // Transitional Care Management (TCM 99495 / 99496)
+  dischargeInfo: 'Discharging facility and setting (inpatient / observation / SNF / partial hospitalization), admit & discharge dates, discharge diagnoses (ICD-10), procedures, and the discharge summary/instructions reviewed — establishes the 30-day TCM period start (day after discharge)…',
+  interactiveContact: 'Interactive contact with the patient/caregiver made WITHIN 2 BUSINESS DAYS of discharge — date/time, method (telephone, secure message, or face-to-face), who was reached, issues identified, and needs addressed. Document the ≥2 attempts if the first contacts were unsuccessful…',
+  pendingFollowUp: 'Pending diagnostic tests/results, treatments, and specialist referrals from the hospitalization — what is outstanding, who is responsible, and the follow-up arranged (appointments scheduled, results tracked)…',
+  communityServices: 'Coordination with community and social services — home health, DME, PT/OT, hospice/palliative, transportation, meals, caregiver supports; agencies engaged and referrals established or re-established…',
+  caregiverEducation: 'Education provided to the patient, family, and/or caregiver — diagnosis and warning signs, medication use and self-management, activity and diet, and how/when to seek care; support for self-management and independent living and activities of daily living…',
+  tcmComplexity: 'Complexity of medical decision making during the service period — problems addressed, data reviewed, and risk — which selects the code: MODERATE MDM → 99495; HIGH MDM → 99496. Note that the F2F visit must occur ≤14 days (99495) or ≤7 days (99496) of discharge…',
+  transitionGoals: 'Individualized transitional care goals — stabilization of active problems, prevention of readmission, restoration/maintenance of function, and the patient/caregiver self-management plan with measurable targets…',
+  tcmAttestation: 'TCM timeline & billing: discharge date; date of interactive contact (≤2 business days); date of the face-to-face visit (≤7 or ≤14 days); date medication reconciliation completed (no later than the F2F date). TCM is reported ONCE per 30-day period with the date of service = the F2F visit; not billable if the patient is readmitted during the period (report a separate E/M instead). Attest personal performance…',
 };
 
 // Sections that benefit from a larger text area.
 const BIG = new Set(['hpi', 'interval', 'ros', 'exam', 'assessment', 'plan', 'hospitalCourse', 'mdm', 'wound', 'results', 'medications', 'dischargeMeds', 'goals', 'carePlanReview',
   'procTechnique', 'procFindings', 'mentalStatus', 'riskAssessment', 'cognitiveAssessment', 'neuroPsych', 'dementiaPlan', 'caregiver',
-  'painHistory', 'priorTreatments', 'opioidRisk', 'injectate']);
+  'painHistory', 'priorTreatments', 'opioidRisk', 'injectate',
+  'dischargeInfo', 'interactiveContact', 'pendingFollowUp', 'communityServices', 'caregiverEducation', 'transitionGoals', 'tcmComplexity', 'tcmAttestation']);
 
 // Build a template. `over` provides note-type-specific section labels/prompts so
 // each template reads correctly for its clinical purpose (e.g. "Reason for
@@ -744,6 +780,116 @@ export const TEMPLATES = {
       assessmentLabel: 'Final Pain Assessment',
       planLabel: 'Discharge Plan & Instructions',
       followUpLabel: 'Follow-Up & Care Coordination',
+    },
+  ),
+
+  /* ============ Transitional Care Management (TCM 99495 / 99496) ============ */
+  // TCM is a 30-day bundle billed ONCE, with the date of service = the face-to-face visit.
+  // The billed F2F note plus the required-element notes (interactive contact ≤2 business
+  // days, discharge review, medication reconciliation by the F2F date, the care plan, and
+  // the non-F2F clinical-staff work) together evidence the CMS requirements.
+
+  // The BILLED service — the post-discharge face-to-face E/M visit (≤7 days → 99496 high
+  // MDM; ≤14 days → 99495 moderate MDM). Med reconciliation must be done by this date.
+  tcm_face_to_face: T(
+    ['vitals', 'chiefComplaint', 'dischargeInfo', 'interval', 'exam', 'medications', 'pendingFollowUp', 'assessment', 'tcmComplexity', 'plan', 'caregiverEducation', 'tcmAttestation'],
+    {
+      chiefComplaintLabel: 'Reason for Post-Discharge Visit',
+      chiefComplaintPrompt: 'Transitional care management face-to-face visit following discharge to the community — the transition being managed and the goal of preventing readmission…',
+      intervalLabel: 'Status Since Discharge',
+      intervalPrompt: 'Course since discharge — symptom trajectory, adherence, new/worsening problems, adequacy of home supports, and any barriers to a safe transition…',
+      examLabel: 'Focused Examination',
+      examPrompt: 'Problem-directed exam addressing the discharge diagnoses and current status (cardiopulmonary, the affected system, wounds/lines, mental status) sufficient to support the E/M level…',
+      medicationsLabel: 'Medication Reconciliation (completed by the F2F date — required)',
+      medicationsPrompt: 'Full reconciliation against the discharge list — each drug CONTINUED / CHANGED / STOPPED / NEW, discrepancies resolved (esp. anticoagulants, insulin, antibiotics, opioids), and adherence/affordability barriers…',
+      assessmentPrompt: 'Numbered problem list — the discharge diagnoses and active problems with clinical status and ICD-10, linked to the transitional plan…',
+      planPrompt: 'Transitional plan per problem — treatment, monitoring, referrals established/re-established, appointments arranged, and readmission risk-reduction…',
+    },
+  ),
+  // Required element: interactive (two-way) contact within 2 business days of discharge.
+  tcm_initial_contact: T(
+    ['chiefComplaint', 'interactiveContact', 'dischargeInfo', 'medChanges', 'pendingFollowUp', 'plan', 'tcmAttestation'],
+    {
+      chiefComplaintLabel: 'Purpose of Contact',
+      chiefComplaintPrompt: 'Initial post-discharge interactive contact to begin transitional care management and identify immediate needs…',
+      medChangesLabel: 'Immediate Medication Issues Identified',
+      medChangesPrompt: 'Medication access, understanding, or adherence problems surfaced during the contact and the interim action taken (full reconciliation is completed by the F2F visit date)…',
+      planLabel: 'Interim Plan & Next Steps',
+      planPrompt: 'Issues addressed on the call, self-care/warning-sign guidance given, the face-to-face visit scheduled (with its ≤7 or ≤14-day target), and escalation if red flags…',
+    },
+  ),
+  // Required element: review of the discharge information (summary, diagnoses, procedures).
+  tcm_discharge_review: T(
+    ['chiefComplaint', 'dischargeInfo', 'medications', 'pendingFollowUp', 'assessment', 'plan'],
+    {
+      chiefComplaintLabel: 'Purpose of Review',
+      chiefComplaintPrompt: 'Review of the discharge information to establish the transitional plan and identify follow-up needs…',
+      medicationsLabel: 'Discharge Medication List (as documented)',
+      medicationsPrompt: 'Medications as listed on the discharge summary — to be reconciled against the patient’s actual regimen by the F2F visit date…',
+      assessmentPrompt: 'Problems carried from the hospitalization with ICD-10 and the transitional risks identified (high-risk diagnoses, polypharmacy, prior readmissions)…',
+      planPrompt: 'Items requiring follow-up, referrals to establish/re-establish, and the transitional plan derived from the discharge information…',
+    },
+  ),
+  // Required element: medication reconciliation, completed no later than the F2F visit date.
+  tcm_med_reconciliation: T(
+    ['chiefComplaint', 'medications', 'medChanges', 'adverseEffects', 'allergies', 'assessment', 'plan', 'tcmAttestation'],
+    {
+      chiefComplaintLabel: 'Reason for Reconciliation',
+      chiefComplaintPrompt: 'Post-discharge medication reconciliation — CMS requires it be furnished no later than the date of the face-to-face visit…',
+      medicationsLabel: 'Reconciled Medication List (Discharge vs Current)',
+      medicationsPrompt: 'Compare the discharge medication list against the patient’s actual regimen — drug, dose, route, frequency, and indication; flag high-risk drugs (anticoagulants, insulin, opioids, antibiotics)…',
+      medChangesPrompt: 'Each discrepancy resolved — medications CONTINUED, CHANGED, STOPPED, or NEW, with the clinical rationale; duplications and omissions corrected…',
+      adverseEffectsPrompt: 'Tolerability, adverse effects, and the monitoring ordered (e.g. INR, glucose, renal function)…',
+      assessmentPrompt: 'Assessment of regimen appropriateness and adherence/affordability barriers (ICD-10 for the conditions treated)…',
+      planPrompt: 'Reconciled orders, patient/caregiver medication education, monitoring parameters, and the pharmacy/prescription actions completed…',
+    },
+  ),
+  // The transitional care plan — coordination, community services, and self-management.
+  tcm_care_plan: T(
+    ['chiefComplaint', 'transitionGoals', 'pendingFollowUp', 'communityServices', 'caregiverEducation', 'plan', 'followUp'],
+    {
+      chiefComplaintLabel: 'Purpose of the Transitional Care Plan',
+      chiefComplaintPrompt: 'Establishment of the individualized transitional care plan for the 30-day post-discharge period…',
+      planLabel: 'Interventions & Coordination',
+      planPrompt: 'Interventions per problem, referrals established/re-established, appointments arranged, and communication with the receiving providers and the interdisciplinary team…',
+      followUpLabel: 'Follow-Up Schedule & Readmission Prevention',
+      followUpPrompt: 'Scheduled follow-up visits and pending-result tracking; specific readmission risk-reduction steps and the escalation pathway…',
+    },
+  ),
+  // Non-face-to-face services furnished by clinical staff / the provider during the period.
+  tcm_non_face_to_face: T(
+    ['chiefComplaint', 'pendingFollowUp', 'communityServices', 'caregiverEducation', 'careCoordination', 'tcmAttestation'],
+    {
+      chiefComplaintLabel: 'Non-Face-to-Face Services Provided',
+      chiefComplaintPrompt: 'Non-face-to-face transitional care services furnished during the 30-day period (by the physician/NPP and/or clinical staff under general supervision)…',
+      careCoordinationPrompt: 'Coordination with home health, outpatient providers, pharmacy, and the interdisciplinary team; communication with the patient/caregiver; and interactions with community services and agencies…',
+    },
+  ),
+  // Interim follow-up / care coordination touchpoint within the service period.
+  tcm_follow_up: T(
+    ['chiefComplaint', 'interval', 'pendingFollowUp', 'careCoordination', 'plan'],
+    {
+      chiefComplaintLabel: 'Reason for Interim Follow-Up',
+      chiefComplaintPrompt: 'Interim transitional-care follow-up/coordination contact during the 30-day period…',
+      intervalLabel: 'Status Since Last Contact',
+      intervalPrompt: 'Progress since the last contact — symptom and adherence status, results returned, appointments kept, and any new barriers…',
+      planLabel: 'Interim Plan & Escalation',
+      planPrompt: 'Adjustments made, outstanding items still tracked, and escalation if warning signs — reinforcing the readmission-prevention plan…',
+    },
+  ),
+  // Close-out of the 30-day TCM period — supports the single billed F2F date of service.
+  tcm_closeout: T(
+    ['chiefComplaint', 'interval', 'medications', 'assessment', 'tcmComplexity', 'followUp', 'tcmAttestation'],
+    {
+      chiefComplaintLabel: 'Purpose of Close-Out',
+      chiefComplaintPrompt: 'Summary close-out of the 30-day transitional care management period and confirmation the CMS-required elements were met…',
+      intervalLabel: 'Summary of the 30-Day Transitional Period',
+      intervalPrompt: 'Overall course across the period — problems stabilized, appointments completed, pending items resolved, and whether readmission occurred (if readmitted, TCM is not billable — report a separate E/M)…',
+      medicationsLabel: 'Final Reconciled Medication List',
+      medicationsPrompt: 'Final reconciled medications at the end of the period, with any outstanding adherence/monitoring needs handed off…',
+      assessmentPrompt: 'Final status of each active problem with ICD-10 and the transition outcome (stable in the community / escalated / readmitted)…',
+      followUpLabel: 'Ongoing Care Handoff',
+      followUpPrompt: 'Handoff to ongoing longitudinal care — next appointments, chronic-care management enrollment if applicable, and the responsible provider…',
     },
   ),
 };

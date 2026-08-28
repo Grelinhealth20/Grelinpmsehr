@@ -53,9 +53,23 @@ _doctr = None
 _doctr_disabled = False  # set if the torch backend can't load (e.g. Windows w/o VC++ runtime)
 
 
+def _preload_torch():
+    """Import torch (docTR's backend) BEFORE PaddlePaddle so torch's native DLLs win the
+    Windows loader search order. Paddle and torch ship conflicting copies of a shared runtime
+    (libuv/OpenMP); if Paddle loads first, torch's shm.dll can't resolve its dependency and
+    fails with WinError 127 ("specified procedure could not be found"), silently disabling
+    docTR. Importing torch first registers its lib directory so both coexist. No-op / harmless
+    if torch isn't installed. Cheap and idempotent (Python caches the import)."""
+    try:
+        import torch  # noqa: F401
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _get_ppstructure():
     global _pp
     if _pp is None:
+        _preload_torch()
         from paddleocr import PPStructure
         # layout + table recovery + OCR; English models (local dir if provided).
         _pp = PPStructure(**_pp_kwargs())
@@ -67,6 +81,7 @@ def _get_ppocr():
     text is never lost when PP-Structure classifies the whole page as a table."""
     global _ppocr
     if _ppocr is None:
+        _preload_torch()
         from paddleocr import PaddleOCR
         kw = dict(use_angle_cls=True, lang="en", show_log=False,
                   enable_mkldnn=True, cpu_threads=_CPU_THREADS)
@@ -102,11 +117,17 @@ def _get_doctr():
 
 
 def warmup():
-    """Force-load models at boot so the first request isn't slow (docTR optional)."""
+    """Force-load models at boot so the first request isn't slow (docTR optional).
+
+    ORDER MATTERS on Windows: load docTR's torch backend FIRST, before the PaddlePaddle
+    engines. Paddle and torch ship conflicting copies of a shared native runtime; if Paddle
+    loads first, torch's shm.dll fails to resolve its dependency (WinError 127) and docTR
+    silently disables. Loading torch first lets both coexist for the process lifetime. The
+    Paddle getters also call _preload_torch() so this ordering holds even off the warmup path."""
+    _get_doctr()
     _get_ppocr()
     if _USE_STRUCTURE:
         _get_ppstructure()
-    _get_doctr()
 
 
 # --- Input decoding ---------------------------------------------------------

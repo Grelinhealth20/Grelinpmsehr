@@ -76,6 +76,26 @@ export async function runMigrations() {
     'patient_uuid',
     '`patient_uuid` CHAR(36) NULL AFTER `patient_name_enc`',
   );
+  // Backfill the provider↔specialty join table from the legacy single specialty_id so
+  // existing single-specialty providers keep their exact access. Idempotent (INSERT IGNORE).
+  try {
+    await pool.query(
+      `INSERT IGNORE INTO user_specialties (user_id, specialty_id)
+         SELECT id, specialty_id FROM users WHERE specialty_id IS NOT NULL`,
+    );
+  } catch (err) {
+    logger.warn({ err: err.message }, 'user_specialties backfill skipped');
+  }
+  // TCM as a first-class service line: widen the service_line ENUMs (must run BEFORE the
+  // note-template seed inserts tcm rows) and reclassify the existing 'TCM' specialty, which
+  // was previously mapped to 'snf'. Idempotent — MODIFY re-applies the same definition.
+  try {
+    await pool.query("ALTER TABLE specialties MODIFY service_line ENUM('snf','pain','tcm') NOT NULL DEFAULT 'snf'");
+    await pool.query("ALTER TABLE note_templates MODIFY service_line ENUM('snf','pain','tcm') NOT NULL");
+    await pool.query("UPDATE specialties SET service_line = 'tcm' WHERE (LOWER(name) = 'tcm' OR LOWER(name) LIKE '%transitional care%') AND service_line <> 'tcm'");
+  } catch (err) {
+    logger.warn({ err: err.message }, 'TCM service-line migration skipped');
+  }
   // Provider credential tags (MD, DO, NP, APRN, ASNP, PA, …) — staff metadata, not PHI.
   await ensureColumn('users', 'credentials', '`credentials` JSON NULL AFTER `specialty_id`');
   // Individual-provider NPPES identity (NPI-1): the provider's own NPI and primary
@@ -202,6 +222,25 @@ export async function runMigrations() {
       logger.info({ painRows: r.affectedRows }, 'Backfilled specialties.service_line');
     }
   }
+
+  // Backfill patient name-search tokens for any patient not yet indexed (one-time; also
+  // covers patients created before flexible prefix search existed). Batched to scale.
+  try {
+    const { syncPatientNameTokensFromEnc } = await import('../services/patientService.js');
+    let backfilled = 0;
+    for (;;) {
+      const [batch] = await pool.query(
+        `SELECT p.id, p.demographics_enc FROM patients p
+          WHERE NOT EXISTS (SELECT 1 FROM patient_name_tokens t WHERE t.patient_id = p.id)
+          LIMIT 500`,
+      );
+      if (!batch.length) break;
+      for (const row of batch) await syncPatientNameTokensFromEnc(row.id, row.demographics_enc);
+      backfilled += batch.length;
+      if (batch.length < 500) break;
+    }
+    if (backfilled) logger.info({ patients: backfilled }, 'Backfilled patient name-search tokens');
+  } catch (err) { logger.warn({ err: err.message }, 'Patient name-token backfill skipped'); }
 
   // Seed/refresh the note-template registry (SNF + Pain service lines).
   try { const n = await seedNoteTemplates(); logger.info({ templates: n }, 'Note-template registry seeded'); }
