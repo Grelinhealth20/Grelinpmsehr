@@ -1,5 +1,8 @@
 import { v4 as uuidv4 } from 'uuid';
-import { execute } from '../db/pool.js';
+import { execute, pool } from '../db/pool.js';
+import { scrubClaim } from './codingService.js';
+import { predictEncounterCoding } from './codePredictionService.js';
+import { calcRaf, deriveSegment } from './hccRafService.js';
 import { encrypt, decrypt } from '../utils/crypto.js';
 import { getOwnedEncounterId, getAccessibleEncounterId } from './encounterService.js';
 import { viewerScope, isFacilityWide, noteServiceLineWhere } from './accessScope.js';
@@ -33,6 +36,16 @@ function credsOf(raw) {
 }
 export function canSign(credentials) {
   return credsOf(credentials).map((c) => String(c).toUpperCase().trim()).some((c) => SIGNER_CREDENTIALS.includes(c));
+}
+/** Signer identity for the electronic signature: full name + credentials + NPI
+ *  (e.g. "Jane Doe, MD · NPI 1234567893"). NPI is appended only when it is a valid 10-digit number. */
+function signerDisplayName(fullNameEnc, credentials, npi) {
+  const name = fullNameEnc ? decrypt(fullNameEnc) : null;
+  if (!name) return null;
+  const creds = credsOf(credentials).map((c) => String(c).toUpperCase().trim()).filter(Boolean);
+  let out = creds.length ? `${name}, ${creds.join(', ')}` : name;
+  if (npi && /^\d{10}$/.test(String(npi).trim())) out += ` · NPI ${String(npi).trim()}`;
+  return out;
 }
 
 export async function listNotes(encounterUuid, providerId) {
@@ -87,6 +100,112 @@ export async function getNote(noteUuid, providerId) {
   };
 }
 
+// ---- Billable codes captured on a note (diagnoses + procedures) --------------------------------
+// Diagnoses are captured SNOMED-first and carry the mapped billable ICD-10-CM; procedures are CPT.
+// Stored structured in encounter_note_codes (queryable for claims), replaced wholesale on save.
+const mapDxRow = (r) => ({ icd: r.code, description: r.description, snomedCode: r.snomed_code, snomedTerm: r.snomed_term, primary: !!r.is_primary });
+const mapProcRow = (r) => ({ cpt: r.code, description: r.description, modifiers: r.modifiers, units: r.units });
+
+export async function getNoteCodes(noteUuid, providerId) {
+  const scope = await viewerScope(providerId);
+  const params = { u: noteUuid };
+  const access = noteAccess(scope, providerId, params);
+  const [rows] = await execute(
+    `SELECT n.id FROM encounter_notes n JOIN encounters e ON e.id = n.encounter_id
+       LEFT JOIN patients p ON p.id = e.patient_id WHERE n.uuid = :u AND ${access} LIMIT 1`, params);
+  if (!rows[0]) return null;
+  const [codes] = await execute(
+    `SELECT kind, code, description, snomed_code, snomed_term, modifiers, units, is_primary, seq
+       FROM encounter_note_codes WHERE note_id = :id ORDER BY kind, seq, id`, { id: rows[0].id });
+  return {
+    diagnoses: codes.filter((c) => c.kind === 'dx').map(mapDxRow),
+    procedures: codes.filter((c) => c.kind === 'proc').map(mapProcRow),
+  };
+}
+
+export async function saveNoteCodes(noteUuid, providerId, { diagnoses = [], procedures = [] } = {}) {
+  const r = await findDraft(noteUuid, providerId);
+  if (!r) return null;
+  if (r.status === 'signed') return { locked: true }; // signed notes are immutable
+  await execute('DELETE FROM encounter_note_codes WHERE note_id = :id', { id: r.id });
+  const rows = [];
+  (Array.isArray(diagnoses) ? diagnoses : []).forEach((d, i) => {
+    if (d && d.icd) rows.push([r.id, 'dx', 'ICD10CM', String(d.icd).slice(0, 20), (d.description || '').slice(0, 512) || null,
+      d.snomedCode ? String(d.snomedCode).slice(0, 20) : null, (d.snomedTerm || '').slice(0, 512) || null, null, null,
+      d.primary ? 1 : 0, i]);
+  });
+  (Array.isArray(procedures) ? procedures : []).forEach((p, i) => {
+    if (p && p.cpt) rows.push([r.id, 'proc', 'CPT', String(p.cpt).slice(0, 20), (p.description || '').slice(0, 512) || null,
+      null, null, (p.modifiers || '').slice(0, 20) || null, p.units != null ? Number(p.units) : null, 0, i]);
+  });
+  if (rows.length) {
+    await pool.query(
+      `INSERT INTO encounter_note_codes (note_id, kind, code_system, code, description, snomed_code, snomed_term, modifiers, units, is_primary, seq)
+       VALUES ?`, [rows]);
+  }
+  return { saved: rows.length };
+}
+
+// Server-authoritative patient context for RAF/edits: age at DOS, sex, insurance (dual), SNF facility.
+function ageAt(dob, asOf) {
+  if (!dob) return null;
+  const b = new Date(dob); const d = asOf ? new Date(asOf) : new Date();
+  if (Number.isNaN(b.getTime()) || Number.isNaN(d.getTime())) return null;
+  let a = d.getFullYear() - b.getFullYear();
+  if (d.getMonth() < b.getMonth() || (d.getMonth() === b.getMonth() && d.getDate() < b.getDate())) a -= 1;
+  return a >= 0 && a < 130 ? a : null;
+}
+async function noteRafPatient(noteUuid, providerId) {
+  const scope = await viewerScope(providerId);
+  const params = { u: noteUuid };
+  const access = noteAccess(scope, providerId, params);
+  const [rows] = await execute(
+    `SELECT p.demographics_enc, p.insurance_enc, p.facility_enc,
+        DATE_FORMAT(COALESCE(e.encounter_date, a.appt_date), '%Y-%m-%d') AS dos
+       FROM encounter_notes n JOIN encounters e ON e.id = n.encounter_id
+       LEFT JOIN appointments a ON a.id = e.appointment_id
+       LEFT JOIN patients p ON p.id = e.patient_id
+      WHERE n.uuid = :u AND ${access} LIMIT 1`, params);
+  const r = rows[0]; if (!r) return null;
+  const demo = safeParse(r.demographics_enc) || {};
+  const insRaw = r.insurance_enc ? safeParse(r.insurance_enc) : null;
+  const insurance = Array.isArray(insRaw) ? insRaw : insRaw ? [insRaw] : [];
+  const facility = r.facility_enc ? safeParse(r.facility_enc) : null;
+  return { age: ageAt(demo.dob, r.dos), sex: demo.gender || demo.sex || null, insurance, facility, dos: r.dos };
+}
+
+/** Scrub the note's captured codes — Medicare Part B, Central FL (First Coast). No PDPM (Part A). */
+export async function scrubNoteCodes(noteUuid, providerId, patientOverride) {
+  const codes = await getNoteCodes(noteUuid, providerId);
+  if (!codes) return null;
+  const lines = codes.procedures.map((p) => ({ cpt: p.cpt, units: p.units || 1, modifiers: p.modifiers }));
+  const diagnoses = codes.diagnoses.map((d) => d.icd).filter(Boolean);
+  // Prefer server-authoritative patient context (age at DOS, dual/institutional status) over the
+  // caller-supplied age/sex, so the RAF segment is derived from real data — not defaulted.
+  const pctx = (await noteRafPatient(noteUuid, providerId)) || {};
+  const age = pctx.age ?? patientOverride?.age;
+  const sex = pctx.sex ?? patientOverride?.sex;
+  const result = await scrubClaim({ lines, diagnoses, patient: { age, sex }, jurisdiction: 'FL' });
+  // CMS-HCC V28 risk score from the captured diagnoses, with the segment derived from patient data.
+  let raf = null;
+  if (diagnoses.length) {
+    const seg = deriveSegment({ age, insurance: pctx.insurance, facility: pctx.facility, dos: pctx.dos });
+    raf = await calcRaf(diagnoses, { age, sex, segment: seg.segment, segmentBasis: seg.basis });
+  }
+  return { ...result, raf, codeCounts: { diagnoses: codes.diagnoses.length, procedures: codes.procedures.length } };
+}
+
+/**
+ * DETERMINISTIC code prediction for the coding panel: read the note (scoped), then derive billable
+ * diagnoses and the visit charge from what was written. Suggestions only — the coder confirms and
+ * the live scrub re-validates before signing. Returns null if the note is out of the caller's scope.
+ */
+export async function predictCodes(noteUuid, providerId) {
+  const note = await getNote(noteUuid, providerId);
+  if (!note) return null;
+  return predictEncounterCoding(note.content || {}, { noteType: note.noteType });
+}
+
 export async function createNote({ encounterUuid, providerId, noteType, reason, content, createdBy }) {
   const encId = await getOwnedEncounterId(encounterUuid, providerId);
   if (!encId) return null;
@@ -134,7 +253,7 @@ export async function updateNote(noteUuid, providerId, { content, reason, noteTy
  * final edits, locks the note, and marks it billing-ready.
  */
 export async function signNote(noteUuid, providerId, { content, reason } = {}) {
-  const [urows] = await execute(`SELECT full_name_enc, credentials FROM users WHERE id = :id LIMIT 1`, { id: providerId });
+  const [urows] = await execute(`SELECT full_name_enc, credentials, npi FROM users WHERE id = :id LIMIT 1`, { id: providerId });
   const u = urows[0];
   if (!u || !canSign(u.credentials)) return { forbidden: true };
 
@@ -152,7 +271,7 @@ export async function signNote(noteUuid, providerId, { content, reason } = {}) {
   const r = srows[0];
   if (!r) return null;
   if (r.status === 'signed') return { locked: true };
-  const signerName = u.full_name_enc ? decrypt(u.full_name_enc) : null;
+  const signerName = signerDisplayName(u.full_name_enc, u.credentials, u.npi);
   const sets = ['status = \'signed\'', 'billing_ready = 1', 'signed_by = :pid', 'signed_by_name = :name', 'signed_at = NOW()'];
   const params = { id: r.id, pid: providerId, name: signerName };
   if (content !== undefined) { sets.push('content_enc = :content'); params.content = content ? encrypt(JSON.stringify(content)) : null; }
@@ -187,9 +306,17 @@ async function generateSignedDoc(noteId, note, signerName) {
   const patientName = `${demo.firstName || ''} ${demo.lastName || ''}`.trim() || 'Patient';
   let providerName = '';
   try { providerName = m.provider_name_enc ? decrypt(m.provider_name_enc) : ''; } catch { providerName = ''; }
+  // Captured billable codes (by note id — we are the signer, already authorized) for the record.
+  const [codeRows] = await execute(
+    `SELECT kind, code, description, snomed_code, snomed_term, modifiers, units, is_primary, seq
+       FROM encounter_note_codes WHERE note_id = :id ORDER BY kind, seq, id`, { id: noteId });
+  const codes = {
+    diagnoses: codeRows.filter((c) => c.kind === 'dx').map(mapDxRow),
+    procedures: codeRows.filter((c) => c.kind === 'proc').map(mapProcRow),
+  };
   await storeSignedNoteDoc({
     patientUuid: m.patient_uuid, patientName, encounterDate: m.dos || '',
-    note, signerName, signedAt: note.signedAt || new Date().toISOString().slice(0, 19).replace('T', ' '),
+    note, codes, signerName, signedAt: note.signedAt || new Date().toISOString().slice(0, 19).replace('T', ' '),
     patient: { mrn: m.mrn, dob: demo.dob, facilityName: fac.facilityName, encounterNo: m.encounter_no },
     // Patient's OWN provider + facility drive the S3 folder (not the signer's) — by
     // NAME with a unique id suffix so the folder path reads facility → provider → patient.
@@ -208,7 +335,7 @@ async function generateSignedDoc(noteId, note, signerName) {
  * its Word document is regenerated. Any provider without an MD credential is refused.
  */
 export async function amendSignedNote(noteUuid, providerId, { content, reason } = {}) {
-  const [urows] = await execute(`SELECT full_name_enc, credentials FROM users WHERE id = :id LIMIT 1`, { id: providerId });
+  const [urows] = await execute(`SELECT full_name_enc, credentials, npi FROM users WHERE id = :id LIMIT 1`, { id: providerId });
   const u = urows[0];
   if (!u || !canSign(u.credentials)) return { forbidden: true }; // MD only
   const scope = await viewerScope(providerId);
@@ -224,7 +351,7 @@ export async function amendSignedNote(noteUuid, providerId, { content, reason } 
   const r = srows[0];
   if (!r) return null;
   if (r.status !== 'signed') return { notSigned: true }; // only signed notes are "amended"
-  const signerName = u.full_name_enc ? decrypt(u.full_name_enc) : null;
+  const signerName = signerDisplayName(u.full_name_enc, u.credentials, u.npi);
   const sets = ['signed_by = :pid', 'signed_by_name = :name', 'signed_at = NOW()'];
   const params = { pid: providerId, name: signerName, id: r.id };
   // Never null the clinical content on a metadata-only amendment — that would

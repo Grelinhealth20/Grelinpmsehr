@@ -225,18 +225,8 @@ export const updateEncounterSchema = z
   .refine((v) => Object.keys(v).length > 0, { message: 'No fields to update.' });
 
 // CMS-compliant SNF MD note types.
-export const NOTE_TYPES = [
-  'hp_admission', 'progress', 'acute_visit', 'change_in_condition', 'follow_up',
-  'regulatory', 'post_hospital', 'medication', 'lab_imaging', 'wound_care',
-  'advance_care', 'discharge', 'death',
-  // Non-E/M Part B physician services
-  'procedure_note', 'behavioral_health', 'cognitive_care',
-  // Pain Management
-  'pain_consult', 'pain_followup', 'pain_med_mgmt', 'pain_esi', 'pain_facet_mbb',
-  'pain_rfa', 'pain_si_joint', 'pain_tpi', 'pain_nerve_block', 'pain_scs',
-  'pain_pump', 'pain_kypho', 'pain_joint', 'pain_botox',
-  'pain_uds', 'pain_discharge',
-];
+// SNF provider-focused, free-form note types: Admission H&P, SOAP, Progress, Discharge.
+export const NOTE_TYPES = ['hp', 'soap', 'progress', 'discharge'];
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be YYYY-MM-DD');
 // Structured note body (PHI, encrypted at rest): narrative sections + Rx list.
 const prescriptionItem = z

@@ -24,4 +24,12 @@ router.post(
   authController.changePassword,
 );
 
+// MFA (in-house TOTP). Authenticated (a session exists post-password) but NOT password-settled/
+// MFA-settled gated — these ARE the endpoints that complete the MFA stage. Rate-limited to resist
+// code brute-forcing; each acts only on the authenticated user.
+router.post('/mfa/setup', authenticate, csrfProtection, authController.mfaSetup);
+router.post('/mfa/enroll', authenticate, csrfProtection, authLimiter, authController.mfaEnroll);
+router.post('/mfa/verify', authenticate, csrfProtection, authLimiter, authController.mfaVerify);
+router.post('/mfa/recovery', authenticate, csrfProtection, authLimiter, authController.mfaRecovery);
+
 export default router;

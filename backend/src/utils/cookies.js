@@ -19,11 +19,15 @@ const baseCookie = {
 
 export function setAuthCookies(res, { accessToken, refreshToken }) {
   res.cookie(COOKIE.ACCESS, accessToken, { ...baseCookie, maxAge: config.jwt.accessTtl * 1000 });
-  res.cookie(COOKIE.REFRESH, refreshToken, {
-    ...baseCookie,
-    maxAge: config.jwt.refreshTtl * 1000,
-    path: '/', // scoped by the gateway; kept simple and consistent here
-  });
+  // During an MFA-pending/setup stage no refresh token is issued (a half-authenticated session
+  // must NOT be persistable) — only set the refresh cookie when one is present.
+  if (refreshToken) {
+    res.cookie(COOKIE.REFRESH, refreshToken, {
+      ...baseCookie,
+      maxAge: config.jwt.refreshTtl * 1000,
+      path: '/', // scoped by the gateway; kept simple and consistent here
+    });
+  }
 }
 
 export function setCsrfCookie(res, token) {

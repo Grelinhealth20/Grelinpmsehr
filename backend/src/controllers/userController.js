@@ -10,6 +10,7 @@ import {
   setPassword,
 } from '../services/userService.js';
 import { hashPassword, validatePasswordPolicy } from '../utils/password.js';
+import * as mfaAdmin from '../services/mfaService.js';
 import { recordAudit } from '../services/auditService.js';
 import { findSpecialtyIdByUuid } from '../services/specialtyService.js';
 import { listUserFacilities, setUserFacilities } from '../services/facilityService.js';
@@ -224,6 +225,37 @@ export async function changeStatus(req, res, next) {
   } catch (err) {
     next(err);
   }
+}
+
+// SUPER-ADMIN: enable/disable the MFA requirement for a user (keeps any existing enrollment).
+export async function setMfaEnabled(req, res, next) {
+  try {
+    const row = await findRawByUuid(req.params.uuid);
+    if (!row) return res.status(404).json({ error: 'User not found.' });
+    assertCanManageTarget(req.user, row);
+    const enabled = !!req.body.enabled;
+    await mfaAdmin.adminSetEnabled(row.uuid, enabled);
+    await recordAudit({
+      actorUserId: req.authUserId, action: `user.mfa.${enabled ? 'enabled' : 'disabled'}`,
+      entityType: 'user', entityId: row.uuid, ip: req.ip, userAgent: req.get('user-agent'),
+    });
+    res.json({ user: toPublicUser(await findRawByUuid(row.uuid)) });
+  } catch (err) { next(err); }
+}
+
+// SUPER-ADMIN: reset a user's MFA enrollment (forces a fresh QR scan on next login).
+export async function resetMfa(req, res, next) {
+  try {
+    const row = await findRawByUuid(req.params.uuid);
+    if (!row) return res.status(404).json({ error: 'User not found.' });
+    assertCanManageTarget(req.user, row);
+    await mfaAdmin.adminResetMfa(row.uuid);
+    await recordAudit({
+      actorUserId: req.authUserId, action: 'user.mfa.reset',
+      entityType: 'user', entityId: row.uuid, ip: req.ip, userAgent: req.get('user-agent'),
+    });
+    res.json({ user: toPublicUser(await findRawByUuid(row.uuid)) });
+  } catch (err) { next(err); }
 }
 
 export async function adminResetPassword(req, res, next) {

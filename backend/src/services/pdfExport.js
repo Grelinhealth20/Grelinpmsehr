@@ -2,7 +2,7 @@ import { execute } from '../db/pool.js';
 import { decrypt } from '../utils/crypto.js';
 import { s3Enabled, getObjectBytes } from './s3Service.js';
 import { toPublicPatient } from './patientService.js';
-import { getNote, canSign } from './encounterNoteService.js';
+import { getNote, canSign, getNoteCodes } from './encounterNoteService.js';
 import { listChecks } from './eligibilityService.js';
 import { buildNotePdf, buildFaceSheetPdf, buildBenefitsPdf } from './pdfService.js';
 
@@ -88,7 +88,9 @@ export async function notePdf(noteUuid, providerId) {
     mrn: m.mrn, dob: demo.dob, encounterNo: m.encounter_no, encounterDate: m.dos,
   };
   const brand = m.patient_id ? await facilityBrand(m.patient_id) : { facility: {}, logoBuffer: null };
-  const buffer = await buildNotePdf({ ...brand, patient, note, signerName: note.signedByName, signedAt: note.signedAt });
+  // Billable codes captured on the note (diagnoses SNOMED→ICD-10, procedures CPT) — same access scope.
+  const codes = (await getNoteCodes(noteUuid, providerId)) || { diagnoses: [], procedures: [] };
+  const buffer = await buildNotePdf({ ...brand, patient, note, codes, signerName: note.signedByName, signedAt: note.signedAt });
   return { buffer, filename: `medical-record-${slug(patient.name)}-${(m.dos || '').replace(/-/g, '') || 'record'}.pdf` };
 }
 

@@ -85,10 +85,32 @@ export async function getPatientS3Ctx(uuid) {
   };
 }
 
-// Approved MRN format: 7-digit numeric (1000000–9999999), unique.
+// Luhn (mod-10) check digit for a numeric string — the same transcription-error-detecting
+// scheme CMS uses for the NPI. Catches every single-digit error and most adjacent
+// transpositions, so a mistyped MRN is far more likely to be rejected than to hit another
+// patient's chart.
+export function luhnCheckDigit(digits) {
+  let sum = 0; let dbl = true;
+  for (let i = digits.length - 1; i >= 0; i -= 1) {
+    let d = digits.charCodeAt(i) - 48;
+    if (dbl) { d *= 2; if (d > 9) d -= 9; }
+    sum += d; dbl = !dbl;
+  }
+  return String((10 - (sum % 10)) % 10);
+}
+export function isValidMrn(mrn) {
+  const s = String(mrn || '');
+  if (!/^\d{8}$/.test(s)) return false;
+  return luhnCheckDigit(s.slice(0, 7)) === s[7];
+}
+
+// MRN format: 8-digit numeric = 7 random base digits + 1 Luhn check digit. Unique and
+// never reused. (MRN is a LOCAL identifier — no CMS/SNOMED format governs it; the check
+// digit is the real medical-records-grade integrity control, mirroring the NPI scheme.)
 async function generateMrn() {
-  for (let i = 0; i < 10; i++) {
-    const mrn = String(crypto.randomInt(1_000_000, 9_999_999));
+  for (let i = 0; i < 40; i += 1) {
+    const base = String(crypto.randomInt(1_000_000, 9_999_999)); // 7 digits, no leading zero
+    const mrn = base + luhnCheckDigit(base);
     const [rows] = await execute(`SELECT id FROM patients WHERE mrn = :mrn LIMIT 1`, { mrn });
     if (rows.length === 0) return mrn;
   }

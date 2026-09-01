@@ -1,18 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import PatientModal from '../components/PatientModal.jsx';
-import { NewEncounterModal, EncounterNotesModal, usDate, encNo } from '../components/EncounterNotes.jsx';
 import { useToast } from '../components/Toast.jsx';
 import { encountersApi, toApiError } from '../lib/api.js';
-import { NOTE_TYPES } from '../lib/noteTemplates.js';
 
 const PATIENTS_PER_PAGE = 25;
-const ENC_PER_PAGE = 25;
-const procedureLabel = (r) => (r.noteTypes ? r.noteTypes.split(',').map((c) => NOTE_TYPES[c]?.label || c).join(', ') : '—');
 
 /**
  * Patients & Encounters — SERVER-PAGINATED for enterprise scale (50k+ patients,
  * 10k+ encounters/patient). Only one page of patients is loaded; each patient's
- * encounters are fetched on demand when expanded, and paginated independently.
+ * encounters live inside that patient's Face Sheet modal (Encounters tab), fetched
+ * on demand and paginated independently.
  */
 export default function Encounter() {
   const toast = useToast();
@@ -21,12 +18,8 @@ export default function Encounter() {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
-  const [expanded, setExpanded] = useState(() => new Set());
-  const [refreshKey, setRefreshKey] = useState(0);
-  const [viewPatient, setViewPatient] = useState(null);
+  const [viewPatient, setViewPatient] = useState(null); // { uuid, tab } → open the Face Sheet modal (optionally on a tab)
   const [newPatient, setNewPatient] = useState(false);
-  const [newEncounter, setNewEncounter] = useState(false);
-  const [notesEnc, setNotesEnc] = useState(null);
   const firstLoad = useRef(true);
 
   async function load(p, q) {
@@ -49,8 +42,7 @@ export default function Encounter() {
 
   const totalPages = Math.max(1, Math.ceil(total / PATIENTS_PER_PAGE));
   const goPage = (pp) => { setPage(pp); load(pp, search.trim()); };
-  const toggle = (uuid) => setExpanded((s) => { const n = new Set(s); n.has(uuid) ? n.delete(uuid) : n.add(uuid); return n; });
-  const reloadAll = () => { load(page, search.trim()); setRefreshKey((k) => k + 1); };
+  const reloadAll = () => { load(page, search.trim()); };
 
   return (
     <div className="enc">
@@ -62,7 +54,6 @@ export default function Encounter() {
         <span className="spacer" />
         <input className="input search" placeholder="Search patient name or MRN…" value={search} onChange={(e) => setSearch(e.target.value)} />
         <button className="btn ghost sm" onClick={() => setNewPatient(true)}>+ New Patient</button>
-        <button className="btn sm" onClick={() => setNewEncounter(true)}>+ New Encounter</button>
       </div>
 
       <div className="enc-table-wrap">
@@ -88,11 +79,8 @@ export default function Encounter() {
                 <PatientRow
                   key={p.patientUuid}
                   p={p}
-                  open={expanded.has(p.patientUuid)}
-                  refreshKey={refreshKey}
-                  onToggle={() => toggle(p.patientUuid)}
-                  onView={(uuid) => setViewPatient(uuid)}
-                  onNotes={(enc) => setNotesEnc(enc)}
+                  onView={(uuid) => setViewPatient({ uuid, tab: 'facesheet' })}
+                  onEncounters={(uuid) => setViewPatient({ uuid, tab: 'encounters' })}
                 />
               ))
             )}
@@ -105,95 +93,26 @@ export default function Encounter() {
           label={`Showing ${(page - 1) * PATIENTS_PER_PAGE + 1}–${Math.min(page * PATIENTS_PER_PAGE, total)} of ${total} patients`} />
       )}
 
-      {viewPatient && <PatientModal uuid={viewPatient} onClose={() => setViewPatient(null)} onSaved={reloadAll} />}
+      {viewPatient && <PatientModal uuid={viewPatient.uuid} initialTab={viewPatient.tab} onClose={() => setViewPatient(null)} onSaved={reloadAll} />}
       {newPatient && <PatientModal docMode="records" onClose={() => setNewPatient(false)} onSaved={reloadAll} />}
-      {newEncounter && (
-        <NewEncounterModal
-          onClose={() => setNewEncounter(false)}
-          onCreated={(enc) => { setNewEncounter(false); reloadAll(); setNotesEnc(enc); }}
-        />
-      )}
-      {notesEnc && <EncounterNotesModal encounter={notesEnc} onClose={() => setNotesEnc(null)} onChanged={reloadAll} />}
     </div>
   );
 }
 
-function PatientRow({ p, open, onToggle, onView, onNotes, refreshKey }) {
-  const [encs, setEncs] = useState(null);
-  const [encTotal, setEncTotal] = useState(0);
-  const [ePage, setEPage] = useState(1);
-  const [eLoading, setELoading] = useState(false);
-
-  // Lazy-load this patient's encounters when expanded (server-paginated).
-  useEffect(() => {
-    if (!open) return undefined;
-    let active = true;
-    setELoading(true);
-    encountersApi.patientEncounters(p.patientUuid, { page: ePage, pageSize: ENC_PER_PAGE })
-      .then(({ data }) => { if (active) { setEncs(data.encounters || []); setEncTotal(data.total || 0); } })
-      .catch((e) => { if (active) { setEncs([]); toast.error(toApiError(e).message); } })
-      .finally(() => { if (active) setELoading(false); });
-    return () => { active = false; };
-  }, [open, ePage, p.patientUuid, refreshKey]);
-
-  const ePages = Math.max(1, Math.ceil(encTotal / ENC_PER_PAGE));
-  const encFor = (r) => ({ encounterUuid: r.encounterUuid, encounterNo: r.encounterNo, patientName: p.patientName, mrn: p.mrn, date: r.date, facilityName: p.facilityName });
-
+function PatientRow({ p, onView, onEncounters }) {
   return (
-    <>
-      <tr className={`enc-group ${open ? 'is-open' : ''}`} onClick={onToggle}>
-        <td className="mono">{p.mrn || '—'}</td>
-        <td className="enc-strong">
-          <span className="enc-group-name"><span className={`enc-chev ${open ? 'open' : ''}`} aria-hidden="true" />{p.patientName || '—'}</span>
-        </td>
-        <td>{p.facilityName || '—'}</td>
-        <td>{p.renderingProvider || '—'}</td>
-        <td />
-        <td><span className="enc-count-badge">{p.encounterCount}</span></td>
-        <td className="enc-action">
-          <button className="act" onClick={(e) => { e.stopPropagation(); onView(p.patientUuid); }} title="View face sheet">View</button>
-        </td>
-      </tr>
-      {open && (
-        <tr className="enc-sub-row">
-          <td colSpan={7}>
-            <table className="enc-subtable">
-              <thead>
-                <tr>
-                  <th>Encounter ID</th>
-                  <th>Date of Service</th>
-                  <th>Notes</th>
-                  <th>Rendering Provider</th>
-                  <th>Signed off Provider</th>
-                  <th className="enc-sub-act">Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {eLoading && !encs ? (
-                  <tr><td colSpan={6} className="table-empty"><span className="spinner dark" /> Loading…</td></tr>
-                ) : (encs && encs.length === 0) ? (
-                  <tr><td colSpan={6} className="table-empty">No encounters for this patient yet.</td></tr>
-                ) : (encs || []).map((r) => (
-                  <tr key={r.encounterUuid}>
-                    <td className="mono">{encNo(r.encounterNo)}</td>
-                    <td>{usDate(r.date)}</td>
-                    <td>{procedureLabel(r)}</td>
-                    <td>{r.renderingProvider || '—'}</td>
-                    <td>{r.signedOffProvider || <span className="enc-unsigned">Not signed</span>}</td>
-                    <td className="enc-sub-act">
-                      <button className="act accent" onClick={() => onNotes(encFor(r))} title="Open encounter & clinical notes">View</button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {ePages > 1 && (
-              <Pager compact page={ePage} pages={ePages} onPage={setEPage} label={`${encTotal} encounters`} />
-            )}
-          </td>
-        </tr>
-      )}
-    </>
+    <tr className="enc-group" onClick={() => onEncounters(p.patientUuid)} title="Open this patient's encounters">
+      <td className="mono">{p.mrn || '—'}</td>
+      <td className="enc-strong"><span className="enc-group-name">{p.patientName || '—'}</span></td>
+      <td>{p.facilityName || '—'}</td>
+      <td>{p.renderingProvider || '—'}</td>
+      <td />
+      <td><span className="enc-count-badge">{p.encounterCount}</span></td>
+      <td className="enc-action">
+        <button className="act" onClick={(e) => { e.stopPropagation(); onView(p.patientUuid); }} title="View face sheet">View</button>
+        <button className="act accent" onClick={(e) => { e.stopPropagation(); onEncounters(p.patientUuid); }} title="View & add encounters for this patient">Encounters</button>
+      </td>
+    </tr>
   );
 }
 

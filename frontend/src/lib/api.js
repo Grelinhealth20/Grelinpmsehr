@@ -99,6 +99,12 @@ export const authApi = {
   refresh: () => api.post('/auth/refresh'),
   changePassword: (currentPassword, newPassword) =>
     api.post('/auth/change-password', { currentPassword, newPassword }),
+  // In-house MFA (TOTP). setup → QR + manual key; enroll confirms with the first code (returns
+  // one-time recovery codes); verify/recovery complete the login challenge.
+  mfaSetup: () => api.post('/auth/mfa/setup'),
+  mfaEnroll: (code) => api.post('/auth/mfa/enroll', { code }),
+  mfaVerify: (code) => api.post('/auth/mfa/verify', { code }),
+  mfaRecovery: (code) => api.post('/auth/mfa/recovery', { code }),
 };
 
 // --- Users (admin) ---------------------------------------------------------
@@ -110,6 +116,9 @@ export const usersApi = {
   setStatus: (uuid, status) => api.patch(`/users/${uuid}/status`, { status }),
   resetPassword: (uuid, temporaryPassword) =>
     api.post(`/users/${uuid}/reset-password`, { temporaryPassword }),
+  // Super Admin MFA controls per user.
+  setMfa: (uuid, enabled) => api.post(`/users/${uuid}/mfa`, { enabled }),
+  resetMfa: (uuid) => api.post(`/users/${uuid}/mfa/reset`),
   remove: (uuid) => api.delete(`/users/${uuid}`),
   facilities: (uuid) => api.get(`/users/${uuid}/facilities`),
   setFacilities: (uuid, facilityUuids) => api.put(`/users/${uuid}/facilities`, { facilityUuids }),
@@ -210,9 +219,13 @@ export const encountersApi = {
   // eligibility) for a new note. Strictly patient-scoped server-side.
   rxContext: (patientUuid) => api.get(`/encounters/patient/${patientUuid}/rx-context`),
   create: (payload) => api.post('/encounters', payload),
+  // Deterministic auto-coding suggestions from the note content (diagnoses + visit charge).
+  predictCodes: (noteUuid) => api.get(`/encounters/notes/${noteUuid}/predict`),
   updateStatus: (appointmentUuid, payload) => api.patch(`/encounters/${appointmentUuid}`, payload),
-  // Note templates available to the current provider (their service line only).
+  // Backend-authoritative note-type templates (H&P / SOAP / Progress).
   noteTemplates: () => api.get('/encounters/note-templates'),
+  // Authoritative encounter-header details (patient, MRN, DOB, age, facility, provider).
+  encounterDetails: (encounterUuid) => api.get(`/encounters/${encounterUuid}/details`),
   // Clinical notes
   listNotes: (encounterUuid) => api.get(`/encounters/${encounterUuid}/notes`),
   createNote: (encounterUuid, payload) => api.post(`/encounters/${encounterUuid}/notes`, payload),
@@ -223,6 +236,28 @@ export const encountersApi = {
   updateNote: (noteUuid, payload) => api.patch(`/encounters/notes/${noteUuid}`, payload),
   signNote: (noteUuid, payload) => api.post(`/encounters/notes/${noteUuid}/sign`, payload),
   amendNote: (noteUuid, payload) => api.post(`/encounters/notes/${noteUuid}/amend`, payload),
+  // Billable codes captured on a note (diagnoses SNOMED→ICD-10, procedures CPT) + Part B scrub.
+  getNoteCodes: (noteUuid) => api.get(`/encounters/notes/${noteUuid}/codes`),
+  saveNoteCodes: (noteUuid, payload) => api.put(`/encounters/notes/${noteUuid}/codes`, payload),
+  scrubNote: (noteUuid, payload) => api.post(`/encounters/notes/${noteUuid}/scrub`, payload || {}),
+};
+
+// --- Clinical terminology (SNOMED CT / ICD-10-CM / CPT / RxNorm) -------------
+export const terminologyApi = {
+  snomed: (q, pageSize) => api.get('/terminology/snomed', { params: { q, pageSize } }),
+  rxnorm: (q, pageSize) => api.get('/terminology/rxnorm', { params: { q, pageSize } }),
+  cpt: (q, pageSize) => api.get('/terminology/cpt', { params: { q, pageSize } }),
+  search: (q, source, pageSize) => api.get('/terminology/search', { params: { q, source, pageSize } }),
+  // SNOMED concept → billable ICD-10-CM (official complex map).
+  snomedToIcd: (conceptId) => api.get(`/terminology/snomed/${conceptId}/icd10cm`),
+};
+
+// --- Coding engine (claim edits, PDPM, HCC, MPFS RVU) ----------------------
+export const codingApi = {
+  scrub: (payload) => api.post('/coding/scrub', payload),
+  pdpm: (icd, fy) => api.get(`/coding/pdpm/${encodeURIComponent(icd)}`, { params: { fy } }),
+  hcc: (icd) => api.get(`/coding/hcc/${encodeURIComponent(icd)}`),
+  rvu: (hcpcs, params) => api.get(`/coding/rvu/${encodeURIComponent(hcpcs)}`, { params }),
 };
 
 // --- Appointments (EHR scheduler) ------------------------------------------

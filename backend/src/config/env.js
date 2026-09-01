@@ -123,6 +123,16 @@ export const config = {
     timeoutMs: int('NPPES_TIMEOUT_MS', 8000),
   },
 
+  // UMLS Terminology Services (NLM) — real-time SNOMED CT US / RxNorm / CPT / ICD-10-CM /
+  // HCPCS / CDT / LOINC lookups. The API key is secret; add it to .env as UMLS_API_KEY.
+  // Lookups run server-side and are cached locally (terminology_cache) — real NLM data only.
+  umls: {
+    apiKey: process.env.UMLS_API_KEY || '',
+    baseUrl: process.env.UMLS_BASE_URL || 'https://uts-ws.nlm.nih.gov/rest',
+    timeoutMs: int('UMLS_TIMEOUT_MS', 12000),
+    enabled: !!process.env.UMLS_API_KEY,
+  },
+
   // Stedi — real-time eligibility (270/271) + Payer Network search. The API key is
   // secret; add it to .env as STEDI_API_KEY. Eligibility runs entirely server-side.
   stedi: {

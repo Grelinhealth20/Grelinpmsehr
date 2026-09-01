@@ -117,6 +117,22 @@ export default function SuperAdminPanel() {
     }
   }
 
+  async function toggleMfa(u) {
+    try {
+      await usersApi.setMfa(u.uuid, !u.mfaEnabled);
+      toast.success(`MFA ${!u.mfaEnabled ? 'required' : 'disabled'} for ${u.fullName}.`);
+      load();
+    } catch (e) { toast.error(toApiError(e).message); }
+  }
+
+  async function resetMfa(u) {
+    try {
+      await usersApi.resetMfa(u.uuid);
+      toast.success(`MFA reset for ${u.fullName}. They will re-scan a QR at next login.`);
+      load();
+    } catch (e) { toast.error(toApiError(e).message); }
+  }
+
   async function deleteUser(u) {
     try {
       await usersApi.remove(u.uuid);
@@ -268,6 +284,14 @@ export default function SuperAdminPanel() {
                             <button className="act" title="Edit user" onClick={() => setModal({ type: 'edit', user: u })}>Edit</button>
                             <button className="act" title="Access control" onClick={() => setModal({ type: 'access', user: u })}>Access</button>
                             <button className="act" title="Reset password" onClick={() => setModal({ type: 'reset', user: u })}>Reset</button>
+                            {!locked && (
+                              <button className={`act ${u.mfaEnabled ? 'accent' : ''}`}
+                                title={u.mfaEnabled ? 'MFA required — click to disable' : 'Require MFA at login'}
+                                onClick={() => toggleMfa(u)}>MFA {u.mfaEnabled ? (u.mfaEnrolled ? 'On' : 'Pending') : 'Off'}</button>
+                            )}
+                            {!locked && u.mfaEnrolled && (
+                              <button className="act" title="Reset MFA enrollment (forces a fresh QR scan)" onClick={() => resetMfa(u)}>Reset MFA</button>
+                            )}
                             {!locked && (u.status !== 'restricted'
                               ? <button className="act accent" title="Restrict access" onClick={() => changeStatus(u, 'restricted')}>Restrict</button>
                               : <button className="act" title="Remove restriction" onClick={() => changeStatus(u, 'active')}>Unrestrict</button>)}

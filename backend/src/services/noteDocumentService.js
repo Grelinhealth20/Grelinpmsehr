@@ -12,6 +12,10 @@ import { logger } from '../config/logger.js';
  */
 
 export const NOTE_TITLES = {
+  // SNF provider-focused note types.
+  hp: 'SNF Admission History & Physical',
+  soap: 'SNF SOAP Note',
+  discharge: 'SNF Discharge Summary',
   hp_admission: 'History & Physical / Admission Note',
   progress: 'Progress Note',
   acute_visit: 'Acute / Sick Visit Note',
@@ -59,6 +63,13 @@ export const NOTE_TITLES = {
 // Canonical section labels (must match the frontend note templates' section keys).
 export const SECTION_LABELS = {
   chiefComplaint: 'Chief Complaint / Reason for Encounter',
+  subjective: 'Subjective',
+  objective: 'Objective',
+  // SNF template sections
+  skilledNeed: 'Skilled Need & Certification',
+  rehabGoals: 'Rehab Goals & Expected Discharge',
+  admissionOrders: 'Admission Orders Written',
+  homeServices: 'Home Services & Equipment',
   changeDescription: 'Description of Change in Condition',
   hpi: 'History of Present Illness',
   interval: 'Interval History',
@@ -102,6 +113,7 @@ export const SECTION_LABELS = {
   causeOfDeath: 'Cause of Death',
   regulatoryAttestation: 'Regulatory Attestation',
   timeSpent: 'Total Time & Attestation',
+  attestation: 'Attestation & Signature',
   addendum: 'Additional Notes',
   // Procedure note
   procedureName: 'Procedure Performed',
@@ -147,13 +159,13 @@ export const SECTION_LABELS = {
 // section order — new notes render in their own template order.
 const SECTION_ORDER = [
   // Subjective
-  'chiefComplaint', 'changeDescription', 'hpi', 'painHistory', 'painScale', 'interval', 'hospitalCourse',
+  'chiefComplaint', 'subjective', 'changeDescription', 'hpi', 'painHistory', 'painScale', 'interval', 'hospitalCourse',
   'dischargeInfo', 'interactiveContact', 'transitionGoals',
   'pmh', 'psh', 'familyHistory', 'socialHistory', 'psychHistory',
   'medications', 'medChanges', 'allergies', 'adverseEffects', 'priorTreatments',
   'pdmpReview', 'udsResult', 'opioidRisk', 'ros',
   // Objective
-  'vitals', 'exam', 'mentalStatus', 'cognitiveAssessment', 'neuroPsych',
+  'vitals', 'objective', 'exam', 'mentalStatus', 'cognitiveAssessment', 'neuroPsych',
   'wound', 'treatment', 'results', 'functionalStatus',
   // Procedure body (kept together, in operative-note order)
   'procedureName', 'indication', 'consent', 'procTechnique', 'injectate', 'procFindings', 'specimen', 'ebl', 'complications', 'postProcedure',
@@ -168,12 +180,17 @@ const SECTION_ORDER = [
   // Death
   'pronouncement', 'circumstances', 'causeOfDeath',
   // Attestation
-  'regulatoryAttestation', 'tcmAttestation', 'timeSpent', 'addendum',
+  'regulatoryAttestation', 'tcmAttestation', 'timeSpent', 'attestation', 'addendum',
 ];
 
 // Note-type-specific section headings (mirror the UI templates so the Word
 // record reads identically to what the provider saw on screen).
 export const NOTE_LABEL_OVERRIDES = {
+  // SNF note types — headings match the facility's SNF documentation templates exactly.
+  hp: { chiefComplaint: 'Chief Complaint', codeStatus: 'Code Status', hospitalCourse: 'HPI / Hospital Course', medications: 'Medications & Allergies', pmh: 'Past Medical & Surgical History', socialHistory: 'Social & Prior Function', vitals: 'Vitals', exam: 'Physical Examination', functionalStatus: 'Function & Cognition', results: 'Labs / Imaging / Records', assessment: 'Assessment & Plan', timeSpent: 'Time / Complexity' },
+  soap: { chiefComplaint: 'Chief Complaint', vitals: 'Vitals' },
+  progress: { chiefComplaint: 'Reason for Visit', interval: 'Interval History', medChanges: 'Medication Changes', vitals: 'Vitals', exam: 'Focused Exam', results: 'Labs & Results', assessment: 'Assessment & Plan', followUp: 'Follow-Up & Time' },
+  discharge: { chiefComplaint: 'Reason for SNF Admission', hospitalCourse: 'Course in Facility', functionalStatus: 'Condition at Discharge', dischargeMeds: 'Discharge Medications', pendingFollowUp: 'Pending Items', followUp: 'Follow-Up Appointments', dischargeInstructions: 'Instructions Given', timeSpent: 'Time Spent on Discharge' },
   hp_admission: { chiefComplaint: 'Reason for Admission', results: 'Diagnostic Data on Admission', medications: 'Admission Medication Reconciliation', functionalStatus: 'Functional / Rehabilitation Status', prognosis: 'Rehabilitation Potential & Prognosis' },
   progress: { chiefComplaint: 'Reason for Visit', interval: 'Interval History (Since Last Visit)', exam: 'Focused Interval Examination' },
   acute_visit: { chiefComplaint: 'Presenting Acute Problem', exam: 'Focused Examination (Problem-Directed)', results: 'Point-of-Care / STAT Data' },
@@ -268,7 +285,7 @@ function rxTable(prescriptions) {
   return new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows });
 }
 
-export async function buildNoteDocx({ patient, encounterDate, note, signerName, signedAt }) {
+export async function buildNoteDocx({ patient, encounterDate, note, codes = { diagnoses: [], procedures: [] }, signerName, signedAt }) {
   const title = NOTE_TITLES[note.noteType] || 'Clinical Note';
   const children = [];
 
@@ -310,6 +327,29 @@ export async function buildNoteDocx({ patient, encounterDate, note, signerName, 
   const rx = note.content?.prescriptions?.filter((p) => p && p.drug) || [];
   if (rx.length) { children.push(heading('Prescriptions')); children.push(rxTable(rx)); }
 
+  // Coded diagnoses & procedures (Medicare Part B) — captured billable codes on the record.
+  const dxs = (codes.diagnoses || []).filter((d) => d && d.icd);
+  const pxs = (codes.procedures || []).filter((p) => p && p.cpt);
+  if (dxs.length || pxs.length) {
+    const cell = (t, header, span) => new TableCell({
+      ...(span ? { columnSpan: span } : {}),
+      children: [new Paragraph({ children: [new TextRun({ text: String(t ?? ''), bold: !!header, size: 18, color: header ? DARK : '1C2431' })] })],
+    });
+    children.push(heading('Coded Diagnoses & Procedures — Medicare Part B'));
+    if (dxs.length) {
+      const ordered = [...dxs].sort((a, b) => (b.primary ? 1 : 0) - (a.primary ? 1 : 0));
+      const rows = [new TableRow({ tableHeader: true, children: ['', 'ICD-10-CM', 'Diagnosis', 'SNOMED CT'].map((h) => cell(h, true)) })];
+      ordered.forEach((d) => rows.push(new TableRow({ children: [cell(d.primary ? 'Primary' : ''), cell(d.icd), cell(d.description), cell(d.snomedCode ? String(d.snomedCode) : '')] })));
+      children.push(new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows }));
+    }
+    if (pxs.length) {
+      const rows = [new TableRow({ tableHeader: true, children: ['CPT/HCPCS', 'Mod', 'Units', 'Procedure'].map((h) => cell(h, true)) })];
+      pxs.forEach((p) => rows.push(new TableRow({ children: [cell(p.cpt), cell(p.modifiers || ''), cell(String(p.units || 1)), cell(p.description)] })));
+      if (dxs.length) children.push(new Paragraph({ spacing: { before: 80 }, children: [] }));
+      children.push(new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows }));
+    }
+  }
+
   children.push(new Paragraph({ spacing: { before: 320 }, border: { top: { style: BorderStyle.SINGLE, size: 4, color: 'CCD6EA' } }, children: [] }));
   children.push(new Paragraph({ spacing: { before: 80 }, children: [new TextRun({ text: `Electronically signed by ${signerName || 'Provider'}`, bold: true, size: 20, color: DARK })] }));
   children.push(new Paragraph({ children: [new TextRun({ text: `Signed ${signedAt} · This note is finalized and ready for billing.`, size: 18, color: '404A5A' })] }));
@@ -328,7 +368,7 @@ function safeName(patientName) {
  * the filename is de-duplicated (`_2`, `_3`, …) so a second note NEVER overwrites
  * a prior one. Best-effort: a storage failure never blocks the sign-off.
  */
-export async function storeSignedNoteDoc({ patientUuid, patientName, encounterDate, note, signerName, signedAt, patient, s3ctx }) {
+export async function storeSignedNoteDoc({ patientUuid, patientName, encounterDate, note, codes, signerName, signedAt, patient, s3ctx }) {
   if (!s3Enabled() || !patientUuid) return null;
   try {
     // The patient's hierarchical S3 folder (facility → provider → patient). Fall
@@ -342,7 +382,7 @@ export async function storeSignedNoteDoc({ patientUuid, patientName, encounterDa
     let fileName = `${base}.docx`;
     for (let n = 2; existing.has(fileName.toLowerCase()); n += 1) fileName = `${base}_${n}.docx`;
 
-    const buffer = await buildNoteDocx({ patient: { ...patient, name: patientName }, encounterDate, note, signerName, signedAt });
+    const buffer = await buildNoteDocx({ patient: { ...patient, name: patientName }, encounterDate, note, codes, signerName, signedAt });
     const key = await uploadPatientObject(ctx, `notes/${fileName}`, buffer, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     logger.info({ key }, 'Signed note stored to patient folder');
     return key;

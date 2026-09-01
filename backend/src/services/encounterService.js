@@ -378,6 +378,64 @@ export async function getAccessibleEncounterId(encounterUuid, userId, scope = nu
   return rows[0]?.id || null;
 }
 
+// Whole-years age at a date of service from a DOB (both YYYY-MM-DD). Null if unknown.
+function ageYears(dob, dos) {
+  const d = String(dob || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  const s = String(dos || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!d || !s) return null;
+  let a = Number(s[1]) - Number(d[1]);
+  if (Number(s[2]) < Number(d[2]) || (Number(s[2]) === Number(d[2]) && Number(s[3]) < Number(d[3]))) a -= 1;
+  return a >= 0 && a < 140 ? a : null;
+}
+
+/**
+ * Authoritative encounter-header details for the note workspace — patient identity, DOB,
+ * server-computed age at the DOS, facility, rendering provider, DOS and encounter number.
+ * Scoped via getAccessibleEncounterId (own encounter or a facility-wide MD's), so it can
+ * never return another provider's out-of-scope encounter. Returns null when out of scope.
+ */
+export async function getEncounterDetails(encounterUuid, userId) {
+  const scope = await viewerScope(userId);
+  const encId = await getAccessibleEncounterId(encounterUuid, userId, scope);
+  if (!encId) return null;
+  const [rows] = await execute(
+    `SELECT e.encounter_no,
+        DATE_FORMAT(COALESCE(e.encounter_date, a.appt_date), '%Y-%m-%d') AS dos,
+        p.mrn, p.demographics_enc, p.facility_enc,
+        pu.full_name_enc AS provider_name_enc,
+        (SELECT GROUP_CONCAT(f.name ORDER BY f.name SEPARATOR ', ')
+           FROM provider_facilities pf JOIN facilities f ON f.id = pf.facility_id
+          WHERE pf.provider_id = e.provider_id AND f.status = 'active') AS assigned_facility
+      FROM encounters e
+      LEFT JOIN appointments a ON a.id = e.appointment_id
+      LEFT JOIN patients p ON p.id = e.patient_id
+      LEFT JOIN users pu ON pu.id = e.provider_id
+      WHERE e.id = :id LIMIT 1`,
+    { id: encId },
+  );
+  const r = rows[0];
+  if (!r) return null;
+  const demo = jsonFromEnc(r.demographics_enc) || {};
+  const fac = jsonFromEnc(r.facility_enc) || {};
+  const dob = demo.dob || null;
+  const dos = r.dos || null;
+  let renderingProvider = null;
+  try { renderingProvider = r.provider_name_enc ? decrypt(r.provider_name_enc) : null; } catch { renderingProvider = null; }
+  const age = ageYears(dob, dos);
+  return {
+    encounterNo: r.encounter_no,
+    date: dos,
+    patientName: `${demo.firstName || ''} ${demo.lastName || ''}`.trim() || null,
+    mrn: r.mrn || null,
+    dob,
+    gender: demo.gender && demo.gender !== 'unknown' ? demo.gender : null,
+    ageAtEncounter: age === null ? null : `${age} yrs`,
+    facilityName: fac.facilityName || null,          // free-text facility on the face sheet
+    assignedFacility: r.assigned_facility || null,   // the rendering provider's assigned facility(ies)
+    renderingProvider,
+  };
+}
+
 // Aggregates for the flat Clinical Records list — per note, not grouped.
 const NOTE_STATUS = "n.status"; // 'draft' | 'signed'
 

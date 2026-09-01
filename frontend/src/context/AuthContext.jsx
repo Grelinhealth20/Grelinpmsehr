@@ -8,6 +8,7 @@ const DEFAULT_SETTINGS = { eligibilityEnabled: true };
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [mustReset, setMustReset] = useState(false);
+  const [mfaStage, setMfaStage] = useState('ok'); // 'ok' | 'setup' (scan QR) | 'pending' (enter code)
   const [loading, setLoading] = useState(true);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
 
@@ -33,6 +34,7 @@ export function AuthProvider({ children }) {
         if (!active) return;
         setUser(data.user);
         setMustReset(!!data.mustResetPassword);
+        setMfaStage(mfaStageFromMe(data.mfa));
         refreshSettings();
       } catch {
         if (active) setUser(null);
@@ -50,9 +52,16 @@ export function AuthProvider({ children }) {
     setCsrfToken(data.csrfToken);
     setUser(data.user);
     setMustReset(!!data.mustResetPassword);
+    setMfaStage(data.mfaStage || 'ok');
     refreshSettings();
     return data;
   }, [refreshSettings]);
+
+  // Called by the MFA enroll/verify screens on success — a fresh full session was issued.
+  const completeMfa = useCallback((csrfToken) => {
+    if (csrfToken) setCsrfToken(csrfToken);
+    setMfaStage('ok');
+  }, []);
 
   const logout = useCallback(async () => {
     try {
@@ -70,13 +79,21 @@ export function AuthProvider({ children }) {
     setCsrfToken(null);
     setUser(null);
     setMustReset(false);
+    setMfaStage('ok');
   }, []);
 
   const value = {
-    user, mustReset, loading, login, logout, completePasswordReset, toApiError,
+    user, mustReset, mfaStage, loading, login, logout, completePasswordReset, completeMfa, toApiError,
     settings, eligibilityEnabled: settings.eligibilityEnabled !== false, refreshSettings, setSettings,
   };
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+}
+
+// Derive the MFA stage from the /me `mfa` object.
+function mfaStageFromMe(mfa) {
+  if (!mfa || !mfa.enabled) return 'ok';
+  if (!mfa.enrolled) return 'setup';
+  return mfa.satisfied ? 'ok' : 'pending';
 }
 
 export function useAuth() {

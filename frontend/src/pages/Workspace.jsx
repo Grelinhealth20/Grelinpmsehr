@@ -3,6 +3,7 @@ import AppHeader from '../components/AppHeader.jsx';
 import EhrSystem from './EhrSystem.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useIdleTimeout } from '../hooks/useIdleTimeout.js';
+import { loadNoteDefs } from '../components/EncounterNotes.jsx';
 
 /**
  * Provider / Billing workspace shell.
@@ -34,6 +35,10 @@ function keyFromPath() {
 export default function Workspace() {
   const { user, logout } = useAuth();
   useIdleTimeout(logout, { minutes: 15 });
+
+  // Warm the note-type templates cache as soon as the workspace loads, so the
+  // "New encounter" dropdown and note editor never wait on a cold request.
+  useEffect(() => { loadNoteDefs().catch(() => { /* retried on first real use */ }); }, []);
 
   const perms = user?.accessLevel?.permissions || {};
   const homeKey = user?.role === 'billing' ? 'pms' : 'ehr';

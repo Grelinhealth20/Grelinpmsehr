@@ -28,6 +28,11 @@ export async function authenticate(req, res, next) {
     req.authUserRow = row;
     req.user = toPublicUser(row);
     req.mustResetPassword = !!row.must_reset_password;
+    // MFA state: enrollment flags come from the fresh DB row; the per-session verification status
+    // ('ok' | 'setup' | 'pending') comes from the signed token claim (can't be forged).
+    req.mfaEnabled = !!row.mfa_enabled;
+    req.mfaConfirmed = !!row.mfa_confirmed_at;
+    req.mfaClaim = claims.mfa || 'ok';
     next();
   } catch (err) {
     next(err);
@@ -44,6 +49,16 @@ export function requirePasswordSettled(req, res, next) {
       error: 'Password reset required before continuing.',
       code: 'PASSWORD_RESET_REQUIRED',
     });
+  }
+  // MFA gate (per-session). Password reset is resolved first (above); then, if MFA is required for
+  // this user, no protected resource is reachable until they enroll (setup) and/or verify (pending).
+  if (req.mfaEnabled) {
+    if (!req.mfaConfirmed) {
+      return res.status(403).json({ error: 'Multi-factor authentication setup required.', code: 'MFA_SETUP_REQUIRED' });
+    }
+    if (req.mfaClaim !== 'ok') {
+      return res.status(403).json({ error: 'Multi-factor authentication required.', code: 'MFA_REQUIRED' });
+    }
   }
   next();
 }

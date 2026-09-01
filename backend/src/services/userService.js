@@ -28,6 +28,9 @@ export function toPublicUser(row) {
     taxonomy: row.taxonomy || null,
     taxonomyCode: row.taxonomy_code || null,
     mustResetPassword: !!row.must_reset_password,
+    // MFA policy + enrollment state (never the secret) — drives the Super Admin toggle + user UI.
+    mfaEnabled: !!row.mfa_enabled,
+    mfaEnrolled: !!row.mfa_confirmed_at,
     lastLoginAt: row.last_login_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -46,6 +49,7 @@ function safeJson(v) {
 
 const USER_SELECT = `SELECT u.id, u.uuid, u.email_enc, u.email_bidx, u.full_name_enc, u.role, u.status,
   u.access_level, u.credentials, u.npi, u.taxonomy, u.taxonomy_code, u.password_hash, u.must_reset_password,
+  u.mfa_enabled, u.mfa_secret_enc, u.mfa_confirmed_at, u.mfa_recovery_enc, u.mfa_last_step, u.mfa_failed_attempts, u.mfa_locked_until,
   u.failed_login_attempts, u.locked_until,
   u.last_login_at, u.password_changed_at, u.created_at, u.updated_at, u.specialty_id,
   s.uuid AS specialty_uuid, s.name AS specialty_name, s.service_line AS specialty_service_line,

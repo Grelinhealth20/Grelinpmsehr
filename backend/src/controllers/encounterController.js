@@ -1,30 +1,39 @@
 import {
   listEncounters, updateEncounterStatus, createStandaloneEncounter,
   listProviderPatients, listPatientEncounters, listClinicalRecords, latestPrescriptions,
+  getEncounterDetails,
 } from '../services/encounterService.js';
 import { listChecks } from '../services/eligibilityService.js';
 import {
   listNotes as listNotesSvc, createNote as createNoteSvc, getNote as getNoteSvc,
   updateNote as updateNoteSvc, signNote as signNoteSvc, amendSignedNote as amendNoteSvc,
+  getNoteCodes as getNoteCodesSvc, saveNoteCodes as saveNoteCodesSvc, scrubNoteCodes as scrubNoteCodesSvc,
+  predictCodes as predictCodesSvc,
 } from '../services/encounterNoteService.js';
 import {
-  listTemplatesForServiceLines, providerServiceLines, providerCanUseNoteType,
+  listNoteTypeTemplates, providerCanUseNoteType,
 } from '../services/noteTemplateService.js';
 import { recordAudit } from '../services/auditService.js';
 import { notePdf } from '../services/pdfExport.js';
 
 /**
- * Note templates AVAILABLE to the current provider — the UNION of ALL their granted
- * specialties' service lines (a provider assigned SNFs + Pain sees both lines' templates).
- * Read from the authoritative many-to-many assignment (dynamic — reflects the admin's
- * current selection immediately). The picker renders exactly this de-duplicated list.
+ * Backend-authoritative note-type templates (H&P / SOAP / Progress) — the SINGLE source
+ * of truth for the note section structure. The editor fetches this to render; the same
+ * section keys drive the signed document. Universal: every provider gets all three.
  */
 export async function noteTemplates(req, res, next) {
   try {
-    const serviceLines = await providerServiceLines(req.authUserId);
-    const templates = listTemplatesForServiceLines(serviceLines);
-    res.json({ serviceLines, serviceLine: serviceLines[0] || null, templates });
+    res.json({ noteTypes: listNoteTypeTemplates() });
   } catch (err) { next(err); }
+}
+
+/** Authoritative encounter-header details for the note workspace (scoped to the viewer). */
+export async function encounterDetails(req, res, next) {
+  try {
+    const details = await getEncounterDetails(req.params.encounterUuid, req.authUserId);
+    if (!details) return res.status(404).json({ error: { message: 'Encounter not found.' } });
+    return res.json({ details });
+  } catch (err) { return next(err); }
 }
 
 function sendPdf(res, out) {
@@ -143,6 +152,42 @@ export async function getNote(req, res, next) {
     const note = await getNoteSvc(req.params.noteUuid, req.authUserId);
     if (!note) return res.status(404).json({ error: 'Note not found.', code: 'NOT_FOUND' });
     res.json({ note });
+  } catch (err) { next(err); }
+}
+
+// --- Billable codes on a note (diagnoses + procedures) -------------------------------------
+export async function getNoteCodes(req, res, next) {
+  try {
+    const codes = await getNoteCodesSvc(req.params.noteUuid, req.authUserId);
+    if (!codes) return res.status(404).json({ error: 'Note not found.', code: 'NOT_FOUND' });
+    res.json(codes);
+  } catch (err) { next(err); }
+}
+
+export async function saveNoteCodes(req, res, next) {
+  try {
+    const result = await saveNoteCodesSvc(req.params.noteUuid, req.authUserId, req.body || {});
+    if (!result) return res.status(404).json({ error: 'Note not found.', code: 'NOT_FOUND' });
+    if (result.locked) return res.status(409).json({ error: 'This note is signed and can no longer be edited.', code: 'NOTE_SIGNED' });
+    await recordAudit({ actorUserId: req.authUserId, action: 'encounter.note.codes', entityType: 'encounter_note', entityId: req.params.noteUuid, ...ctx(req) });
+    res.json(result);
+  } catch (err) { next(err); }
+}
+
+export async function predictNoteCodes(req, res, next) {
+  try {
+    const result = await predictCodesSvc(req.params.noteUuid, req.authUserId);
+    if (!result) return res.status(404).json({ error: 'Note not found.', code: 'NOT_FOUND' });
+    res.json(result);
+  } catch (err) { next(err); }
+}
+
+export async function scrubNote(req, res, next) {
+  try {
+    const patient = req.body?.patient || (req.body?.age != null || req.body?.sex ? { age: req.body.age, sex: req.body.sex } : undefined);
+    const result = await scrubNoteCodesSvc(req.params.noteUuid, req.authUserId, patient);
+    if (!result) return res.status(404).json({ error: 'Note not found.', code: 'NOT_FOUND' });
+    res.json(result);
   } catch (err) { next(err); }
 }
 

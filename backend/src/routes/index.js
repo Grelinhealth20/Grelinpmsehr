@@ -10,6 +10,8 @@ import providerRoutes from './providerRoutes.js';
 import facilityRoutes from './facilityRoutes.js';
 import payerRoutes from './payerRoutes.js';
 import settingsRoutes from './settingsRoutes.js';
+import terminologyRoutes from './terminologyRoutes.js';
+import codingRoutes from './codingRoutes.js';
 
 const router = Router();
 
@@ -26,5 +28,7 @@ router.use('/facilities', facilityRoutes);
 router.use('/payers', payerRoutes);
 router.use('/audit', auditRoutes);
 router.use('/settings', settingsRoutes);
+router.use('/terminology', terminologyRoutes);
+router.use('/coding', codingRoutes);
 
 export default router;

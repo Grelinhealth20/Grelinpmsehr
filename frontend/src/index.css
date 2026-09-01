@@ -44,7 +44,9 @@
   --ring: 0 0 0 4px rgba(39, 83, 179, 0.14);
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
 
-  --font: 'Inter', 'Segoe UI', system-ui, -apple-system, Roboto, Helvetica, Arial, sans-serif;
+  /* Cambria — a clean, highly readable serif that ships with Windows/Office, so it loads
+     locally (no web-font fetch; the gateway CSP only allows 'self' fonts). */
+  --font: 'Cambria', 'Georgia', 'Times New Roman', 'Times', serif;
 }
 
 * { box-sizing: border-box; }
@@ -61,10 +63,12 @@ body {
   line-height: 1.5;
 }
 
-h1, h2, h3, h4 { margin: 0; color: var(--c-dark-blue); font-weight: 700; letter-spacing: -0.02em; }
+h1, h2, h3, h4 { margin: 0; color: var(--c-dark-blue); font-weight: 500; letter-spacing: -0.02em; }
 p { margin: 0; }
 a { color: var(--c-blue); text-decoration: none; }
-button { font-family: inherit; }
+/* All form controls (text inputs, date pickers, textareas, selects) inherit Cambria —
+   native controls default to the browser sans-serif otherwise. */
+button, input, textarea, select { font-family: inherit; }
 
 /* ---- Utility layout ---- */
 .stack { display: flex; flex-direction: column; }
@@ -78,7 +82,7 @@ button { font-family: inherit; }
 .brand img { height: 30px; width: auto; display: block; }
 .brand .divider { width: 1px; height: 22px; background: var(--c-line); }
 .brand .sub {
-  font-size: 12px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase;
+  font-size: 12px; font-weight: 500; letter-spacing: 0.14em; text-transform: uppercase;
   color: var(--c-ink-3);
 }
 
@@ -88,7 +92,7 @@ button { font-family: inherit; }
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;
   height: 42px; padding: 0 18px; border-radius: var(--r-md);
   background: var(--bg); color: var(--fg); border: 1px solid var(--bd);
-  font-weight: 700; font-size: 14px; cursor: pointer; letter-spacing: -0.01em;
+  font-weight: 500; font-size: 14px; cursor: pointer; letter-spacing: -0.01em;
   transition: transform 0.15s var(--ease), box-shadow 0.2s var(--ease), background 0.2s var(--ease), filter 0.2s;
   box-shadow: var(--shadow-sm);
 }
@@ -107,12 +111,12 @@ button { font-family: inherit; }
 
 /* ---- Form fields ---- */
 .field { display: flex; flex-direction: column; gap: 7px; }
-.field label { font-size: 13px; font-weight: 600; color: var(--c-ink-2); }
+.field label { font-size: 13px; font-weight: 500; color: var(--c-ink-2); }
 .field .hint { font-size: 12px; color: var(--c-ink-3); }
 .input, .select {
   height: 44px; padding: 0 14px; border-radius: var(--r-md);
   border: 1.5px solid rgba(9, 17, 33, 0.22); background: #fff; color: var(--c-ink);
-  font-size: 14px; transition: border 0.18s var(--ease), box-shadow 0.18s var(--ease);
+  font-family: inherit; font-size: 14px; transition: border 0.18s var(--ease), box-shadow 0.18s var(--ease);
   width: 100%;
 }
 .input::placeholder { color: rgba(9, 17, 33, 0.4); }
@@ -123,7 +127,7 @@ button { font-family: inherit; }
 .input-group .reveal {
   position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
   height: 32px; padding: 0 10px; border: none; background: transparent; color: var(--c-ink-3);
-  font-size: 12px; font-weight: 600; cursor: pointer; border-radius: var(--r-sm);
+  font-size: 12px; font-weight: 500; cursor: pointer; border-radius: var(--r-sm);
 }
 .input-group .reveal:hover { color: var(--c-blue); background: var(--c-blue-050); }
 
@@ -136,7 +140,7 @@ button { font-family: inherit; }
 /* ---- Badges ---- */
 .badge {
   display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px;
-  border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid transparent;
+  border-radius: 999px; font-size: 12px; font-weight: 500; border: 1px solid transparent;
 }
 .badge .dot { width: 7px; height: 7px; border-radius: 50%; }
 .badge.active { background: var(--c-blue-050); color: var(--c-blue); }

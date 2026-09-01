@@ -2,26 +2,60 @@ import { useEffect, useRef, useState } from 'react';
 import Modal from './Modal.jsx';
 import { useToast } from './Toast.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
-import { encountersApi, toApiError } from '../lib/api.js';
-import { NOTE_TYPES, TEMPLATES } from '../lib/noteTemplates.js';
+import { encountersApi, terminologyApi, toApiError } from '../lib/api.js';
 
-const today = () => new Date().toISOString().slice(0, 10);
 // Display DOS in US format (MM/DD/YYYY); inputs keep the ISO value they require.
 export const usDate = (iso) => { const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${m[2]}/${m[3]}/${m[1]}` : (iso || '—'); };
 // Encounter ID display — clean sequential number, strip any legacy leading zeros.
 export const encNo = (v) => { const s = String(v ?? '').trim(); return s ? s.replace(/^0+(?=\d)/, '') : '—'; };
+// Date + time (for the signed-at status line), e.g. 11/29/2025 08:07 am.
+const usDateTime = (iso) => {
+  const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  if (!m) return usDate(iso);
+  let h = Number(m[4]); const ap = h >= 12 ? 'pm' : 'am'; h = h % 12 || 12;
+  return `${m[2]}/${m[3]}/${m[1]} ${String(h).padStart(2, '0')}:${m[5]} ${ap}`;
+};
+// Age (in whole years) at the date of service, from the patient's DOB. Empty if unknown.
+const ageAtEncounter = (dob, dos) => {
+  const d = String(dob || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  const s = String(dos || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!d || !s) return '';
+  let a = Number(s[1]) - Number(d[1]);
+  if (Number(s[2]) < Number(d[2]) || (Number(s[2]) === Number(d[2]) && Number(s[3]) < Number(d[3]))) a -= 1;
+  return a >= 0 && a < 140 ? `${a} yrs` : '';
+};
+// Note-type templates are BACKEND-AUTHORITATIVE — fetched once per session from
+// GET /encounters/note-templates — the SINGLE source of truth. No static/legacy fallback.
+let NOTE_DEFS_CACHE = null; // { byType, list } — populated once, reused for the session
+let NOTE_DEFS_PROMISE = null; // in-flight request, so concurrent callers share ONE fetch
+export async function loadNoteDefs() {
+  if (NOTE_DEFS_CACHE) return NOTE_DEFS_CACHE;
+  if (NOTE_DEFS_PROMISE) return NOTE_DEFS_PROMISE;
+  NOTE_DEFS_PROMISE = encountersApi.noteTemplates()
+    .then(({ data }) => {
+      const list = data.noteTypes || [];
+      const byType = {};
+      for (const t of list) byType[t.noteType] = t;
+      NOTE_DEFS_CACHE = { byType, list };
+      NOTE_DEFS_PROMISE = null;
+      return NOTE_DEFS_CACHE;
+    })
+    .catch((e) => { NOTE_DEFS_PROMISE = null; throw e; }); // clear so a later call can retry
+  return NOTE_DEFS_PROMISE;
+}
 const hasMD = (user) => (user?.credentials || []).some((c) => String(c).toUpperCase().trim() === 'MD');
 const blankRx = () => ({ drug: '', dose: '', route: '', frequency: '', quantity: '', refills: '', sig: '' });
-// Structured vital signs shown at the TOP of the note.
+// Structured vital signs (Objective). Reference ranges are shown Epic-style beside each field.
 const VITALS = [
-  { k: 'temp', label: 'Temp °F', ph: '98.6' },
-  { k: 'hr', label: 'HR bpm', ph: '72' },
-  { k: 'bp', label: 'BP', ph: '120/80' },
-  { k: 'rr', label: 'RR', ph: '16' },
-  { k: 'spo2', label: 'SpO₂ %', ph: '98' },
-  { k: 'weight', label: 'Wt lb', ph: '—' },
-  { k: 'pain', label: 'Pain', ph: '0' },
+  { k: 'temp', label: 'Temp °F', ph: '98.6', range: '97–99' },
+  { k: 'hr', label: 'HR bpm', ph: '72', range: '60–100' },
+  { k: 'bp', label: 'BP', ph: '120/80', range: '<120/80' },
+  { k: 'rr', label: 'RR', ph: '16', range: '12–20' },
+  { k: 'spo2', label: 'SpO₂ %', ph: '98', range: '≥95' },
+  { k: 'weight', label: 'Wt lb', ph: '—', range: '' },
+  { k: 'pain', label: 'Pain', ph: '0', range: '0–10' },
 ];
+
 
 // Section icons — a clean, monochrome visual anchor per section (enterprise EHR feel).
 const ICON_PATHS = {
@@ -84,157 +118,30 @@ function SectionIcon({ k }) {
   );
 }
 
-/* -------- New Encounter: select patient + date ---------------------------- */
-// Initials for the patient avatar (first + last). Falls back to a dot.
-const initials = (name) => {
-  const p = String(name || '').trim().split(/\s+/).filter(Boolean);
-  if (!p.length) return '•';
-  return ((p[0][0] || '') + (p.length > 1 ? p[p.length - 1][0] : '')).toUpperCase();
-};
 
 /**
- * Enterprise-scale patient picker. NEVER loads the full patient table — it queries the
- * server-paginated, blind-index search (`/encounters/patients?q&page&pageSize`) so it stays
- * instant whether the facility has 50 patients or 50,000. Empty query shows the most recent
- * patients (the common case for a new encounter); typing searches by full name (encrypted,
- * blind-index) or partial MRN.
- *
- * Layout: the results render IN-FLOW as a bordered panel directly under the search box (with
- * its own internal scroll) — never a floating overlay — so it can never overlap the date
- * field or the footer. Fully keyboard-navigable.
+ * Encounter details — the header card (Practice-Fusion layout, Grelin colors). Every
+ * value comes from real encounter / note / patient data. Fields with no backing data
+ * yet (SNOMED encounter type, appointment link, self-pay restriction) show a neutral
+ * default rather than fabricated content.
  */
-function PatientPicker({ value, onChange }) {
-  const [q, setQ] = useState('');
-  const [rows, setRows] = useState([]);
-  const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(false);
-  const [hi, setHi] = useState(0);
-  const seqRef = useRef(0);
-
-  // Debounced server search — recent patients on empty query, blind-index/MRN match on input.
-  // Only while no patient is selected (the selected card replaces the search).
-  useEffect(() => {
-    if (value) return undefined;
-    const delay = q.trim() ? 240 : 0;
-    const id = setTimeout(async () => {
-      const seq = ++seqRef.current;
-      setLoading(true);
-      try {
-        const { data } = await encountersApi.listPatients({ q: q.trim(), page: 1, pageSize: 6 });
-        if (seq !== seqRef.current) return; // a newer keystroke superseded this response
-        setRows(data.patients || []); setTotal(data.total || 0); setHi(0);
-      } catch { if (seq === seqRef.current) { setRows([]); setTotal(0); } }
-      finally { if (seq === seqRef.current) setLoading(false); }
-    }, delay);
-    return () => clearTimeout(id);
-  }, [q, value]);
-
-  const pick = (p) => { onChange(p); setQ(''); };
-  const onKey = (e) => {
-    if (e.key === 'ArrowDown') { e.preventDefault(); setHi((h) => Math.min(h + 1, rows.length - 1)); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); setHi((h) => Math.max(h - 1, 0)); }
-    else if (e.key === 'Enter') { e.preventDefault(); if (rows[hi]) pick(rows[hi]); }
-  };
-
-  // Selected → a prominent patient card (search + list are gone, so nothing floats).
-  if (value) {
-    return (
-      <div className="pp-selected">
-        <span className="pp-avatar">{initials(value.patientName)}</span>
-        <span className="pp-selected-main">
-          <span className="pp-selected-nm">{value.patientName || 'Unnamed patient'}</span>
-          <span className="pp-selected-meta">
-            MRN {value.mrn}
-            {value.facilityName ? ` · ${value.facilityName}` : ''}
-            {value.encounterCount > 0 ? ` · ${value.encounterCount} prior encounter${value.encounterCount === 1 ? '' : 's'}` : ''}
-          </span>
-        </span>
-        <button type="button" className="pp-change" onClick={() => onChange(null)}>Change</button>
-      </div>
-    );
-  }
-
+function PFDetails({ encounter, noteLabel, ageStr, seenBy, statusStr }) {
   return (
-    <div className="pp">
-      <div className="pp-search">
-        <svg className="pp-search-ic" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.2-3.2" /></svg>
-        <input
-          className="pp-input" value={q} autoComplete="off" spellCheck="false" autoFocus
-          placeholder="Search by last name, first name, or MRN…" role="combobox" aria-expanded="true" aria-controls="pp-list"
-          onChange={(e) => setQ(e.target.value)} onKeyDown={onKey}
-        />
-        {loading && <span className="pp-spin" aria-hidden="true" />}
+    <section className="pf-card">
+      <div className="pf-card-h">Encounter details</div>
+      <div className="pf-grid">
+        <div className="pf-field"><span className="pf-flabel">Encounter type</span><span className="pf-fval">{encounter.encounterType || 'Office Visit'}</span></div>
+        <div className="pf-field"><span className="pf-flabel">Note type</span><span className="pf-fval">{noteLabel}</span></div>
+        <div className="pf-field"><span className="pf-flabel">Date</span><span className="pf-fval">{usDate(encounter.date)}</span></div>
+        <div className="pf-field"><span className="pf-flabel">Age at encounter</span><span className="pf-fval">{ageStr || '—'}</span></div>
+        <div className="pf-field"><span className="pf-flabel">Seen by</span><span className="pf-fval">{seenBy || '—'}</span></div>
+        <div className="pf-field"><span className="pf-flabel">Facility</span><span className="pf-fval">{encounter.facilityName || '—'}</span></div>
+        <div className="pf-field"><span className="pf-flabel">Assigned Facility</span><span className="pf-fval">{encounter.assignedFacility || '—'}</span></div>
+        <div className="pf-field"><span className="pf-flabel">Encounter</span><span className="pf-fval">{encNo(encounter.encounterNo)}</span></div>
+        <div className="pf-field"><span className="pf-flabel">MRN</span><span className="pf-fval">{encounter.mrn || '—'}</span></div>
+        <div className="pf-field pf-field-wide"><span className="pf-flabel">Status</span><span className="pf-fval">{statusStr}</span></div>
       </div>
-
-      <div className="pp-results">
-        <div className="pp-results-head">
-          <span>{q.trim() ? `${total} match${total === 1 ? '' : 'es'}` : 'Recent patients'}</span>
-          {total > rows.length && <span className="pp-results-count">showing {rows.length} of {total.toLocaleString()}</span>}
-        </div>
-        <div className="pp-list" id="pp-list" role="listbox">
-          {loading && rows.length === 0 ? (
-            <div className="pp-state">Searching…</div>
-          ) : rows.length === 0 ? (
-            <div className="pp-state">{q.trim() ? 'No patient matches. Try a last name, first name, initial, or MRN.' : 'No patients yet.'}</div>
-          ) : rows.map((p, i) => (
-            <button
-              type="button" key={p.patientUuid} role="option" aria-selected={i === hi}
-              className={`pp-opt ${i === hi ? 'is-hi' : ''}`}
-              onMouseEnter={() => setHi(i)} onClick={() => pick(p)}
-            >
-              <span className="pp-avatar sm">{initials(p.patientName)}</span>
-              <span className="pp-opt-main">
-                <span className="pp-opt-nm">{p.patientName || 'Unnamed patient'}</span>
-                <span className="pp-opt-meta">MRN {p.mrn}{p.facilityName ? ` · ${p.facilityName}` : ''}</span>
-              </span>
-              {p.encounterCount > 0 && <span className="pp-opt-enc">{p.encounterCount} enc</span>}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="pp-hint">Names are encrypted at rest — search by <b>last name</b>, <b>first name</b>, first <b>initial</b>, or <b>MRN</b>.</div>
-    </div>
-  );
-}
-
-export function NewEncounterModal({ onClose, onCreated }) {
-  const toast = useToast();
-  const [patient, setPatient] = useState(null); // selected patient object
-  const [encounterDate, setEncounterDate] = useState(today());
-  const [saving, setSaving] = useState(false);
-
-  async function create() {
-    if (!patient) { toast.error('Select a patient.'); return; }
-    setSaving(true);
-    try {
-      const { data } = await encountersApi.create({ patientUuid: patient.patientUuid, encounterDate });
-      toast.success('Encounter created.');
-      onCreated?.({ encounterUuid: data.encounter.uuid, encounterNo: data.encounter.encounterNo, patientUuid: patient.patientUuid, date: encounterDate, patientName: patient.patientName || '' });
-    } catch (e) { toast.error(toApiError(e).message); } finally { setSaving(false); }
-  }
-
-  return (
-    <Modal title="New Encounter" onClose={onClose} footer={<>
-      <span className="spacer" />
-      <button className="btn ghost" onClick={onClose} disabled={saving}>Cancel</button>
-      <button className="btn" onClick={create} disabled={saving || !patient}>{saving ? <span className="spinner" /> : 'Create encounter'}</button>
-    </>}>
-      <div className="nenc">
-        <div className="nenc-field">
-          <label className="nenc-lbl">Patient<span className="fs-req">*</span></label>
-          <PatientPicker value={patient} onChange={setPatient} />
-        </div>
-        <div className="nenc-field nenc-date">
-          <label className="nenc-lbl">Encounter date<span className="fs-req">*</span></label>
-          <input className="input" type="date" value={encounterDate} max={today()} onChange={(e) => setEncounterDate(e.target.value)} />
-        </div>
-        <div className="nenc-note">
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 7.5h.01" /></svg>
-          <span>A DOS-scoped encounter number is generated automatically and wired to the patient MRN.</span>
-        </div>
-      </div>
-    </Modal>
+    </section>
   );
 }
 
@@ -246,7 +153,6 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
 
   const [notes, setNotes] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [picking, setPicking] = useState(false);
   const [active, setActive] = useState(null); // full note being edited/viewed
   const [tab, setTab] = useState('note');
   const [content, setContent] = useState({ vitals: {}, sections: {}, prescriptions: [] });
@@ -258,6 +164,8 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   const [amending, setAmending] = useState(false); // MD editing a signed note
   const [amendModal, setAmendModal] = useState(false); // reason prompt for amendment
   const [amendReason, setAmendReason] = useState('');
+  const [defs, setDefs] = useState(NOTE_DEFS_CACHE); // backend note-type templates (authoritative)
+  const [detail, setDetail] = useState(null); // authoritative encounter-header details (fetched)
   const skipSave = useRef(true); // skip the save that a fresh load/open would trigger
   const createToken = useRef(0); // guards the async Rx merge to the LATEST note created
   // Auto-save engine refs — persistence must never silently drop an edit.
@@ -268,6 +176,32 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   const retryRef = useRef(null);      // pending retry timer after a failed save
   contentRef.current = content;
   reasonRef.current = reason;
+
+  // Fetch the backend-authoritative note-type templates once. No static fallback — the
+  // server defs are the single source of truth for the note structure.
+  useEffect(() => { let a = true; loadNoteDefs().then((d) => { if (a) setDefs(d); }).catch(() => { if (a) toast.error('Could not load note types. Please retry.'); }); return () => { a = false; }; }, [toast]);
+
+  // Fetch authoritative encounter-header details (patient, MRN, DOB, server-computed age,
+  // facility, rendering provider) so every field is filled regardless of how the modal opened.
+  useEffect(() => {
+    if (!encounter?.encounterUuid) return undefined;
+    let a = true;
+    encountersApi.encounterDetails(encounter.encounterUuid)
+      .then(({ data }) => { if (a) setDetail(data.details || null); })
+      .catch(() => { /* keep whatever was passed in */ });
+    return () => { a = false; };
+  }, [encounter?.encounterUuid]);
+
+  // If the encounter was opened from the "New encounter" dropdown with a note type,
+  // auto-create that note once (waits for the notes list + backend defs to be ready).
+  const autoStartedRef = useRef(false);
+  useEffect(() => {
+    if (autoStartedRef.current) return;
+    if (!encounter?.startNoteType || loading || active || notes.length || !defs) return;
+    autoStartedRef.current = true;
+    createNote(encounter.startNoteType);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [encounter?.startNoteType, loading, active, notes, defs]);
 
   async function loadNotes({ autoOpen = false } = {}) {
     setLoading(true);
@@ -293,9 +227,11 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
         vitals: data.note.content?.vitals || {},
         sections: data.note.content?.sections || {},
         prescriptions: data.note.content?.prescriptions || [],
-        // Persist the template's clinical section order so the downloaded record
-        // renders in the exact provider order (dynamic, per note type).
-        sectionOrder: (TEMPLATES[data.note.noteType] || []).map((s) => s.key),
+        // Keep the note's OWN stored section order; if missing, use the backend template's
+        // order for this note type. Never a static client copy.
+        sectionOrder: (data.note.content?.sectionOrder?.length
+          ? data.note.content.sectionOrder
+          : (NOTE_DEFS_CACHE?.byType?.[data.note.noteType]?.sections || []).map((s) => s.key)),
       });
       setReason(data.note.reason || '');
       setRxCarry(null);
@@ -310,55 +246,33 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
     } catch (e) { toast.error(toApiError(e).message); }
   }
 
+  // Create a new note of the chosen type (H&P / SOAP / Progress) and open it for
+  // free-form writing. No popup — the type is picked inline; autosave takes over.
   async function createNote(noteType) {
-    setBusy(true); // keep the picker open with its loading animation until the note is ready
-    const myToken = ++createToken.current; // only THIS creation may merge its Rx later
+    const secs = defs?.byType?.[noteType]?.sections;
+    if (!secs?.length) { toast.error('Note types are still loading — please try again in a moment.'); return; }
+    setBusy(true);
     try {
-      const order = (TEMPLATES[noteType] || []).map((s) => s.key);
-      const initContent = { vitals: {}, sections: {}, prescriptions: [], sectionOrder: order };
-      // Create the note and fetch the carry-forward Rx context (current meds +
-      // pharmacy/PBM vendor) IN PARALLEL — the editor opens as soon as the note exists;
-      // carried meds fill in a moment later without blocking the template from showing.
-      const createP = encountersApi.createNote(encounter.encounterUuid, { noteType, content: initContent });
-      const rxP = encounter.patientUuid
-        ? encountersApi.rxContext(encounter.patientUuid).then((rc) => rc.data).catch((e) => ({ __error: e }))
-        : Promise.resolve(null);
-
-      const { data } = await createP;
-      // Show the template immediately — do NOT wait on the Rx context.
+      // Chief Complaint is its own card (not part of the dynamic note body).
+      // Compact, well-known structures (SOAP → S/O/A/P) show their FULL template up front so
+      // the note reads accurately as that type. Long structures (H&P) start with the first
+      // heading and reveal the rest one by one as the provider writes (progressive).
+      const bodySecs = secs.filter((s) => s.key !== 'chiefComplaint');
+      const seed = bodySecs.length <= 6 ? bodySecs.map((s) => s.key) : (bodySecs.length ? [bodySecs[0].key] : []);
+      const initContent = { vitals: {}, sections: {}, prescriptions: [], sectionOrder: seed };
+      const { data } = await encountersApi.createNote(encounter.encounterUuid, { noteType, content: initContent });
       skipSave.current = true;
       setAutoState('idle');
+      setAmending(false); setAmendReason('');
       setActive(data.note);
       setContent(initContent);
       setPharmacy(null);
       setRxCarry(null);
       setReason('');
       setTab('note');
-      setPicking(false); // close the picker now that the editor is ready
-      setBusy(false);
-      loadNotes();
+      await loadNotes();
       onChanged?.();
-
-      // Merge carried meds + pharmacy when they arrive (non-blocking; auto-save persists).
-      // Guard: only apply to the note THIS click created — a fast switch to another
-      // template must never receive the previous note's carried medications.
-      const rc = await rxP;
-      // Only apply to the note THIS click created (guard against a fast template switch).
-      if (rc && createToken.current === myToken) {
-        if (rc.__error) {
-          // Carry-forward failed — surface it (never silent) so the provider knows the
-          // prior medications weren't loaded and can add them manually if needed.
-          toast.error(`Couldn’t carry forward prior medications: ${toApiError(rc.__error).message}. Add them manually if needed.`);
-        } else {
-          if (rc.pharmacy) setPharmacy(rc.pharmacy);
-          const carriedRx = rc.prescriptions || [];
-          if (carriedRx.length) {
-            setRxCarry({ date: rc.sourceDate });
-            setContent((c) => ({ ...c, prescriptions: carriedRx }));
-          }
-        }
-      }
-    } catch (e) { toast.error(toApiError(e).message); setBusy(false); }
+    } catch (e) { toast.error(toApiError(e).message); } finally { setBusy(false); }
   }
 
   const signed = active?.status === 'signed';
@@ -372,6 +286,34 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   const setRxAt = (i, k, v) => setContent((c) => ({ ...c, prescriptions: c.prescriptions.map((r, idx) => (idx === i ? { ...r, [k]: v } : r)) }));
   const addRx = () => setContent((c) => ({ ...c, prescriptions: [...c.prescriptions, blankRx()] }));
   const removeRx = (i) => setContent((c) => ({ ...c, prescriptions: c.prescriptions.filter((_, idx) => idx !== i) }));
+  // Remove a clinical heading the provider doesn't need (clears its content + drops it
+  // from the kept order). It is not auto-re-added, so removals stick.
+  const removeSection = (key) => setContent((c) => {
+    const sections = { ...c.sections }; delete sections[key];
+    return { ...c, sections, vitals: key === 'vitals' ? {} : c.vitals, sectionOrder: (c.sectionOrder || []).filter((k) => k !== key) };
+  });
+
+  // Epic-style progressive note: once the LAST kept heading has content, auto-append the
+  // NEXT clinical heading (in the note type's order). Kept headings live in
+  // content.sectionOrder (persisted/autosaved). Only appends after the last heading, so a
+  // removed middle section is never re-added.
+  useEffect(() => {
+    if (!active || readOnly) return;
+    // Chief Complaint is a separate card — never part of the dynamic note body.
+    const tpl = (defs?.byType?.[active.noteType]?.sections || []).filter((s) => s.key !== 'chiefComplaint');
+    if (!tpl.length) return;
+    const order = (Array.isArray(content.sectionOrder) ? content.sectionOrder : []).filter((k) => k !== 'chiefComplaint');
+    // Never leave the note with no heading to write in — re-seed the first clinical heading.
+    if (!order.length) { setContent((c) => ({ ...c, sectionOrder: [tpl[0].key] })); return; }
+    const lastKey = order[order.length - 1];
+    const filled = lastKey === 'vitals'
+      ? VITALS.some((v) => String(content.vitals?.[v.k] || '').trim())
+      : String(content.sections[lastKey] || '').trim().length > 0;
+    if (!filled) return;
+    const lastIdx = tpl.findIndex((s) => s.key === lastKey);
+    const next = tpl[lastIdx + 1];
+    if (next && !order.includes(next.key)) setContent((c) => ({ ...c, sectionOrder: [...(c.sectionOrder || []), next.key] }));
+  }, [content.sections, content.vitals, content.sectionOrder, active, defs, readOnly]);
 
   // Persist the LATEST edit. Coalesces concurrent calls (last-write-wins by always
   // sending contentRef/reasonRef), and NEVER swallows a failure: a failed save moves
@@ -506,16 +448,47 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
     if (active) openNote(active.uuid);
   }
 
-  const template = active ? (TEMPLATES[active.noteType] || []) : [];
-  const noteMeta = active ? NOTE_TYPES[active.noteType] : null;
-  // Sections that actually render: vitals (when present / has data) + the body sections
-  // (in read mode, only those with content). Numbered in clinical document order.
-  const vitalsShown = template.some((s) => s.key === 'vitals') && (!readOnly || VITALS.some((v) => content.vitals?.[v.k]));
-  const bodySections = template.filter((s) => s.key !== 'vitals' && (!readOnly || String(content.sections[s.key] || '').trim()));
+  // The BACKEND note-type templates are the SINGLE source of truth (fetched). No static
+  // fallback and no legacy types — the note structure always comes from the server defs.
+  const defsByType = defs?.byType || null;
+  const typeList = defs?.list || [];
+  const sectionsForType = (nt) => defsByType?.[nt]?.sections || [];
+  const template = active ? sectionsForType(active.noteType) : [];
+  const noteMeta = active ? (defsByType?.[active.noteType] || { label: 'Clinical Note', category: '', cpt: '' }) : null;
+  // DYNAMIC clinical note (Epic-style): headings appear one after another in the note
+  // type's clinical order — never a pre-structured static list. Read mode shows only the
+  // sections that were filled; edit mode shows every filled section PLUS the next empty
+  // one, so a fresh note starts with a single heading and reveals the next automatically
+  // as the provider writes. No SOAP scaffolding, no "add section" button.
+  const sectionHasContent = (s) => (s.key === 'vitals'
+    ? VITALS.some((v) => String(content.vitals?.[v.k] || '').trim())
+    : String(content.sections[s.key] || '').trim().length > 0);
+  // The kept headings, in order (content.sectionOrder). Edit mode shows them all (with the
+  // next auto-appended by the effect above); read/signed shows only the ones with content.
+  const secByKey = {};
+  template.forEach((s) => { secByKey[s.key] = s; });
+  const noteSecs = (() => {
+    // Chief Complaint has its own card — exclude it from the dynamic note body.
+    const order = (Array.isArray(content.sectionOrder) ? content.sectionOrder : []).filter((k) => k !== 'chiefComplaint');
+    const secs = order.map((k) => secByKey[k] || { key: k, label: k, prompt: '', rows: 4 });
+    return readOnly ? secs.filter(sectionHasContent) : secs;
+  })();
+
+  // Encounter-header values — prefer the AUTHORITATIVE backend detail, fall back to what
+  // was passed in. `enc` merges them so MRN / facility / DOS / patient are always filled.
+  const enc = { ...encounter, ...(detail || {}) };
+  const ageStr = detail?.ageAtEncounter || ageAtEncounter(enc.dob, enc.date);
+  const seenBy = detail?.renderingProvider
+    || (signed ? active?.signedByName : (active && active.isOwner !== false && user?.fullName ? `${user.fullName}${canSign ? ', MD' : ''}` : ''))
+    || '—';
+  const statusStr = !active
+    ? 'No note started'
+    : signed
+      ? `Electronically signed by ${active.signedByName || 'Provider'}${active.signedAt ? ` at ${usDateTime(active.signedAt)}` : ''}`
+      : 'Draft — not signed';
 
   return (
     <>
-    {picking && <NoteTypePicker busy={busy} onPick={createNote} onClose={() => setPicking(false)} />}
     {amendModal && (
       <Modal title="Edit signed note" onClose={() => setAmendModal(false)} footer={<>
         <span className="spacer" />
@@ -538,8 +511,8 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
         </div>
       </Modal>
     )}
-    <Modal size="full" title={`Encounter · ${encounter.patientName || 'Patient'}`} onClose={closeWithSave} footer={<>
-      <span className="nt-foot-meta">Encounter {encNo(encounter.encounterNo)} · DOS {usDate(encounter.date)}</span>
+    <Modal size="full" title={`Encounter · ${enc.patientName || 'Patient'}`} onClose={closeWithSave} footer={<>
+      <span className="nt-foot-meta">Encounter {encNo(enc.encounterNo)} · DOS {usDate(enc.date)}</span>
       {active && !readOnly && !amending && (
         <span className={`nt-autosave ${autoState}`}>
           {autoState === 'saving' ? 'Saving…'
@@ -595,34 +568,47 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
           <div className="nt2-tabs">
             {notes.map((n) => (
               <button key={n.uuid} type="button" className={`nt2-tab ${active?.uuid === n.uuid ? 'is-on' : ''}`} onClick={() => openNote(n.uuid)}>
-                {NOTE_TYPES[n.noteType]?.label || n.noteType}
+                {defsByType?.[n.noteType]?.label || n.noteType}
                 <span className={`nt2-dot ${n.status === 'signed' ? 'signed' : 'draft'}`} title={n.status === 'signed' ? 'Signed' : 'Draft'} />
               </button>
             ))}
           </div>
           <div className="nt2-ident">
-            <span className="nt2-ident-nm">{encounter.patientName || 'Patient'}</span>
+            <span className="nt2-ident-nm">{enc.patientName || 'Patient'}</span>
             <span className="nt2-ident-meta">
-              <span><b>MRN</b> {encounter.mrn || '—'}</span>
-              <span><b>Enc</b> {encNo(encounter.encounterNo)}</span>
-              <span><b>DOS</b> {usDate(encounter.date)}</span>
+              <span><b>MRN</b> {enc.mrn || '—'}</span>
+              <span><b>Enc</b> {encNo(enc.encounterNo)}</span>
+              <span><b>DOS</b> {usDate(enc.date)}</span>
             </span>
           </div>
           <span className="spacer" />
           {active && (signed
             ? <span className="nt-status-pill signed"><span className="nt-signed-dot" />Signed · {active.signedByName || 'MD'}</span>
             : <span className="nt-status-pill draft">Draft</span>)}
-          <button className="btn sm nt2-new" onClick={() => setPicking(true)}>+ New note</button>
         </div>
 
         <section className="nt-main">
-          {loading && !active ? (
+          {(loading && !active) || (busy && !active) || (!active && !!encounter?.startNoteType && !autoStartedRef.current) ? (
+            // A note type was chosen from the dropdown (or is being created) — show a
+            // loader straight through to the template, never the "Start a note" chooser.
             <div className="nt-placeholder"><span className="spinner dark" /></div>
           ) : !active ? (
-            <div className="nt-placeholder">
-              <div className="nt-ph-icon" aria-hidden="true" />
-              <div>Click <strong>+ New note</strong> to create a clinical note.</div>
-              <div className="nt-ph-sub">CMS-compliant clinical templates · MD sign-off required for billing</div>
+            <div className="nt-doc-scroll">
+              <article className="pf-doc">
+                <PFDetails encounter={enc} noteLabel="—" ageStr={ageStr} seenBy={seenBy} statusStr={statusStr} />
+                <section className="pf-card pf-start">
+                  <div className="pf-card-h">Start a note</div>
+                  <div className="pf-start-sub">Choose a note type to begin documenting this encounter — every section is free-form.</div>
+                  <div className="pf-start-choices">
+                    {typeList.map((t) => (
+                      <button key={t.noteType} type="button" className="pf-start-btn" disabled={busy} onClick={() => createNote(t.noteType)}>
+                        <span className="pf-start-btn-t">{t.label}</span>
+                        <span className="pf-start-btn-s">{t.category}</span>
+                      </button>
+                    ))}
+                  </div>
+                </section>
+              </article>
             </div>
           ) : (
             <>
@@ -630,80 +616,71 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
                 <div className="nt-subtabs">
                   <button className={`nt-tab ${tab === 'note' ? 'is-on' : ''}`} onClick={() => setTab('note')}>Clinical Note</button>
                   <button className={`nt-tab ${tab === 'rx' ? 'is-on' : ''}`} onClick={() => setTab('rx')}>Prescriptions{content.prescriptions.length ? ` (${content.prescriptions.length})` : ''}</button>
+                  <button className={`nt-tab ${tab === 'coding' ? 'is-on' : ''}`} onClick={() => setTab('coding')}>Coding &amp; Billing</button>
                 </div>
                 <span className="nt-subcat">{noteMeta?.category}</span>
               </div>
 
               {tab === 'note' ? (
                 <div className="nt-doc-scroll">
-                  <article className={`nt-doc-page ${readOnly ? 'is-signed' : 'is-editing'}`}>
-                    <header className="nt-page-head">
-                      {encounter.facilityName && <div className="nt-page-fac">{encounter.facilityName}</div>}
-                      <div className="nt-page-title">{noteMeta?.label}</div>
-                      {noteMeta && (
-                        <div className="nt-page-bill">
-                          <span className="nt-page-bill-cpt">CPT {noteMeta.cpt}</span>
-                          <span className="nt-page-bill-cat">{noteMeta.category}</span>
+                  <article className={`pf-doc ${readOnly ? 'is-signed' : 'is-editing'}`}>
+                    <PFDetails encounter={enc} noteLabel={noteMeta?.label || 'Clinical Note'} ageStr={ageStr} seenBy={seenBy} statusStr={statusStr} />
+
+                    <section className="pf-card">
+                      <div className="pf-card-h">Chief complaint</div>
+                      {readOnly ? (
+                        <div className="pf-body">{(content.sections.chiefComplaint || '').trim()
+                          ? content.sections.chiefComplaint.split('\n').map((ln, i) => <p key={i}>{ln || ' '}</p>)
+                          : <span className="pf-muted">No acute complaints</span>}</div>
+                      ) : (
+                        <AutoText rows={2} value={content.sections.chiefComplaint || ''} placeholder="Chief complaint — e.g. No acute complaints" onChange={(v) => setSection('chiefComplaint', v)} />
+                      )}
+                    </section>
+
+                    <section className="pf-card pf-note">
+                      {noteSecs.length ? noteSecs.map((s) => (s.key === 'vitals' ? (
+                        <div className="pf-sec" key="vitals">
+                          <div className="pf-sec-h"><span>Vitals</span>{!readOnly && <button type="button" className="pf-sec-x" title="Remove Vitals" onClick={() => removeSection('vitals')}>×</button>}</div>
+                          {readOnly ? (
+                            <div className="pf-body"><p>{VITALS.map((v) => (content.vitals?.[v.k] ? `${v.label}: ${content.vitals[v.k]}` : null)).filter(Boolean).join('    ·    ') || '—'}</p></div>
+                          ) : (
+                            <div className="nt-vgrid">
+                              {VITALS.map((v) => (
+                                <div className="nt-vfld" key={v.k}>
+                                  <label>{v.label}{v.range ? <span className="nt-vrange">{v.range}</span> : null}</label>
+                                  <input className="input" value={content.vitals?.[v.k] || ''} placeholder={v.ph} onChange={(e) => setVital(v.k, e.target.value)} />
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="pf-sec" key={s.key}>
+                          <div className="pf-sec-h"><span>{s.label}</span>{!readOnly && <button type="button" className="pf-sec-x" title={`Remove ${s.label}`} onClick={() => removeSection(s.key)}>×</button>}</div>
+                          {readOnly ? (
+                            <div className="pf-body">
+                              {(content.sections[s.key] || '').trim()
+                                ? (content.sections[s.key]).split('\n').map((ln, i) => <p key={i}>{ln || ' '}</p>)
+                                : <span className="pf-muted">—</span>}
+                            </div>
+                          ) : (
+                            <AutoText rows={s.rows >= 4 ? 4 : 2} value={content.sections[s.key] || ''} placeholder={s.prompt} onChange={(v) => setSection(s.key, v)} />
+                          )}
+                        </div>
+                      ))) : <div className="pf-body"><span className="pf-muted">This note has no documentation.</span></div>}
+
+                      {signed && (
+                        <div className="pf-sign">
+                          <div className="pf-sign-line" />
+                          <div className="pf-sign-name">Electronically signed by {active.signedByName || 'Provider'}</div>
+                          <div className="pf-sign-sub">Finalized and ready for billing.</div>
                         </div>
                       )}
-                      <div className="nt-page-meta">
-                        <span><b>Patient</b> {encounter.patientName || '—'}</span>
-                        <span><b>MRN</b> {encounter.mrn || '—'}</span>
-                        <span><b>Encounter ID</b> {encNo(encounter.encounterNo)}</span>
-                        <span><b>Date of Service</b> {usDate(encounter.date)}</span>
-                      </div>
-                    </header>
-
-                    {vitalsShown && (
-                      <section className={`nt-sec ${readOnly ? '' : 'nt-vitals-sec'}`}>
-                        <h4 className="nt-sec-h">
-                          <span className="nt-sec-no">01</span>
-                          {!readOnly && <SectionIcon k="vitals" />}
-                          <span className="nt-sec-lbl">Vital Signs</span>
-                        </h4>
-                        {readOnly ? (
-                          <div className="nt-sec-body"><p>{VITALS.map((v) => (content.vitals?.[v.k] ? `${v.label}: ${content.vitals[v.k]}` : null)).filter(Boolean).join('    ·    ')}</p></div>
-                        ) : (
-                          <div className="nt-vgrid">
-                            {VITALS.map((v) => (
-                              <div className="nt-vfld" key={v.k}>
-                                <label>{v.label}</label>
-                                <input className="input" value={content.vitals?.[v.k] || ''} placeholder={v.ph} onChange={(e) => setVital(v.k, e.target.value)} />
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </section>
-                    )}
-
-                    {bodySections.map((s, i) => (
-                      <section className="nt-sec" key={s.key}>
-                        <h4 className="nt-sec-h">
-                          <span className="nt-sec-no">{String((vitalsShown ? 2 : 1) + i).padStart(2, '0')}</span>
-                          {!readOnly && <SectionIcon k={s.key} />}
-                          <span className="nt-sec-lbl">{s.label}</span>
-                        </h4>
-                        {readOnly ? (
-                          <div className="nt-sec-body">
-                            {(content.sections[s.key] || '').trim()
-                              ? (content.sections[s.key]).split('\n').map((ln, i) => <p key={i}>{ln || ' '}</p>)
-                              : <p className="nt-sec-blank">—</p>}
-                          </div>
-                        ) : (
-                          <AutoText rows={s.rows >= 4 ? 4 : 2} value={content.sections[s.key] || ''} placeholder={s.prompt} onChange={(v) => setSection(s.key, v)} />
-                        )}
-                      </section>
-                    ))}
-
-                    {signed && (
-                      <footer className="nt-page-sign">
-                        <div className="nt-sign-line" />
-                        <div className="nt-sign-name">Electronically signed by {active.signedByName || 'Provider'}, MD</div>
-                        <div className="nt-sign-sub">Finalized and ready for billing.</div>
-                      </footer>
-                    )}
+                    </section>
                   </article>
                 </div>
+              ) : tab === 'coding' ? (
+                <CodingPanel noteUuid={active?.uuid} readOnly={readOnly} enc={enc} toast={toast} />
               ) : (
                 <div className="nt-doc-scroll rx2-scroll">
                   <div className="rx2">
@@ -752,143 +729,6 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
       </div>
     </Modal>
     </>
-  );
-}
-
-const SERVICE_LABEL = { snf: 'Skilled Nursing Facility', pain: 'Pain Management', tcm: 'Transitional Care Management' };
-
-/**
- * Pop-up: choose the note template to create. The list is fetched from the note-
- * template registry (DB) filtered to the current provider's SERVICE LINE — an SNF
- * provider sees only SNF templates, a Pain provider only Pain templates. Access is
- * also enforced on the server when the note is created.
- */
-// Session cache for the provider's template list. The set is fixed per provider for the
-// session, so reopening the picker is INSTANT (no refetch, no spinner). Invalidated by a full
-// page reload or the explicit Retry; the backend also caches the underlying service lines.
-let TEMPLATE_CACHE = null; // { templates, serviceLines, exp }
-const TEMPLATE_CACHE_TTL_MS = 5 * 60 * 1000;
-
-function NoteTypePicker({ onPick, onClose, busy }) {
-  const [q, setQ] = useState('');
-  const cacheHit = TEMPLATE_CACHE && TEMPLATE_CACHE.exp > Date.now() ? TEMPLATE_CACHE : null;
-  const [templates, setTemplates] = useState(cacheHit ? cacheHit.templates : null); // null = loading
-  const [serviceLines, setServiceLines] = useState(cacheHit ? cacheHit.serviceLines : []); // granted service line(s)
-  const [loadError, setLoadError] = useState(false);
-  const [reload, setReload] = useState(0);
-
-  useEffect(() => {
-    let active = true;
-    // Serve instantly from the session cache when fresh (skip the network entirely).
-    if (reload === 0 && TEMPLATE_CACHE && TEMPLATE_CACHE.exp > Date.now()) {
-      setTemplates(TEMPLATE_CACHE.templates); setServiceLines(TEMPLATE_CACHE.serviceLines);
-      return () => { active = false; };
-    }
-    setTemplates(null); setLoadError(false);
-    // The server template registry is the SINGLE SOURCE OF TRUTH — no client-side fallback.
-    // If it can't be loaded, surface a clear error and let the provider retry, rather than
-    // showing a possibly-stale local list for a real medical record.
-    encountersApi.noteTemplates()
-      .then(({ data }) => {
-        const sl = data.serviceLines || (data.serviceLine ? [data.serviceLine] : []);
-        TEMPLATE_CACHE = { templates: data.templates || [], serviceLines: sl, exp: Date.now() + TEMPLATE_CACHE_TTL_MS };
-        if (active) { setTemplates(data.templates || []); setServiceLines(sl); }
-      })
-      .catch(() => { if (active) { setTemplates([]); setLoadError(true); } });
-    return () => { active = false; };
-  }, [reload]);
-
-  const query = q.trim().toLowerCase();
-  const match = (t) => !query
-    || (t.label || '').toLowerCase().includes(query)
-    || (t.category || '').toLowerCase().includes(query)
-    || String(t.cpt || '').toLowerCase().includes(query);
-  const row = (t) => (
-    <button key={t.noteType} type="button" className="ntp-row" disabled={busy} onClick={() => onPick(t.noteType)}>
-      <span className="ntp-row-ic" aria-hidden="true">
-        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M7 3h7l4 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z" /><path d="M14 3v4h4M9 13h6M9 16.5h4" />
-        </svg>
-      </span>
-      <span className="ntp-row-main">
-        <span className="ntp-row-title">{t.label}</span>
-        <span className="ntp-row-cat">{t.category}</span>
-      </span>
-      <span className="ntp-row-cpt">{t.cpt}</span>
-      <span className="ntp-row-arrow" aria-hidden="true">
-        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><path d="M3 8h9M8.5 4l4 4-4 4" /></svg>
-      </span>
-    </button>
-  );
-  const list = templates || [];
-  const common = list.filter((t) => t.menuGroup === 'common' && match(t));
-  const more = list.filter((t) => t.menuGroup !== 'common' && match(t));
-  const all = list.filter(match);
-  const searching = !!query;
-  return (
-    <Modal title="Create a New Note" width={840} onClose={onClose} footer={<>
-      <span className="ntp-foot">CMS-compliant {serviceLines.length ? serviceLines.map((l) => SERVICE_LABEL[l] || l).join(' & ') : 'clinical'} templates · MD sign-off required for billing</span>
-      <span className="spacer" />
-      <button className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
-    </>}>
-      <div className="ntp">
-        {busy && (
-          <div className="ntp-busy" role="status" aria-live="polite">
-            <div className="ntl-doc" aria-hidden="true">
-              <span className="ntl-accent" />
-              <span className="ntl-line l1" />
-              <span className="ntl-line l2" />
-              <span className="ntl-line l3" />
-              <span className="ntl-line l4" />
-              <span className="ntl-scan" />
-            </div>
-            <div className="ntp-busy-t">Preparing your template</div>
-            <div className="ntp-busy-s">Setting up the note and carrying forward the current medications</div>
-          </div>
-        )}
-        <div className="ntp-search">
-          <svg className="ntp-search-ic" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.2-3.2" /></svg>
-          <input className="ntp-search-in" autoFocus placeholder="Search note templates by name, category or CPT…" value={q} onChange={(e) => setQ(e.target.value)} />
-        </div>
-        {templates === null ? (
-          <div className="ntp-skel" role="status" aria-label="Loading templates">
-            <div className="ntp-skel-group"><span className="ntp-skel-lbl" /><i /></div>
-            {[0, 1, 2, 3, 4].map((n) => (
-              <div className="ntp-skel-row" key={n} style={{ '--d': `${n * 0.08}s` }}>
-                <span className="ntp-skel-ic" />
-                <span className="ntp-skel-main"><span className="ntp-skel-t" /><span className="ntp-skel-c" /></span>
-                <span className="ntp-skel-cpt" />
-              </div>
-            ))}
-          </div>
-        ) : loadError ? (
-          <div className="ntp-empty ntp-error">
-            <div>Couldn’t load your note templates. Please check your connection and try again.</div>
-            <button type="button" className="btn ghost sm" onClick={() => setReload((r) => r + 1)}>Retry</button>
-          </div>
-        ) : list.length === 0 ? (
-          <div className="ntp-empty">No note templates are available for your specialty.</div>
-        ) : searching ? (
-          <div className="ntp-sec">
-            <div className="ntp-group"><span>{all.length} result{all.length === 1 ? '' : 's'}</span><i /></div>
-            {all.length ? <div className="ntp-list">{all.map(row)}</div> : <div className="ntp-empty">No templates match “{q}”.</div>}
-          </div>
-        ) : (
-          <>
-            <div className="ntp-sec">
-              <div className="ntp-group"><span>Common</span><i /></div>
-              <div className="ntp-list">{common.map(row)}</div>
-            </div>
-            {more.length > 0 && (
-              <div className="ntp-sec">
-                <div className="ntp-group"><span>More templates</span><i /></div>
-                <div className="ntp-list">{more.map(row)}</div>
-              </div>
-            )}
-          </>
-        )}
-      </div>
-    </Modal>
   );
 }
 
@@ -955,6 +795,278 @@ function PharmacyBanner({ pharmacy: p }) {
           </>
         ) : (
           <span className="rx2-pharm-sub">No pharmacy benefit returned by the payer. Run eligibility on the Benefits tab to populate the pharmacy vendor.</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Type-ahead search box for a terminology (SNOMED / CPT). Debounced; calls `search(q)` → rows. */
+function CodeSearch({ placeholder, search, onPick, disabled, render }) {
+  const [q, setQ] = useState('');
+  const [results, setResults] = useState([]);
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (q.trim().length < 2) { setResults([]); setOpen(false); return undefined; }
+    let a = true; setBusy(true);
+    const t = setTimeout(async () => {
+      try { const rows = await search(q.trim()); if (a) { setResults(rows); setOpen(true); } }
+      catch { if (a) setResults([]); }
+      finally { if (a) setBusy(false); }
+    }, 300);
+    return () => { a = false; clearTimeout(t); };
+  }, [q]); // eslint-disable-line react-hooks/exhaustive-deps
+  return (
+    <div className="cq-search">
+      <input className="input" placeholder={placeholder} value={q} disabled={disabled}
+        onChange={(e) => setQ(e.target.value)} onFocus={() => results.length && setOpen(true)} />
+      {busy && <span className="cq-busy" aria-hidden="true">⋯</span>}
+      {open && results.length > 0 && (
+        <div className="cq-menu">
+          {results.map((r, i) => (
+            <button key={i} type="button" className="cq-opt"
+              onClick={() => { onPick(r); setQ(''); setResults([]); setOpen(false); }}>
+              {render(r)}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const SEV_RANK = { error: 0, warning: 1, info: 2 };
+
+/**
+ * Coding & Billing panel for a note — Medicare Part B, Central FL. Diagnoses are captured
+ * SNOMED-first and auto-mapped to a billable ICD-10-CM (official complex map); procedures are
+ * CPT. Codes autosave to the note; the claim is scrubbed live against NCCI PTP/MUE, ICD
+ * specificity/age-sex, and First Coast (FL) LCD/Article medical necessity. Real data only.
+ */
+function CodingPanel({ noteUuid, readOnly, enc, toast }) {
+  const [dx, setDx] = useState([]);
+  const [px, setPx] = useState([]);
+  const [scrub, setScrub] = useState(null);
+  const [scrubbing, setScrubbing] = useState(false);
+  const [predicting, setPredicting] = useState(false);
+  const [unmatched, setUnmatched] = useState([]);
+  const loaded = useRef(false);
+  const saveT = useRef(null);
+
+  useEffect(() => {
+    loaded.current = false; setDx([]); setPx([]); setScrub(null); setUnmatched([]);
+    if (!noteUuid) return undefined;
+    let a = true;
+    encountersApi.getNoteCodes(noteUuid).then(({ data }) => {
+      if (!a) return;
+      const d = data.diagnoses || []; const p = data.procedures || [];
+      setDx(d); setPx(p);
+      loaded.current = true;
+      if (d.length || p.length) runScrub();
+      else if (!readOnly) runPredict(); // no codes yet → auto-suggest from the note content
+    }).catch(() => { if (a) loaded.current = true; });
+    return () => { a = false; };
+  }, [noteUuid]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const runScrub = async () => {
+    if (!noteUuid) return;
+    setScrubbing(true);
+    try {
+      const { data } = await encountersApi.scrubNote(noteUuid, { age: enc?.ageYears, sex: enc?.sex });
+      setScrub(data);
+    } catch { /* non-fatal: scrub is advisory */ } finally { setScrubbing(false); }
+  };
+
+  // Deterministic auto-coding: read the note and MERGE suggested billable diagnoses + the visit
+  // charge into the panel (never overwrites codes the coder already added). The coder confirms.
+  const runPredict = async () => {
+    if (!noteUuid || readOnly) return;
+    setPredicting(true);
+    try {
+      const { data } = await encountersApi.predictCodes(noteUuid);
+      setDx((cur) => {
+        const have = new Set(cur.map((d) => d.icd));
+        const add = (data.diagnoses || []).filter((d) => d.icd && !have.has(d.icd)).map((d, k) => ({
+          icd: d.icd, description: d.description, snomedCode: d.snomedCode || null, snomedTerm: d.snomedTerm || null,
+          candidates: [], contextDependent: d.contextDependent, primary: cur.length === 0 && k === 0, suggested: true,
+        }));
+        return [...cur, ...add];
+      });
+      setPx((cur) => {
+        const have = new Set(cur.map((p) => p.cpt));
+        const add = (data.procedures || []).filter((p) => p.cpt && !have.has(p.cpt)).map((p) => ({
+          cpt: p.cpt, description: p.description, modifiers: p.modifiers || '', units: p.units || 1, suggested: true, basis: p.basis, confirm: p.confirm,
+        }));
+        return [...cur, ...add];
+      });
+      setUnmatched(data.unmatched || []);
+      loaded.current = true;
+    } catch (e) { toast.error(`Couldn’t suggest codes: ${toApiError(e).message}`); }
+    finally { setPredicting(false); }
+  };
+
+  // Autosave codes (debounced), then re-scrub.
+  useEffect(() => {
+    if (!loaded.current || readOnly || !noteUuid) return undefined;
+    clearTimeout(saveT.current);
+    saveT.current = setTimeout(async () => {
+      try {
+        const clean = {
+          diagnoses: dx.map((d) => ({ icd: d.icd, description: d.description, snomedCode: d.snomedCode, snomedTerm: d.snomedTerm, primary: !!d.primary })),
+          procedures: px.map((p) => ({ cpt: p.cpt, description: p.description, modifiers: p.modifiers, units: p.units })),
+        };
+        await encountersApi.saveNoteCodes(noteUuid, clean);
+        runScrub();
+      } catch (e) { toast.error(`Couldn’t save codes: ${toApiError(e).message}`); }
+    }, 700);
+    return () => clearTimeout(saveT.current);
+  }, [dx, px]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function addDx(sct) {
+    if (dx.some((d) => d.snomedCode === sct.code)) return;
+    try {
+      const { data } = await terminologyApi.snomedToIcd(sct.code);
+      if (!data.primary) { toast.error(`No billable ICD-10-CM map for “${sct.name}”.`); return; }
+      setDx((cur) => [...cur, {
+        snomedCode: sct.code, snomedTerm: sct.name,
+        icd: data.primary.icd, description: data.primary.description,
+        candidates: data.candidates || [], contextDependent: data.primary.contextDependent, advice: data.primary.advice,
+        primary: cur.length === 0,
+      }]);
+    } catch (e) { toast.error(`SNOMED→ICD mapping failed: ${toApiError(e).message}`); }
+  }
+  // Add a supporting diagnosis directly by ICD-10 (e.g. from a medical-necessity suggestion).
+  const addIcdDx = (icd, description) => {
+    if (dx.some((d) => d.icd === icd)) return;
+    setDx((cur) => [...cur, { icd, description, snomedCode: null, snomedTerm: null, candidates: [], primary: cur.length === 0 }]);
+  };
+  const setDxIcd = (i, icd) => setDx((cur) => cur.map((d, j) => (j === i ? { ...d, icd, description: (d.candidates.find((c) => c.icd === icd)?.description) || d.description } : d)));
+  const setPrimary = (i) => setDx((cur) => cur.map((d, j) => ({ ...d, primary: j === i })));
+  const removeDx = (i) => setDx((cur) => cur.filter((_, j) => j !== i).map((d, j) => ({ ...d, primary: cur[i]?.primary && j === 0 ? true : d.primary })));
+  const addPx = (cpt) => { if (!px.some((p) => p.cpt === cpt.code)) setPx((cur) => [...cur, { cpt: cpt.code, description: cpt.long || cpt.name || cpt.description, modifiers: '', units: 1, billable: cpt.billable, statusMeaning: cpt.statusMeaning }]); };
+  const setPxField = (i, k, v) => setPx((cur) => cur.map((p, j) => (j === i ? { ...p, [k]: v } : p)));
+  const removePx = (i) => setPx((cur) => cur.filter((_, j) => j !== i));
+
+  const findings = (scrub?.findings || []).slice().sort((a, b) => (SEV_RANK[a.severity] - SEV_RANK[b.severity]));
+  const sum = scrub?.summary || { errors: 0, warnings: 0, info: 0 };
+  const hasPrimary = dx.some((d) => d.primary);
+
+  return (
+    <div className="nt-doc-scroll cq-scroll">
+      <div className="cq">
+        <div className="cq-bar">
+          <span className={`cq-pill ${sum.errors ? 'is-err' : dx.length ? 'is-ok' : ''}`}>
+            {sum.errors ? `${sum.errors} error${sum.errors > 1 ? 's' : ''}` : dx.length ? 'Ready to bill' : 'No codes yet'}
+          </span>
+          {sum.warnings ? <span className="cq-pill is-warn">{sum.warnings} warning{sum.warnings > 1 ? 's' : ''}</span> : null}
+          {scrub?.raf && scrub.raf.raf > 0 ? (
+            <span className="cq-pill cq-raf" title={`CMS-HCC V28 · segment ${scrub.raf.segment}${scrub.raf.segmentBasis ? ` (${scrub.raf.segmentBasis})` : ''} · HCCs ${scrub.raf.hccs.join(', ') || 'none'}`}>RAF {scrub.raf.raf.toFixed(3)}</span>
+          ) : null}
+          <span className="cq-jur">Medicare Part B · Central FL (First Coast)</span>
+          <span className="spacer" />
+          {predicting && <span className="cq-scrubbing">Auto-coding…</span>}
+          {scrubbing ? <span className="cq-scrubbing">Scrubbing…</span>
+            : <button type="button" className="btn ghost sm" onClick={runScrub} disabled={!dx.length && !px.length}>Re-scrub</button>}
+        </div>
+
+        {/* Diagnoses — SNOMED-first, auto-mapped to billable ICD-10-CM */}
+        <section className="cq-sec">
+          <div className="cq-sec-h"><span>Diagnoses</span><span className="cq-sec-sub">SNOMED CT → billable ICD-10-CM{dx.length ? ` · ${dx.length}` : ''}</span></div>
+          {!readOnly && (
+            <CodeSearch placeholder="Search SNOMED CT — e.g. pneumonia, type 2 diabetes…"
+              search={async (q) => (await terminologyApi.snomed(q, 12)).data.results}
+              onPick={addDx}
+              render={(r) => (<><span className="cq-code">{r.code}</span><span className="cq-name">{r.name}</span></>)} />
+          )}
+          {unmatched.length > 0 && (
+            <div className="cq-empty" style={{ color: '#b45309' }}>Needs coder review — no billable code auto-matched for: {unmatched.join('; ')}</div>
+          )}
+          {dx.length === 0 ? <div className="cq-empty">No diagnoses. Search a SNOMED concept, or use “Suggest from note”.</div> : (
+            <div className="cq-list">
+              {dx.map((d, i) => (
+                <div className={`cq-row ${d.primary ? 'is-primary' : ''}`} key={`${d.snomedCode || d.icd}-${i}`}>
+                  <label className="cq-primary" title="Primary diagnosis">
+                    <input type="radio" name="cq-primary" checked={!!d.primary} disabled={readOnly} onChange={() => setPrimary(i)} />
+                  </label>
+                  <div className="cq-row-main">
+                    <div className="cq-row-top">
+                      <span className="cq-icd">{d.icd}</span>
+                      <span className="cq-desc">{d.description || '—'}</span>
+                      {d.contextDependent && <span className="cq-flag" title={d.advice || ''}>context-dependent</span>}
+                    </div>
+                    <div className="cq-row-sub">
+                      {d.snomedTerm && <span className="cq-sct">SNOMED {d.snomedCode} · {d.snomedTerm}</span>}
+                      {!readOnly && d.candidates && d.candidates.length > 1 && (
+                        <select className="cq-mini" value={d.icd} onChange={(e) => setDxIcd(i, e.target.value)}>
+                          {d.candidates.map((c) => <option key={c.icd} value={c.icd}>{c.icd} — {c.description || c.advice || ''}</option>)}
+                        </select>
+                      )}
+                    </div>
+                  </div>
+                  {!readOnly && <button type="button" className="cq-x" title="Remove" onClick={() => removeDx(i)}>✕</button>}
+                </div>
+              ))}
+            </div>
+          )}
+          {dx.length > 0 && !hasPrimary && <div className="cq-hint is-warn">Select a primary diagnosis.</div>}
+        </section>
+
+        {/* Procedures — CPT/HCPCS */}
+        <section className="cq-sec">
+          <div className="cq-sec-h"><span>Procedures</span><span className="cq-sec-sub">CPT / HCPCS{px.length ? ` · ${px.length}` : ''}</span></div>
+          {!readOnly && (
+            <CodeSearch placeholder="Search CPT — e.g. 99308, nursing facility, trigger point…"
+              search={async (q) => (await terminologyApi.cpt(q, 12)).data.results}
+              onPick={addPx}
+              render={(r) => (<><span className="cq-code">{r.code}</span><span className="cq-name">{r.long || r.short}</span>{r.billable === false ? <span className="cq-nopay" title={r.statusMeaning || ''}>not payable</span> : null}</>)} />
+          )}
+          {px.length === 0 ? <div className="cq-empty">No procedures. Search a CPT/HCPCS code to bill for this encounter.</div> : (
+            <div className="cq-list">
+              {px.map((p, i) => (
+                <div className="cq-row" key={`${p.cpt}-${i}`}>
+                  <div className="cq-row-main">
+                    <div className="cq-row-top"><span className="cq-icd">{p.cpt}</span><span className="cq-desc">{p.description || '—'}</span>{p.billable === false ? <span className="cq-nopay" title={p.statusMeaning || ''}>not separately payable</span> : null}</div>
+                    <div className="cq-row-sub cq-proc-fields">
+                      <label>Mod<input className="cq-mini" value={p.modifiers || ''} disabled={readOnly} maxLength={8} placeholder="25" onChange={(e) => setPxField(i, 'modifiers', e.target.value)} /></label>
+                      <label>Units<input className="cq-mini cq-units" type="number" min="1" value={p.units || 1} disabled={readOnly} onChange={(e) => setPxField(i, 'units', Number(e.target.value) || 1)} /></label>
+                    </div>
+                  </div>
+                  {!readOnly && <button type="button" className="cq-x" title="Remove" onClick={() => removePx(i)}>✕</button>}
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        {/* Live claim scrub findings */}
+        {findings.length > 0 && (
+          <section className="cq-sec">
+            <div className="cq-sec-h"><span>Claim edits</span><span className="cq-sec-sub">NCCI PTP/MUE · ICD edits · LCD/NCD medical necessity</span></div>
+            <div className="cq-findings">
+              {findings.map((f, i) => (
+                <div className={`cq-finding sev-${f.severity}`} key={i}>
+                  <span className="cq-sev">{f.severity}</span>
+                  <div className="cq-finding-body">
+                    <span className="cq-finding-type">{f.type.replace(/_/g, ' ')}</span>
+                    <span className="cq-finding-msg">{f.message}</span>
+                    {!readOnly && f.coveredExamples && f.coveredExamples.length > 0 && (
+                      <div className="cq-sugg">
+                        <span className="cq-sugg-lbl">Add supporting Dx:</span>
+                        {f.coveredExamples.slice(0, 8).map((c) => (
+                          <button type="button" className="cq-chip" key={c.icd} title={c.description || ''}
+                            onClick={() => addIcdDx(c.icd, c.description)}>+ {c.icd}</button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+        {scrub && findings.length === 0 && (dx.length > 0 || px.length > 0) && (
+          <div className="cq-clean">✓ No claim edits triggered — codes pass NCCI, MUE, ICD, and First Coast (FL) medical-necessity checks.</div>
         )}
       </div>
     </div>

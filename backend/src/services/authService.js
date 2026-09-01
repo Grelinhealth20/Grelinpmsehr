@@ -36,23 +36,41 @@ async function logAttempt(email, ip, successful) {
 }
 
 /** Issue an access token and a persisted, rotatable refresh token. */
-async function issueSession(user, ctx) {
-  const accessToken = signAccessToken(user);
-  const jti = uuidv4();
-  const refreshToken = signRefreshToken(jti, user.uuid);
-  const expiresAt = new Date(Date.now() + config.jwt.refreshTtl * 1000);
-  await execute(
-    `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, ip, user_agent)
-     VALUES (:uid, :hash, :exp, :ip, :ua)`,
-    {
-      uid: user.id,
-      hash: sha256Hex(refreshToken),
-      exp: expiresAt,
-      ip: ctx?.ip || null,
-      ua: ctx?.userAgent ? ctx.userAgent.slice(0, 255) : null,
-    },
-  );
+async function issueSession(user, ctx, { mfa = 'ok', withRefresh = true } = {}) {
+  const accessToken = signAccessToken(user, { mfa });
+  // A half-authenticated (MFA-pending/setup) session is access-only and short-lived — no refresh
+  // token is minted, so it can never be persisted or refreshed into a full session.
+  let refreshToken = null;
+  if (withRefresh) {
+    const jti = uuidv4();
+    refreshToken = signRefreshToken(jti, user.uuid);
+    const expiresAt = new Date(Date.now() + config.jwt.refreshTtl * 1000);
+    await execute(
+      `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, ip, user_agent)
+       VALUES (:uid, :hash, :exp, :ip, :ua)`,
+      {
+        uid: user.id,
+        hash: sha256Hex(refreshToken),
+        exp: expiresAt,
+        ip: ctx?.ip || null,
+        ua: ctx?.userAgent ? ctx.userAgent.slice(0, 255) : null,
+      },
+    );
+  }
   return { accessToken, refreshToken };
+}
+
+/** MFA stage for a freshly-authenticated user: 'ok' (not required/satisfied), 'setup' (enrolled
+ *  policy but no confirmed authenticator yet), or 'pending' (enrolled — must enter a code). */
+export function mfaStageFor(user) {
+  if (!user.mfa_enabled) return 'ok';
+  return user.mfa_confirmed_at ? 'pending' : 'setup';
+}
+
+/** Re-issue a FULL session (with refresh) for a user who has just satisfied MFA. Used by the MFA
+ *  verify/enroll endpoints. Strictly for the passed user — never cross-user. */
+export async function issueFullSession(user, ctx) {
+  return issueSession(user, ctx, { mfa: 'ok', withRefresh: true });
 }
 
 export async function login(email, password, ctx = {}) {
@@ -131,18 +149,24 @@ export async function login(email, password, ctx = {}) {
 
   await recordSuccessfulLogin(user.id);
   await logAttempt(email, ctx.ip, true);
-  const session = await issueSession(user, ctx);
+  // MFA: if required, issue an access-only (no refresh) session in the setup/pending stage. Full
+  // access is gated by requirePasswordSettled until the user completes MFA (which re-issues a full
+  // session). Never affects a different user — everything keys off THIS authenticated user.
+  const mfaStage = mfaStageFor(user);
+  const session = await issueSession(user, ctx, { mfa: mfaStage, withRefresh: mfaStage === 'ok' });
   await recordAudit({
     actorUserId: user.id,
     action: 'auth.login.success',
     ip: ctx.ip,
     userAgent: ctx.userAgent,
+    metadata: mfaStage === 'ok' ? undefined : { mfaStage },
   });
 
   return {
     user,
     ...session,
     mustResetPassword: !!user.must_reset_password,
+    mfaStage,
   };
 }
 

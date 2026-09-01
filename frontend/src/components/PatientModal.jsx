@@ -1,8 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import Modal from './Modal.jsx';
 import { useToast } from './Toast.jsx';
-import { patientsApi, toApiError } from '../lib/api.js';
+import { patientsApi, encountersApi, toApiError } from '../lib/api.js';
 import BenefitsVerification from './BenefitsVerification.jsx';
+import { EncounterNotesModal, usDate, encNo, loadNoteDefs } from './EncounterNotes.jsx';
+import { NOTE_TYPES } from '../lib/noteTemplates.js';
+
+const ENC_PER_PAGE = 25;
+const procedureLabel = (r) => (r.noteTypes ? r.noteTypes.split(',').map((c) => NOTE_TYPES[c]?.label || c).join(', ') : '—');
 
 const EMPTY = {
   demographics: { firstName: '', lastName: '', dob: '', gender: 'unknown', phone: '', email: '', address: '', city: '', state: '', zip: '', ssn: '' },
@@ -315,7 +320,7 @@ function AutofillDrop({ onFile, busy }) {
  * onSaved(patient) fires on every successful create/update so callers (e.g. the
  * appointment popup) can link to the patient.
  */
-export default function PatientModal({ uuid = null, docMode = 'license', onClose, onSaved }) {
+export default function PatientModal({ uuid = null, docMode = 'license', initialTab = 'facesheet', onClose, onSaved }) {
   const toast = useToast();
   const [pUuid, setPUuid] = useState(uuid);
   const [form, setForm] = useState(clone(EMPTY));
@@ -324,8 +329,12 @@ export default function PatientModal({ uuid = null, docMode = 'license', onClose
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(!!uuid);
   const [extracting, setExtracting] = useState(false);
-  const [viewTab, setViewTab] = useState('facesheet'); // 'facesheet' | 'benefits'
+  const [viewTab, setViewTab] = useState(uuid ? initialTab : 'facesheet'); // 'facesheet' | 'benefits' | 'encounters'
   const [downloading, setDownloading] = useState(false);
+  const [pendingNewEnc, setPendingNewEnc] = useState(false); // header "New encounter" → create + open on the Encounters tab
+  const [pendingNewEncType, setPendingNewEncType] = useState(null); // note type chosen from the dropdown (or null = pick in editor)
+  const [noteMenuOpen, setNoteMenuOpen] = useState(false);
+  const [noteTypeDefs, setNoteTypeDefs] = useState([]); // backend note types for the dropdown
 
   // Download the record that matches the tab in view — the Face Sheet, or the
   // benefits/eligibility document. Both are facility-branded, grayscale PDFs.
@@ -359,6 +368,13 @@ export default function PatientModal({ uuid = null, docMode = 'license', onClose
     }
     return () => { active = false; };
   }, [uuid, toast]);
+
+  // Backend-authoritative note types for the "New encounter" dropdown (shared, cached).
+  useEffect(() => {
+    let active = true;
+    loadNoteDefs().then((d) => { if (active) setNoteTypeDefs(d.list || []); }).catch(() => { /* retried on open */ });
+    return () => { active = false; };
+  }, []);
 
   const setD = (k, v) => setForm((f) => ({ ...f, demographics: { ...f.demographics, [k]: v } }));
   const setFac = (k, v) => setForm((f) => ({ ...f, facility: { ...f.facility, [k]: v } }));
@@ -499,6 +515,34 @@ export default function PatientModal({ uuid = null, docMode = 'license', onClose
               </span>
             </div>
             {mrn && <span className="fs-summary-mrn">MRN {mrn}</span>}
+            {pUuid && (
+              <div className="newenc-split">
+                <button type="button" className="newenc-main" onClick={() => { setNoteMenuOpen(false); setPendingNewEncType(null); setViewTab('encounters'); setPendingNewEnc(true); }}>
+                  New encounter
+                </button>
+                <button type="button" className={`newenc-caret ${noteMenuOpen ? 'is-open' : ''}`} aria-haspopup="menu" aria-expanded={noteMenuOpen} title="Start with a note type"
+                  onClick={() => { setNoteMenuOpen((o) => !o); if (noteTypeDefs.length === 0) loadNoteDefs().then((d) => setNoteTypeDefs(d.list || [])).catch(() => {}); }}>
+                  <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg>
+                </button>
+                {noteMenuOpen && (
+                  <>
+                    <div className="newenc-scrim" onClick={() => setNoteMenuOpen(false)} />
+                    <div className="newenc-menu" role="menu">
+                      <div className="newenc-menu-h">New encounter · start a note</div>
+                      {noteTypeDefs.length === 0 ? (
+                        <div className="newenc-menu-empty">Loading note types…</div>
+                      ) : noteTypeDefs.map((t) => (
+                        <button key={t.noteType} type="button" role="menuitem" className="newenc-menu-item"
+                          onClick={() => { setNoteMenuOpen(false); setPendingNewEncType(t.noteType); setViewTab('encounters'); setPendingNewEnc(true); }}>
+                          <span className="newenc-menu-lbl">{t.label}</span>
+                          <span className="newenc-menu-cat">{t.category}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="fs-vtabs" role="tablist">
@@ -514,6 +558,14 @@ export default function PatientModal({ uuid = null, docMode = 'license', onClose
               </svg>
               Benefits Information
             </button>
+            {pUuid && (
+              <button type="button" role="tab" aria-selected={viewTab === 'encounters'} className={`fs-vtab ${viewTab === 'encounters' ? 'is-on' : ''}`} onClick={() => setViewTab('encounters')}>
+                <svg className="fs-vtab-ic" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M8 3v3M16 3v3M4 8.5h16M5 5.5h14a1 1 0 0 1 1 1V19a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6.5a1 1 0 0 1 1-1Z" /><path d="M8 12h3M8 15.5h6" />
+                </svg>
+                Encounters
+              </button>
+            )}
           </div>
 
           {viewTab === 'facesheet' && (
@@ -690,8 +742,117 @@ export default function PatientModal({ uuid = null, docMode = 'license', onClose
             )}
           </div>
           )}
+
+          {viewTab === 'encounters' && pUuid && (
+            <EncountersTab
+              patientUuid={pUuid}
+              openNew={pendingNewEnc}
+              startNoteType={pendingNewEncType}
+              onOpenedNew={() => setPendingNewEnc(false)}
+              patient={{ patientUuid: pUuid, patientName: patientDisplayName({ demographics: form.demographics }), mrn, facilityName: form.facility.facilityName, dob: form.demographics.dob, gender: form.demographics.gender }}
+            />
+          )}
         </div>
       )}
     </Modal>
+  );
+}
+
+/**
+ * Encounters for a single patient — the full encounters table plus New Encounter,
+ * living inside the Face Sheet modal (next to Benefits Information). Server-paginated;
+ * New Encounter and note editing open scoped to this patient only.
+ */
+function EncountersTab({ patientUuid, patient, openNew = false, startNoteType = null, onOpenedNew }) {
+  const toast = useToast();
+  const [encs, setEncs] = useState(null);
+  const [encTotal, setEncTotal] = useState(0);
+  const [ePage, setEPage] = useState(1);
+  const [eLoading, setELoading] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [creating, setCreating] = useState(false);
+  const [notesEnc, setNotesEnc] = useState(null);
+
+  // Create a new encounter for this patient (dated today) and open its note editor — no
+  // dialog. If a note type was chosen from the dropdown, the editor auto-starts that note.
+  async function createEncounterNow(noteType = null) {
+    if (creating) return;
+    setCreating(true);
+    try {
+      const encounterDate = new Date().toISOString().slice(0, 10);
+      const { data } = await encountersApi.create({ patientUuid, encounterDate });
+      setRefreshKey((k) => k + 1);
+      setNotesEnc({ encounterUuid: data.encounter.uuid, encounterNo: data.encounter.encounterNo, patientUuid, date: encounterDate, patientName: patient.patientName, mrn: patient.mrn, facilityName: patient.facilityName, dob: patient.dob, gender: patient.gender, startNoteType: noteType || null });
+    } catch (e) { toast.error(toApiError(e).message); } finally { setCreating(false); }
+  }
+
+  // The "New encounter" button lives in the patient header. Clicking it (or a note type in
+  // its dropdown) switches to this tab and sets openNew → create the encounter and open it.
+  useEffect(() => {
+    if (openNew) { onOpenedNew?.(); createEncounterNow(startNoteType); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openNew]);
+
+  useEffect(() => {
+    let active = true;
+    setELoading(true);
+    encountersApi.patientEncounters(patientUuid, { page: ePage, pageSize: ENC_PER_PAGE })
+      .then(({ data }) => { if (active) { setEncs(data.encounters || []); setEncTotal(data.total || 0); } })
+      .catch((e) => { if (active) { setEncs([]); toast.error(toApiError(e).message); } })
+      .finally(() => { if (active) setELoading(false); });
+    return () => { active = false; };
+  }, [ePage, patientUuid, refreshKey, toast]);
+
+  const ePages = Math.max(1, Math.ceil(encTotal / ENC_PER_PAGE));
+  const reload = () => setRefreshKey((k) => k + 1);
+  const encFor = (r) => ({ encounterUuid: r.encounterUuid, encounterNo: r.encounterNo, patientName: patient.patientName, mrn: patient.mrn, date: r.date, facilityName: patient.facilityName, dob: patient.dob, gender: patient.gender, renderingProvider: r.renderingProvider, signedOffProvider: r.signedOffProvider });
+
+  return (
+    <div className="fs-section" style={{ marginBottom: 0 }}>
+      <div className="enc-sub-toolbar">
+        <span className="enc-sub-toolbar-lbl">{encTotal} encounter{encTotal === 1 ? '' : 's'} for {patient.patientName || 'this patient'}</span>
+      </div>
+      <table className="enc-subtable">
+        <thead>
+          <tr>
+            <th>Encounter ID</th>
+            <th>Date of Service</th>
+            <th>Notes</th>
+            <th>Rendering Provider</th>
+            <th>Signed off Provider</th>
+            <th className="enc-sub-act">Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {eLoading && !encs ? (
+            <tr><td colSpan={6} className="table-empty"><span className="spinner dark" /> Loading…</td></tr>
+          ) : (encs && encs.length === 0) ? (
+            <tr><td colSpan={6} className="table-empty">No encounters for this patient yet.</td></tr>
+          ) : (encs || []).map((r) => (
+            <tr key={r.encounterUuid}>
+              <td className="mono">{encNo(r.encounterNo)}</td>
+              <td>{usDate(r.date)}</td>
+              <td>{procedureLabel(r)}</td>
+              <td>{r.renderingProvider || '—'}</td>
+              <td>{r.signedOffProvider || <span className="enc-unsigned">Not signed</span>}</td>
+              <td className="enc-sub-act">
+                <button type="button" className="act accent" onClick={() => setNotesEnc(encFor(r))} title="Open encounter & clinical notes">View</button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {ePages > 1 && (
+        <div className="pager pager-c">
+          <span className="pager-label">{encTotal} encounters</span>
+          <span className="spacer" />
+          <button className="pager-btn" disabled={ePage <= 1} onClick={() => setEPage((p) => p - 1)}>‹ Prev</button>
+          <span className="pager-num is-on">{ePage}</span>
+          <button className="pager-btn" disabled={ePage >= ePages} onClick={() => setEPage((p) => p + 1)}>Next ›</button>
+        </div>
+      )}
+
+      {notesEnc && <EncounterNotesModal encounter={notesEnc} onClose={() => setNotesEnc(null)} onChanged={reload} />}
+    </div>
   );
 }

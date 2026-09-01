@@ -8,8 +8,11 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
+      // Talk to the API through the gateway (WAF/proxy layer), mirroring production.
+      // The gateway's port is set in gateway/.env (GATEWAY_PORT, 8080 here); override with
+      // VITE_API_TARGET if the gateway runs elsewhere.
       '/api': {
-        target: 'http://127.0.0.1:6002',
+        target: process.env.VITE_API_TARGET || 'http://127.0.0.1:8080',
         changeOrigin: true,
       },
     },

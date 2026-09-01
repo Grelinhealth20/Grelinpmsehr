@@ -1,4 +1,4 @@
-import { NOTE_TYPES, TEMPLATES } from '../lib/noteTemplates.js';
+import { NOTE_TYPES, SECTION_LABELS } from '../lib/noteTemplates.js';
 import { usDate, encNo } from './EncounterNotes.jsx';
 
 const VITALS = [
@@ -13,13 +13,17 @@ const VITALS = [
 export default function NoteDocumentView({ note, meta }) {
   if (!note) return null;
   const t = NOTE_TYPES[note.noteType] || {};
-  const template = TEMPLATES[note.noteType] || [];
   const content = note.content || {};
   const vitals = content.vitals || {};
   const sections = content.sections || {};
+  // Render in the note's OWN stored section order (from the backend template it was created
+  // with) — no client-side template copy. Labels come from the shared key→label dictionary.
+  const order = (Array.isArray(content.sectionOrder) && content.sectionOrder.length)
+    ? content.sectionOrder
+    : Object.keys(sections);
   const rx = (content.prescriptions || []).filter((r) => r && r.drug);
   const signed = note.status === 'signed';
-  const hasVitals = template.some((s) => s.key === 'vitals') && VITALS.some(([k]) => vitals[k]);
+  const hasVitals = VITALS.some(([k]) => vitals[k]);
 
   return (
     <div className="nt-doc-scroll">
@@ -43,11 +47,11 @@ export default function NoteDocumentView({ note, meta }) {
           </section>
         )}
 
-        {template.filter((s) => s.key !== 'vitals' && (sections[s.key] || '').trim()).map((s) => (
-          <section className="nt-sec" key={s.key}>
-            <h4 className="nt-sec-h">{s.label}</h4>
+        {order.filter((k) => k !== 'vitals' && (sections[k] || '').trim()).map((k) => (
+          <section className="nt-sec" key={k}>
+            <h4 className="nt-sec-h">{SECTION_LABELS[k] || k}</h4>
             <div className="nt-sec-body">
-              {(sections[s.key]).split('\n').map((ln, i) => <p key={i}>{ln || ' '}</p>)}
+              {(sections[k]).split('\n').map((ln, i) => <p key={i}>{ln || ' '}</p>)}
             </div>
           </section>
         ))}

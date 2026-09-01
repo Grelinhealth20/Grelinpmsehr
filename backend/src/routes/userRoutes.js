@@ -48,6 +48,9 @@ router.post(
   validate(adminResetPasswordSchema),
   userController.adminResetPassword,
 );
+// SUPER-ADMIN MFA controls per user: enable/disable the requirement, and reset enrollment.
+router.post('/:uuid/mfa', csrfProtection, validate(uuidParam, 'params'), userController.setMfaEnabled);
+router.post('/:uuid/mfa/reset', csrfProtection, validate(uuidParam, 'params'), userController.resetMfa);
 router.delete('/:uuid', csrfProtection, validate(uuidParam, 'params'), userController.remove);
 
 // Facility assignments for a provider / billing user.

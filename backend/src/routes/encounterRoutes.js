@@ -28,10 +28,17 @@ router.get('/patient/:patientUuid/rx-context', ctrl.rxContext);
 // params — an invalid one simply resolves to 404.)
 router.get('/notes/:noteUuid', ctrl.getNote);
 router.get('/notes/:noteUuid/pdf', ctrl.downloadNote);
+// Billable codes captured on a note (diagnoses SNOMED→ICD-10, procedures CPT) + Part B scrub.
+router.get('/notes/:noteUuid/codes', ctrl.getNoteCodes);
+// Deterministic auto-coding suggestions from the note content (diagnoses + visit charge).
+router.get('/notes/:noteUuid/predict', ctrl.predictNoteCodes);
+router.put('/notes/:noteUuid/codes', csrfProtection, ctrl.saveNoteCodes);
+router.post('/notes/:noteUuid/scrub', csrfProtection, ctrl.scrubNote);
 router.patch('/notes/:noteUuid', csrfProtection, validate(updateNoteSchema), ctrl.updateNote);
 router.post('/notes/:noteUuid/sign', csrfProtection, validate(signNoteSchema), ctrl.signNote);
 router.post('/notes/:noteUuid/amend', csrfProtection, validate(amendNoteSchema), ctrl.amendNote);
 
+router.get('/:encounterUuid/details', ctrl.encounterDetails);
 router.get('/:encounterUuid/notes', ctrl.listNotes);
 router.post('/:encounterUuid/notes', csrfProtection, validate(createNoteSchema), ctrl.createNote);
 

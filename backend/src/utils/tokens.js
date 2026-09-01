@@ -20,12 +20,13 @@ function verifyWithRing(token, secrets) {
  * minimum claims needed for authorization — never PHI. Signed with the newest
  * rotating secret; verified against the whole ring so rotation never logs anyone out.
  */
-export function signAccessToken(user) {
+export function signAccessToken(user, { mfa = 'ok' } = {}) {
   return jwt.sign(
     {
       sub: user.uuid,
       role: user.role,
       mrp: !!user.must_reset_password, // must-reset-password flag
+      mfa, // per-session MFA status: 'ok' (satisfied/not required) | 'setup' (must enroll) | 'pending' (must verify)
     },
     activeAccessSecret(),
     { expiresIn: config.jwt.accessTtl, ...OPTS },

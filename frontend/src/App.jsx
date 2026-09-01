@@ -2,13 +2,15 @@ import { useAuth } from './context/AuthContext.jsx';
 import Brand from './components/Brand.jsx';
 import Login from './pages/Login.jsx';
 import ForcePasswordReset from './pages/ForcePasswordReset.jsx';
+import MfaEnroll from './pages/MfaEnroll.jsx';
+import MfaChallenge from './pages/MfaChallenge.jsx';
 import SuperAdminPanel from './pages/superadmin/SuperAdminPanel.jsx';
 import Workspace from './pages/Workspace.jsx';
 
 const ADMIN_ROLES = new Set(['master_admin', 'super_admin']);
 
 export default function App() {
-  const { user, mustReset, loading } = useAuth();
+  const { user, mustReset, mfaStage, loading } = useAuth();
 
   if (loading) {
     return (
@@ -31,9 +33,12 @@ export default function App() {
     );
   }
 
-  // Access is gated by auth state — no client-side routes to enumerate.
+  // Access is gated by auth state — no client-side routes to enumerate. Order matters: password
+  // reset first, THEN MFA (enroll → challenge), before any workspace is reachable.
   if (!user) return <Login />;
   if (mustReset) return <ForcePasswordReset />;
+  if (mfaStage === 'setup') return <MfaEnroll />;
+  if (mfaStage === 'pending') return <MfaChallenge />;
   if (ADMIN_ROLES.has(user.role)) return <SuperAdminPanel />;
   return <Workspace />;
 }

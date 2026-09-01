@@ -186,7 +186,7 @@ const signature = (doc, signerName, signedAt) => {
 
 const VITALS = [['temp', 'Temp °F'], ['hr', 'HR'], ['bp', 'BP'], ['rr', 'RR'], ['spo2', 'SpO2 %'], ['weight', 'Wt lb'], ['pain', 'Pain']];
 
-export function buildNotePdf({ facility = {}, logoBuffer = null, patient = {}, note = {}, signerName, signedAt }) {
+export function buildNotePdf({ facility = {}, logoBuffer = null, patient = {}, note = {}, codes = { diagnoses: [], procedures: [] }, signerName, signedAt }) {
   const { doc, done } = createDoc({ title: `Medical Record — ${patient.name || 'Patient'}`, author: facility.name });
   brandHeader(doc, facility, logoBuffer);
   docTitle(doc, NOTE_TITLES[note.noteType] || 'Clinical Note', note.status === 'signed' ? null : 'DRAFT — not finalized');
@@ -224,6 +224,28 @@ export function buildNotePdf({ facility = {}, logoBuffer = null, patient = {}, n
       [0.30, 0.14, 0.14, 0.20, 0.11, 0.11]);
     doc.moveDown(0.2);
     rx.filter((p) => p.sig).forEach((p) => doc.font('Helvetica-Oblique').fontSize(8.5).fillColor(MUTED).text(`Sig (${p.drug}): ${p.sig}`, ML(doc), doc.y, { width: CW(doc) }));
+  }
+
+  // Coded diagnoses & procedures (Medicare Part B billing). Diagnoses are captured SNOMED-first
+  // and carry the billable ICD-10-CM; the primary diagnosis is marked. Real captured codes only.
+  const dxs = (codes.diagnoses || []).filter((d) => d && d.icd);
+  const pxs = (codes.procedures || []).filter((p) => p && p.cpt);
+  if (dxs.length || pxs.length) {
+    sectionBar(doc, 'Coded Diagnoses & Procedures — Medicare Part B');
+    if (dxs.length) {
+      // Primary first, then the rest, in captured order.
+      const ordered = [...dxs].sort((a, b) => (b.primary ? 1 : 0) - (a.primary ? 1 : 0));
+      table(doc, ['', 'ICD-10-CM', 'Diagnosis', 'SNOMED CT'],
+        ordered.map((d) => [d.primary ? 'Primary' : '', d.icd, d.description || '', d.snomedCode ? String(d.snomedCode) : '']),
+        [0.12, 0.15, 0.53, 0.20]);
+      doc.moveDown(0.3);
+    }
+    if (pxs.length) {
+      table(doc, ['CPT/HCPCS', 'Mod', 'Units', 'Procedure'],
+        pxs.map((p) => [p.cpt, p.modifiers || '', String(p.units || 1), p.description || '']),
+        [0.16, 0.10, 0.10, 0.64]);
+      doc.moveDown(0.2);
+    }
   }
 
   if (note.status === 'signed') signature(doc, signerName, signedAt);
