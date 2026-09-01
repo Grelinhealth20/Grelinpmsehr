@@ -2372,3 +2372,12 @@ input::-ms-clear, input::-ms-reveal { display: none; width: 0; height: 0; }
 .mfa-recovery code { font-family: 'Consolas','Menlo',monospace; font-size: 14px; font-weight: 600; letter-spacing: 0.06em; color: var(--c-dark-blue);
   background: rgba(9,17,33,0.04); border: 1px solid rgba(9,17,33,0.08); border-radius: 7px; padding: 8px; text-align: center; }
 .mfa-row { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+
+/* Super Admin — per-facility feature switches */
+.sysset-head { margin: 4px 2px 14px; }
+.sysset-h2 { font-size: 18px; font-weight: 700; margin: 0 0 4px; }
+.sysset-lede { color: var(--muted, #5b6b7b); font-size: 13px; max-width: 780px; margin: 0; }
+.sysset-fachdr { display: flex; align-items: baseline; gap: 10px; padding: 2px 2px 10px; border-bottom: 1px solid var(--line, #e2e8f0); margin-bottom: 6px; }
+.sysset-facname { font-weight: 700; font-size: 15px; }
+.sysset-facsub { color: var(--muted, #5b6b7b); font-size: 12px; }
+.sysset-card + .sysset-card { margin-top: 12px; }

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { patientsApi, toApiError } from '../lib/api.js';
 import { useToast } from './Toast.jsx';
-import { useAuth } from '../context/AuthContext.jsx';
 
 /**
  * Benefits Verification — a clean, provider-focused view of a real-time eligibility
@@ -281,9 +280,8 @@ function PolicyActions({ patientUuid, policyIndex, hasExisting, onDone, onPatien
 }
 
 /* -------- Main ---------------------------------------------------------- */
-export default function BenefitsVerification({ patientUuid, insurance, onPatientUpdated }) {
+export default function BenefitsVerification({ patientUuid, insurance, onPatientUpdated, eligibilityEnabled = true }) {
   const toast = useToast();
-  const { eligibilityEnabled } = useAuth();
   const [byPolicy, setByPolicy] = useState({});
   const [loading, setLoading] = useState(true);
   const [dlPolicy, setDlPolicy] = useState(null);

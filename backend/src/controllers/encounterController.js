@@ -13,6 +13,9 @@ import {
 import {
   listNoteTypeTemplates, providerCanUseNoteType,
 } from '../services/noteTemplateService.js';
+import { codingEnabledForNote } from '../services/facilityService.js';
+
+const CODING_DISABLED = { error: 'The coding engine is turned off for this facility.', code: 'CODING_DISABLED' };
 import { recordAudit } from '../services/auditService.js';
 import { notePdf } from '../services/pdfExport.js';
 
@@ -166,6 +169,7 @@ export async function getNoteCodes(req, res, next) {
 
 export async function saveNoteCodes(req, res, next) {
   try {
+    if (!(await codingEnabledForNote(req.params.noteUuid))) return res.status(403).json(CODING_DISABLED);
     const result = await saveNoteCodesSvc(req.params.noteUuid, req.authUserId, req.body || {});
     if (!result) return res.status(404).json({ error: 'Note not found.', code: 'NOT_FOUND' });
     if (result.locked) return res.status(409).json({ error: 'This note is signed and can no longer be edited.', code: 'NOTE_SIGNED' });
@@ -176,6 +180,7 @@ export async function saveNoteCodes(req, res, next) {
 
 export async function predictNoteCodes(req, res, next) {
   try {
+    if (!(await codingEnabledForNote(req.params.noteUuid))) return res.status(403).json(CODING_DISABLED);
     const result = await predictCodesSvc(req.params.noteUuid, req.authUserId);
     if (!result) return res.status(404).json({ error: 'Note not found.', code: 'NOT_FOUND' });
     res.json(result);
@@ -184,6 +189,7 @@ export async function predictNoteCodes(req, res, next) {
 
 export async function scrubNote(req, res, next) {
   try {
+    if (!(await codingEnabledForNote(req.params.noteUuid))) return res.status(403).json(CODING_DISABLED);
     const patient = req.body?.patient || (req.body?.age != null || req.body?.sex ? { age: req.body.age, sex: req.body.sex } : undefined);
     const result = await scrubNoteCodesSvc(req.params.noteUuid, req.authUserId, patient);
     if (!result) return res.status(404).json({ error: 'Note not found.', code: 'NOT_FOUND' });

@@ -24,6 +24,8 @@ router.post('/', csrfProtection, validate(createFacilitySchema), ctrl.create);
 router.get('/:uuid', validate(uuidParam, 'params'), ctrl.getOne);
 router.patch('/:uuid', csrfProtection, validate(uuidParam, 'params'), validate(updateFacilitySchema), ctrl.update);
 router.post('/:uuid/status', csrfProtection, validate(uuidParam, 'params'), validate(facilityStatusSchema), ctrl.status);
+// Per-facility feature switches: coding engine (claims scrubbing) and eligibility verification.
+router.post('/:uuid/flags', csrfProtection, validate(uuidParam, 'params'), ctrl.flags);
 router.delete('/:uuid', csrfProtection, validate(uuidParam, 'params'), ctrl.remove);
 
 // Provider ⇄ facility assignment.

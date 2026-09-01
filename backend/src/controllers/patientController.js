@@ -12,7 +12,7 @@ import {
 import { extractDocument, ocrEnabled } from '../services/docExtractService.js';
 import { saveCheck, listChecks, mergeVerificationIntoPatient } from '../services/eligibilityService.js';
 import { verifyPatientEligibility, latestCheckForPolicy } from '../services/eligibilityWorkflow.js';
-import { isEligibilityEnabled } from '../services/settingsService.js';
+import { eligibilityEnabledForPatient } from '../services/facilityService.js';
 import { stediEnabled } from '../services/stediService.js';
 import { recordAudit } from '../services/auditService.js';
 import { faceSheetPdf, benefitsPdf } from '../services/pdfExport.js';
@@ -238,7 +238,7 @@ const SKIP_MSG = {
 export async function verifyNow(req, res, next) {
   try {
     const row = await ownedPatientOr404(req);
-    if (!(await isEligibilityEnabled())) return res.status(403).json({ error: 'Eligibility verification is currently disabled by your administrator.', code: 'ELIGIBILITY_DISABLED' });
+    if (!(await eligibilityEnabledForPatient(row.uuid))) return res.status(403).json({ error: 'Eligibility verification is turned off for this facility.', code: 'ELIGIBILITY_DISABLED' });
     if (!stediEnabled()) return res.status(503).json({ error: 'Eligibility service is not configured.', code: 'STEDI_DISABLED' });
     const policyIndex = Number(req.body?.policyIndex) || 0;
     const procedureCodes = Array.isArray(req.body?.procedureCodes) ? req.body.procedureCodes : [];
@@ -304,7 +304,7 @@ export async function downloadBenefits(req, res, next) {
 export async function importEligibility(req, res, next) {
   try {
     const row = await ownedPatientOr404(req); // patient-scoped write
-    if (!(await isEligibilityEnabled())) return res.status(403).json({ error: 'Eligibility verification is currently disabled by your administrator.', code: 'ELIGIBILITY_DISABLED' });
+    if (!(await eligibilityEnabledForPatient(row.uuid))) return res.status(403).json({ error: 'Eligibility verification is turned off for this facility.', code: 'ELIGIBILITY_DISABLED' });
     const { policyIndex = 0, response } = req.body;
     const check = await saveCheck({ patientId: row.id, policyIndex, response, createdBy: req.authUserId });
     // Payer-confirmed identity (address, group #, MBI, plan, cost-shares) corrects

@@ -34,15 +34,18 @@ export function toPublicPatient(row) {
     emergencyContacts,
     emergencyContact: emergencyContacts[0] || null, // back-compat for any old callers
     documentCount: row.document_count ?? undefined,
+    // Per-facility feature switches (default ON when the patient has no linked facility).
+    codingEnabled: row.coding_enabled == null ? true : !!Number(row.coding_enabled),
+    eligibilityEnabled: row.eligibility_enabled == null ? true : !!Number(row.eligibility_enabled),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
 const SELECT = `SELECT p.id, p.uuid, p.provider_id, p.mrn, p.demographics_enc, p.insurance_enc, p.facility_enc, p.emergency_enc,
-  p.created_at, p.updated_at,
+  p.created_at, p.updated_at, fac.coding_enabled, fac.eligibility_enabled,
   (SELECT COUNT(*) FROM patient_documents d WHERE d.patient_id = p.id) AS document_count
-  FROM patients p`;
+  FROM patients p LEFT JOIN facilities fac ON fac.id = p.facility_id`;
 
 export async function listPatients(providerId) {
   const [rows] = await execute(`${SELECT} WHERE p.provider_id = :pid ORDER BY p.created_at DESC`, { pid: providerId });

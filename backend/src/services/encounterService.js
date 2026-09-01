@@ -403,12 +403,14 @@ export async function getEncounterDetails(encounterUuid, userId) {
         DATE_FORMAT(COALESCE(e.encounter_date, a.appt_date), '%Y-%m-%d') AS dos,
         p.mrn, p.demographics_enc, p.facility_enc,
         pu.full_name_enc AS provider_name_enc,
+        pfac.coding_enabled AS coding_enabled,
         (SELECT GROUP_CONCAT(f.name ORDER BY f.name SEPARATOR ', ')
            FROM provider_facilities pf JOIN facilities f ON f.id = pf.facility_id
           WHERE pf.provider_id = e.provider_id AND f.status = 'active') AS assigned_facility
       FROM encounters e
       LEFT JOIN appointments a ON a.id = e.appointment_id
       LEFT JOIN patients p ON p.id = e.patient_id
+      LEFT JOIN facilities pfac ON pfac.id = p.facility_id
       LEFT JOIN users pu ON pu.id = e.provider_id
       WHERE e.id = :id LIMIT 1`,
     { id: encId },
@@ -432,6 +434,7 @@ export async function getEncounterDetails(encounterUuid, userId) {
     ageAtEncounter: age === null ? null : `${age} yrs`,
     facilityName: fac.facilityName || null,          // free-text facility on the face sheet
     assignedFacility: r.assigned_facility || null,   // the rendering provider's assigned facility(ies)
+    codingEnabled: r.coding_enabled == null ? true : !!Number(r.coding_enabled), // per-facility coding switch
     renderingProvider,
   };
 }

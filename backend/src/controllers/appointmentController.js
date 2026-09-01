@@ -12,7 +12,7 @@ import { findProviderIdByUuid } from '../services/userService.js';
 import { ensureEncounter } from '../services/encounterService.js';
 import { verifyAppointmentEligibility } from '../services/eligibilityWorkflow.js';
 import { getAppointmentCheck } from '../services/eligibilityService.js';
-import { isEligibilityEnabled } from '../services/settingsService.js';
+import { eligibilityEnabledForProvider } from '../services/facilityService.js';
 import { schedulingScope } from '../services/accessScope.js';
 import { isProviderInUserFacilities, isPatientInUserFacilities } from '../services/facilityService.js';
 import { recordAudit } from '../services/auditService.js';
@@ -84,7 +84,7 @@ async function auditedEligibility(req, apptRow, { trigger, manual = false, opts 
   // Feature-flag gate: when a super admin has disabled eligibility EHR-wide, no
   // payer call is made on any trigger (create / update / manual). Silent no-op for
   // the automatic paths; the manual endpoint returns an explicit 403 to the caller.
-  if (!(await isEligibilityEnabled())) return { skipped: 'eligibility_disabled' };
+  if (!(await eligibilityEnabledForProvider(apptRow.provider_id))) return { skipped: 'eligibility_disabled' };
   try {
     const r = await verifyAppointmentEligibility(apptRow, opts);
     // These outcomes make NO payer call (benefits reused / once-per-patient cap) — no
@@ -211,7 +211,7 @@ export async function verifyEligibility(req, res, next) {
   try {
     const row = await getRawByUuid(req.params.uuid);
     await assertCanManage(req, row);
-    if (!(await isEligibilityEnabled())) return res.status(403).json({ error: 'Eligibility verification is currently disabled by your administrator.', code: 'ELIGIBILITY_DISABLED' });
+    if (!(await eligibilityEnabledForProvider(row.provider_id))) return res.status(403).json({ error: 'Eligibility verification is turned off for this facility.', code: 'ELIGIBILITY_DISABLED' });
     // A manual click is a deliberate user action → force a fresh check (this is the
     // ONLY way a with-benefits appointment re-calls the payer; automatic paths never do).
     const r = await auditedEligibility(req, row, { trigger: 'manual', manual: true, opts: { force: true } });

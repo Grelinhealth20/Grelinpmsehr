@@ -1,6 +1,6 @@
 import {
   listFacilities, getFacility, createFacility, updateFacility,
-  setFacilityStatus, deleteFacility, assignProvider, unassignProvider,
+  setFacilityStatus, setFacilityFlags, deleteFacility, assignProvider, unassignProvider,
 } from '../services/facilityService.js';
 import { searchFacilities, nppesEnabled } from '../services/nppesService.js';
 import { recordAudit } from '../services/auditService.js';
@@ -62,6 +62,19 @@ export async function status(req, res, next) {
     const facility = await setFacilityStatus(req.params.uuid, req.body.status);
     if (!facility) return res.status(404).json({ error: 'Facility not found.', code: 'NOT_FOUND' });
     await recordAudit({ actorUserId: req.authUserId, action: 'facility.status', entityType: 'facility', entityId: facility.uuid, ...ctx(req), metadata: { status: req.body.status } });
+    res.json({ facility });
+  } catch (err) { next(err); }
+}
+
+/** SUPER-ADMIN: turn the coding engine and/or eligibility on/off for this facility. */
+export async function flags(req, res, next) {
+  try {
+    const patch = {};
+    if (typeof req.body.codingEnabled === 'boolean') patch.codingEnabled = req.body.codingEnabled;
+    if (typeof req.body.eligibilityEnabled === 'boolean') patch.eligibilityEnabled = req.body.eligibilityEnabled;
+    const facility = await setFacilityFlags(req.params.uuid, patch);
+    if (!facility) return res.status(404).json({ error: 'Facility not found.', code: 'NOT_FOUND' });
+    await recordAudit({ actorUserId: req.authUserId, action: 'facility.flags', entityType: 'facility', entityId: facility.uuid, ...ctx(req), metadata: patch });
     res.json({ facility });
   } catch (err) { next(err); }
 }

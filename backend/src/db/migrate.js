@@ -109,6 +109,9 @@ export async function runMigrations() {
   // Facility Tax ID (EIN) — organizational billing identifier, entered by an admin
   // (not in NPPES). Kept with the facility's other billing identifiers.
   await ensureColumn('facilities', 'tax_id', '`tax_id` VARCHAR(32) NULL AFTER `taxonomy`');
+  // Per-facility feature switches (Super Admin controlled). Default ON so existing facilities keep working.
+  await ensureColumn('facilities', 'coding_enabled', '`coding_enabled` TINYINT(1) NOT NULL DEFAULT 1 AFTER `status`');
+  await ensureColumn('facilities', 'eligibility_enabled', '`eligibility_enabled` TINYINT(1) NOT NULL DEFAULT 1 AFTER `coding_enabled`');
   // Rendering provider selected for an appointment (may differ from the owner).
   await ensureColumn(
     'appointments',

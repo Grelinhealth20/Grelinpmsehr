@@ -145,6 +145,8 @@ export const facilitiesApi = {
   create: (payload) => api.post('/facilities', payload),
   update: (uuid, payload) => api.patch(`/facilities/${uuid}`, payload),
   setStatus: (uuid, status) => api.post(`/facilities/${uuid}/status`, { status }),
+  // Per-facility feature switches: { codingEnabled?, eligibilityEnabled? }
+  setFlags: (uuid, flags) => api.post(`/facilities/${uuid}/flags`, flags),
   remove: (uuid) => api.delete(`/facilities/${uuid}`),
   assignProvider: (uuid, providerUuid) => api.post(`/facilities/${uuid}/providers`, { providerUuid }),
   unassignProvider: (uuid, providerUuid) => api.delete(`/facilities/${uuid}/providers/${providerUuid}`),

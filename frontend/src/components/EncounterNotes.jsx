@@ -616,7 +616,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
                 <div className="nt-subtabs">
                   <button className={`nt-tab ${tab === 'note' ? 'is-on' : ''}`} onClick={() => setTab('note')}>Clinical Note</button>
                   <button className={`nt-tab ${tab === 'rx' ? 'is-on' : ''}`} onClick={() => setTab('rx')}>Prescriptions{content.prescriptions.length ? ` (${content.prescriptions.length})` : ''}</button>
-                  <button className={`nt-tab ${tab === 'coding' ? 'is-on' : ''}`} onClick={() => setTab('coding')}>Coding &amp; Billing</button>
+                  {enc?.codingEnabled !== false && <button className={`nt-tab ${tab === 'coding' ? 'is-on' : ''}`} onClick={() => setTab('coding')}>Coding &amp; Billing</button>}
                 </div>
                 <span className="nt-subcat">{noteMeta?.category}</span>
               </div>
@@ -951,6 +951,10 @@ function CodingPanel({ noteUuid, readOnly, enc, toast }) {
   const findings = (scrub?.findings || []).slice().sort((a, b) => (SEV_RANK[a.severity] - SEV_RANK[b.severity]));
   const sum = scrub?.summary || { errors: 0, warnings: 0, info: 0 };
   const hasPrimary = dx.some((d) => d.primary);
+
+  if (enc?.codingEnabled === false) {
+    return <div className="nt-doc-scroll cq-scroll"><div className="cq-empty" style={{ margin: 16 }}>The coding engine is turned off for this facility by your administrator.</div></div>;
+  }
 
   return (
     <div className="nt-doc-scroll cq-scroll">

@@ -324,6 +324,7 @@ export default function PatientModal({ uuid = null, docMode = 'license', initial
   const toast = useToast();
   const [pUuid, setPUuid] = useState(uuid);
   const [form, setForm] = useState(clone(EMPTY));
+  const [pEligibility, setPEligibility] = useState(true); // this patient's facility eligibility switch
   const [docs, setDocs] = useState([]);
   const [mrn, setMrn] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -363,6 +364,7 @@ export default function PatientModal({ uuid = null, docMode = 'license', initial
         });
         setDocs(data.documents || []);
         setMrn(data.patient.mrn);
+        setPEligibility(data.patient.eligibilityEnabled !== false);
         setLoading(false);
       }).catch((e) => { toast.error(toApiError(e).message); setLoading(false); });
     }
@@ -691,6 +693,7 @@ export default function PatientModal({ uuid = null, docMode = 'license', initial
               <BenefitsVerification
                 patientUuid={pUuid}
                 insurance={form.insurance}
+                eligibilityEnabled={pEligibility}
                 onPatientUpdated={(p) => setForm((f) => ({
                   ...f,
                   demographics: { ...f.demographics, ...(p.demographics || {}) },

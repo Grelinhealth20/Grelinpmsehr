@@ -44,8 +44,9 @@ async function inlineLogo(facility, rawKey) {
  */
 
 const FAC_COLS = `f.uuid, f.npi, f.name, f.address, f.city, f.state, f.zip, f.phone,
-  f.taxonomy, f.tax_id, f.logo, f.status, f.source,
+  f.taxonomy, f.tax_id, f.logo, f.status, f.coding_enabled, f.eligibility_enabled, f.source,
   DATE_FORMAT(f.created_at, '%Y-%m-%dT%H:%i:%sZ') AS created_at`;
+const boolFlag = (v) => v == null ? true : !!Number(v); // per-facility flags default ON
 
 // Map a row to the public DTO. `logo` is intentionally NOT the raw S3 key — callers
 // that display it set it to an inline data URI (inlineLogo) or a hasLogo flag.
@@ -57,6 +58,8 @@ function toFacility(r) {
     taxId: r.tax_id || null,
     logo: null, hasLogo: !!r.logo,
     status: r.status, source: r.source,
+    codingEnabled: boolFlag(r.coding_enabled),
+    eligibilityEnabled: boolFlag(r.eligibility_enabled),
     providerCount: r.provider_count != null ? Number(r.provider_count) : undefined,
     createdAt: r.created_at,
   };
@@ -165,6 +168,64 @@ export async function updateFacility(uuid, data) {
 export async function setFacilityStatus(uuid, status) {
   const [res] = await execute(`UPDATE facilities SET status = :status WHERE uuid = :uuid`, { uuid, status });
   return res.affectedRows > 0 ? getFacility(uuid) : null;
+}
+
+/**
+ * SUPER-ADMIN: set the per-facility feature switches. Only the flags present in `flags` are changed.
+ * These govern whether the coding engine (claims scrubbing) and real-time eligibility are available
+ * for patients at this facility. Enforced server-side; the EHR also hides the controls when off.
+ */
+export async function setFacilityFlags(uuid, flags = {}) {
+  const sets = []; const params = { uuid };
+  if (flags.codingEnabled !== undefined) { sets.push('coding_enabled = :ce'); params.ce = flags.codingEnabled ? 1 : 0; }
+  if (flags.eligibilityEnabled !== undefined) { sets.push('eligibility_enabled = :ee'); params.ee = flags.eligibilityEnabled ? 1 : 0; }
+  if (!sets.length) return getFacility(uuid);
+  const [res] = await execute(`UPDATE facilities SET ${sets.join(', ')} WHERE uuid = :uuid`, params);
+  if (!res.affectedRows) return null;
+  invalidateFacilityFlags();
+  return getFacility(uuid);
+}
+
+// Short-TTL cache for per-patient facility flags (read on the coding/eligibility paths).
+const FLAG_TTL_MS = 15_000;
+const flagCache = new Map(); // key -> { flags, exp }
+export function invalidateFacilityFlags() { flagCache.clear(); }
+
+/** Feature flags for the facility a PATIENT belongs to (default ON when unlinked). */
+export async function facilityFlagsForPatient(patientUuid) {
+  const key = `p:${patientUuid}`; const now = Date.now();
+  const hit = flagCache.get(key); if (hit && hit.exp > now) return hit.flags;
+  const [rows] = await execute(
+    `SELECT f.coding_enabled AS c, f.eligibility_enabled AS e
+       FROM patients p LEFT JOIN facilities f ON f.id = p.facility_id WHERE p.uuid = :u LIMIT 1`, { u: patientUuid });
+  const r = rows[0];
+  const flags = { codingEnabled: boolFlag(r ? r.c : null), eligibilityEnabled: boolFlag(r ? r.e : null) };
+  flagCache.set(key, { flags, exp: now + FLAG_TTL_MS });
+  return flags;
+}
+
+/** Coding-engine flag for the facility behind a NOTE (via its encounter → patient). Default ON. */
+export async function codingEnabledForNote(noteUuid) {
+  const [rows] = await execute(
+    `SELECT f.coding_enabled AS c FROM encounter_notes n
+       JOIN encounters e ON e.id = n.encounter_id
+       LEFT JOIN patients p ON p.id = e.patient_id
+       LEFT JOIN facilities f ON f.id = p.facility_id WHERE n.uuid = :u LIMIT 1`, { u: noteUuid });
+  return boolFlag(rows[0] ? rows[0].c : null);
+}
+
+export async function eligibilityEnabledForPatient(patientUuid) {
+  return (await facilityFlagsForPatient(patientUuid)).eligibilityEnabled;
+}
+
+/** Eligibility flag for a provider's PRIMARY active facility (used on the appointment path, which
+ *  is not patient-linked). Default ON when the provider has no active facility. */
+export async function eligibilityEnabledForProvider(providerId) {
+  const [rows] = await execute(
+    `SELECT f.eligibility_enabled AS e FROM facilities f
+       JOIN provider_facilities pf ON pf.facility_id = f.id
+      WHERE pf.provider_id = :pid AND f.status = 'active' ORDER BY f.name ASC LIMIT 1`, { pid: providerId });
+  return boolFlag(rows[0] ? rows[0].e : null);
 }
 
 export async function deleteFacility(uuid) {

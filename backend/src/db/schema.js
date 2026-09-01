@@ -306,6 +306,8 @@ export const SCHEMA_STATEMENTS = [
     phone         VARCHAR(24)     NULL,
     taxonomy      VARCHAR(160)    NULL,
     status        ENUM('active','inactive') NOT NULL DEFAULT 'active',
+    coding_enabled      TINYINT(1) NOT NULL DEFAULT 1,
+    eligibility_enabled TINYINT(1) NOT NULL DEFAULT 1,
     source        VARCHAR(16)     NOT NULL DEFAULT 'nppes',
     verified_by   BIGINT UNSIGNED NULL,
     created_by    BIGINT UNSIGNED NULL,
