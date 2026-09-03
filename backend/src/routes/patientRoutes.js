@@ -2,9 +2,11 @@ import { Router } from 'express';
 import multer from 'multer';
 import * as ctrl from '../controllers/patientController.js';
 import { authenticate, requirePasswordSettled } from '../middleware/authenticate.js';
+import { authorize } from '../middleware/authorize.js';
 import { csrfProtection } from '../middleware/csrf.js';
 import { validate } from '../middleware/validate.js';
 import { ocrLimiter } from '../middleware/rateLimiters.js';
+import { ROLES } from '../config/env.js';
 import { createPatientSchema, updatePatientSchema, uuidParam, importEligibilitySchema, verifyEligibilitySchema } from '../validation/schemas.js';
 
 // In-memory upload; capped so a large file can never exhaust the process.
@@ -30,8 +32,11 @@ router.patch('/:uuid', csrfProtection, validate(uuidParam, 'params'), validate(u
 router.delete('/:uuid', csrfProtection, validate(uuidParam, 'params'), ctrl.remove);
 
 // Break-glass emergency access (ONC (d)(6)): time-boxed, reason-mandatory, fully-audited override that
-// lets an authorized clinician reach a patient outside their normal ownership scope in an emergency.
-router.post('/:uuid/emergency-access', csrfProtection, validate(uuidParam, 'params'), ctrl.emergencyAccess);
+// lets an authorized CLINICIAN reach a patient outside their normal ownership scope in an emergency.
+// Restricted to clinical roles (providers + admin oversight) — a billing user has no clinical reason to
+// break-glass into a chart. The grant it issues is READ-ONLY (enforced in ownedPatientOr404: honored
+// only for GET), so it can never be used to modify or delete another provider's patient record.
+router.post('/:uuid/emergency-access', authorize(ROLES.PROVIDER, ROLES.SUPER_ADMIN), csrfProtection, validate(uuidParam, 'params'), ctrl.emergencyAccess);
 
 // Benefits Verification (X12 271 eligibility) — strictly scoped to the owned patient.
 router.get('/:uuid/eligibility', validate(uuidParam, 'params'), ctrl.listEligibility);

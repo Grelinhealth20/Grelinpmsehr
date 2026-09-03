@@ -62,6 +62,14 @@ export const pool = mysql.createPool({
   keepAliveInitialDelay: 10000, // TCP keepalive so idle sockets aren't dropped
   connectTimeout: 15000,
   namedPlaceholders: true,
+  // Interpret ALL DATETIME columns as UTC (the database stores UTC — server @@time_zone is UTC, and
+  // every datetime is written DB-side via NOW()/DATE_ADD/CURRENT_TIMESTAMP). Without this, mysql2
+  // defaults to the Node process's LOCAL timezone, so a non-UTC host reads every stored UTC datetime
+  // shifted by its offset — which silently corrupted the tokens_valid_after credential-cut (rejecting
+  // every session), MFA lockout windows, SMART OAuth code expiry, and all FHIR/PDF rendered timestamps.
+  // Pinning to 'Z' makes date handling correct and identical on every deployment timezone. (Appointment
+  // times are stored as integer minutes, not datetimes, so they are unaffected either way.)
+  timezone: 'Z',
   ssl: buildDbSsl(),
 });
 

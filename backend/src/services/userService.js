@@ -59,8 +59,11 @@ const USER_SELECT = `SELECT u.id, u.uuid, u.email_enc, u.email_bidx, u.full_name
   u.license_number, u.license_state, u.provider_gender, u.sole_proprietor, u.enumeration_date, u.nppes_status,
   u.password_hash, u.must_reset_password,
   u.mfa_enabled, u.mfa_secret_enc, u.mfa_confirmed_at, u.mfa_recovery_enc, u.mfa_last_step, u.mfa_failed_attempts, u.mfa_locked_until,
+  UNIX_TIMESTAMP(u.mfa_locked_until) AS mfa_locked_until_epoch,
   u.failed_login_attempts, u.locked_until,
-  u.last_login_at, u.password_changed_at, u.tokens_valid_after, u.created_at, u.updated_at, u.specialty_id,
+  u.last_login_at, u.password_changed_at, u.tokens_valid_after,
+  UNIX_TIMESTAMP(u.tokens_valid_after) AS tokens_valid_after_epoch,
+  u.created_at, u.updated_at, u.specialty_id,
   s.uuid AS specialty_uuid, s.name AS specialty_name, s.service_line AS specialty_service_line,
   (SELECT JSON_ARRAYAGG(JSON_OBJECT('uuid', sp.uuid, 'name', sp.name, 'serviceLine', sp.service_line))
      FROM user_specialties us2 JOIN specialties sp ON sp.id = us2.specialty_id WHERE us2.user_id = u.id) AS specialties_json

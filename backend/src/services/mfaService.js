@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { execute } from '../db/pool.js';
+import { execute, withTransaction } from '../db/pool.js';
 import { encrypt, decrypt } from '../utils/crypto.js';
 import { hashPassword, verifyPassword } from '../utils/password.js';
 import { generateSecret, verifyTotp, otpauthUri, base32Encode } from '../utils/totp.js';
@@ -23,10 +23,17 @@ function newRecoveryCode() {
   return `${s.slice(0, 5)}-${s.slice(5, 10)}`;
 }
 function lockState(row) {
-  if (!row.mfa_locked_until) return { locked: false, minutesLeft: 0 };
-  const until = new Date(row.mfa_locked_until).getTime();
+  // Use the DB-computed UTC epoch (mfa_locked_until_epoch = UNIX_TIMESTAMP(...)) rather than parsing
+  // the raw DATETIME in JS: mysql2 reads naive DATETIMEs in the process's LOCAL timezone, which would
+  // skew the lock window by the UTC offset (e.g. ~4h too long on a UTC-4 host). Epoch math is
+  // timezone-agnostic on all zones. NULL epoch (no lock set) → not locked.
+  const epoch = row.mfa_locked_until_epoch;
+  if (epoch == null) return { locked: false, minutesLeft: 0 };
+  const until = Number(epoch) * 1000;
   const now = Date.now();
-  return until > now ? { locked: true, minutesLeft: Math.ceil((until - now) / 60000) } : { locked: false, minutesLeft: 0 };
+  return Number.isFinite(until) && until > now
+    ? { locked: true, minutesLeft: Math.ceil((until - now) / 60000) }
+    : { locked: false, minutesLeft: 0 };
 }
 async function bumpFailure(row) {
   const n = (row.mfa_failed_attempts || 0) + 1;
@@ -51,9 +58,22 @@ export function mfaStatus(row) {
  * confirmation simply replaces the pending secret.
  */
 export async function beginSetup(row) {
-  const secret = generateSecret();
-  await execute('UPDATE users SET mfa_secret_enc = :s, mfa_confirmed_at = NULL WHERE id = :id', { s: encrypt(secret), id: row.id });
-  invalidateUserCache(row.uuid);
+  // IDEMPOTENT: reuse an existing PENDING (unconfirmed) secret instead of minting a new one on every
+  // call. The setup page can call this more than once (React re-mount / StrictMode double-invoke, an
+  // auth retry, a manual reload); regenerating each time desynchronized the QR the user already scanned
+  // from the secret persisted last, so the entered code never verified. An atomic transaction
+  // (SELECT ... FOR UPDATE) serializes concurrent calls so exactly one secret is ever created per
+  // enrollment. A new secret is minted ONLY when none is pending (or a stored one can't be decrypted).
+  const { secret, generated } = await withTransaction(async (exec) => {
+    const [cur] = await exec('SELECT mfa_secret_enc, mfa_confirmed_at FROM users WHERE id = :id FOR UPDATE', { id: row.id });
+    if (cur[0]?.mfa_secret_enc && !cur[0].mfa_confirmed_at) {
+      try { return { secret: decrypt(cur[0].mfa_secret_enc), generated: false }; } catch { /* corrupt → regenerate */ }
+    }
+    const s = generateSecret();
+    await exec('UPDATE users SET mfa_secret_enc = :s, mfa_confirmed_at = NULL WHERE id = :id', { s: encrypt(s), id: row.id });
+    return { secret: s, generated: true };
+  });
+  if (generated) invalidateUserCache(row.uuid);
   const uri = otpauthUri(secret, { account: emailOf(row), issuer: ISSUER });
   return { qr: qrDataUri(uri), manualKey: secret, otpauthUri: uri, issuer: ISSUER };
 }

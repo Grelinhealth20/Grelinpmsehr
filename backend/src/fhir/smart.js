@@ -113,12 +113,17 @@ export async function token({ body, authHeader }) {
   const { code, redirect_uri: redirectUri, client_id: bodyClientId, code_verifier: verifier } = body;
   if (!code) fail('code is required');
 
-  const [rows] = await execute('SELECT * FROM oauth_codes WHERE code_hash = :h LIMIT 1', { h: sha256Hex(code) });
+  const [rows] = await execute(
+    'SELECT *, UNIX_TIMESTAMP(expires_at) AS expires_epoch FROM oauth_codes WHERE code_hash = :h LIMIT 1',
+    { h: sha256Hex(code) },
+  );
   const rec = rows[0];
   if (!rec) fail('invalid code');
   // Single-use + expiry (fail closed; a re-used code is a theft signal — burn any siblings for the client).
   if (rec.used_at) { await execute('UPDATE oauth_codes SET used_at = NOW() WHERE client_id = :c AND used_at IS NULL', { c: rec.client_id }); fail('code already used'); }
-  if (new Date(rec.expires_at) < new Date()) fail('code expired');
+  // Compare the DB-computed UTC epoch to now — parsing expires_at (written by DATE_ADD(NOW(),..)) in JS
+  // would apply the process's local timezone and keep a 60-second code valid for hours on a non-UTC host.
+  if (rec.expires_epoch == null || Number(rec.expires_epoch) * 1000 < Date.now()) fail('code expired');
   await execute('UPDATE oauth_codes SET used_at = NOW() WHERE id = :id', { id: rec.id });
 
   const client = await getClient(rec.client_id);

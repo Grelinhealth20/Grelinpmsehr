@@ -6,7 +6,7 @@ import cookieParser from 'cookie-parser';
 import rateLimit from 'express-rate-limit';
 import pino from 'pino';
 import pinoHttp from 'pino-http';
-import { createProxyMiddleware, fixRequestBody } from 'http-proxy-middleware';
+import { createProxyMiddleware } from 'http-proxy-middleware';
 import path from 'node:path';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -82,11 +82,20 @@ const logger = pino({
 const WAF_SIGNATURES = [
   {
     name: 'sqli',
-    re: /(\bunion\b\s+\bselect\b)|(\bselect\b[\s\S]+\bfrom\b)|(\binsert\b\s+\binto\b)|(\bdrop\b\s+\btable\b)|(\bor\b\s+1\s*=\s*1)|(--\s)|(\/\*[\s\S]*\*\/)|(\bsleep\s*\()|(\bbenchmark\s*\()|(\bwaitfor\b\s+\bdelay\b)|(\binformation_schema\b)/i,
+    // union[(/space]select catches "union(select"; or/and N=N and 'a'='a' catch numeric/string
+    // tautologies beyond the literal 1=1. Kept anchored/bounded — no catastrophic backtracking.
+    // NOTE: a bare "select … from" is NOT flagged — SELECT and FROM are ordinary English words that
+    // appear constantly in clinical notes ("select a plan from the options"), and the API is fully
+    // parameterized so prose can't inject. Real SQLi is caught by the SQL-SPECIFIC patterns below:
+    // union-select, select-STAR-from, tautologies (N=N / 'a'='a'), stacked/comment syntax, info_schema.
+    re: /(\bunion\b[\s(]+\bselect\b)|(\bselect\b\s+\*\s+\bfrom\b)|(\binsert\b\s+\binto\b)|(\bdrop\b\s+\btable\b)|(\b(or|and)\b\s+\d+\s*=\s*\d+)|(\b(or|and)\b\s+(['"])[^'"]{0,20}\7\s*=\s*\7)|(--\s)|(\/\*[\s\S]{0,200}?\*\/)|(\bsleep\s*\()|(\bbenchmark\s*\()|(\bwaitfor\b\s+\bdelay\b)|(\binformation_schema\b)/i,
   },
   {
     name: 'xss',
-    re: /(<script[\s>])|(<\/script>)|(javascript:)|(\bon(error|load|click|mouseover)\s*=)|(<iframe[\s>])|(<img[\s\S]+onerror)|(document\.cookie)|(<svg[\s\S]+onload)/i,
+    // The event-handler rule is TAG-SCOPED (`<tag ... on...=`) so it catches EVERY on* handler
+    // (onfocus/ontoggle/onpointerover/…), not just a fixed few, WITHOUT false-positiving on plain
+    // clinical text like "onset=" (which has no preceding HTML tag). `[^>]{0,300}?` bounds backtracking.
+    re: /(<script[\s/>])|(<\/script>)|(javascript:)|(<[a-z][a-z0-9]*[^>]{0,300}?\son[a-z]+\s*=)|(<iframe[\s/>])|(document\.cookie)/i,
   },
   {
     name: 'traversal-lfi',
@@ -244,7 +253,7 @@ const edgeLimiter = rateLimit({
   max: 1200, // per client IP / minute, for /api
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => req.path === '/api/health',
+  skip: (req) => req.path === '/health', // mounted under '/api', so req.path is '/health' for /api/health
   message: { error: 'Too many requests. Please slow down.' },
 });
 const authEdgeLimiter = rateLimit({
@@ -268,8 +277,29 @@ app.get('/healthz', (req, res) => res.json({ status: 'ok', service: 'grelin-pms-
 // Multipart file uploads are streamed RAW to the backend — never JSON-parsed,
 // WAF-buffered, or re-emitted — so the upload stream reaches multer intact.
 const jsonParser = express.json({ limit: '6mb' });
+// The API also legitimately consumes application/x-www-form-urlencoded (the SMART OAuth token
+// endpoint). Parse it too so the WAF INSPECTS its fields instead of streaming them past unscanned.
+const urlencodedParser = express.urlencoded({ extended: false, limit: '6mb' });
 const isMultipart = (req) => (req.headers['content-type'] || '').toLowerCase().startsWith('multipart/form-data');
+const isJson = (req) => /application\/json|\+json/i.test(req.headers['content-type'] || '');
+const isUrlEncoded = (req) => /application\/x-www-form-urlencoded/i.test(req.headers['content-type'] || '');
+const hasBody = (req) => {
+  const cl = Number(req.headers['content-length'] || 0);
+  return cl > 0 || /chunked/i.test(req.headers['transfer-encoding'] || '');
+};
 const skipForUploads = (mw) => (req, res, next) => (isMultipart(req) ? next() : mw(req, res, next));
+// Only parse urlencoded when it actually IS urlencoded (skip JSON/multipart/no-body requests).
+const urlencodedOnly = (req, res, next) => (isUrlEncoded(req) ? urlencodedParser(req, res, next) : next());
+// DEFENSE-IN-DEPTH (WAF coverage): reject a request that carries a body in a content-type the API does
+// not use (text/plain, application/xml, none, …). Without this, express.json/urlencoded leave req.body
+// empty for such bodies, so the WAF has nothing to scan and the RAW body streams to the backend
+// unscanned — a signature-evasion path. The API only ever consumes JSON, urlencoded, or multipart, so
+// anything else with a body is rejected at the edge (415) rather than forwarded uninspected.
+const enforceBodyContentType = (req, res, next) => {
+  if (!hasBody(req)) return next();
+  if (isJson(req) || isUrlEncoded(req) || isMultipart(req)) return next();
+  return res.status(415).json({ error: 'Unsupported content type.', code: 'UNSUPPORTED_MEDIA_TYPE' });
+};
 
 const apiProxy = createProxyMiddleware({
   target: INTERNAL_API_URL,
@@ -285,12 +315,42 @@ const apiProxy = createProxyMiddleware({
   pathRewrite: (_path, req) => req.originalUrl,
   on: {
     proxyReq: (proxyReq, req) => {
-      // Prove to the backend that the request came through the trusted gateway,
-      // using the current (rotating) internal key.
+      // Prove to the backend that the request came through the trusted gateway, using the current
+      // (rotating) internal key. ALWAYS strip any client-supplied value first (http-proxy copies inbound
+      // headers onto the upstream request), so a client can never smuggle its own x-internal-api-key —
+      // even in the edge case where we currently hold no key (env unset + refresh failed).
+      proxyReq.removeHeader('x-internal-api-key');
       if (currentInternalKey) proxyReq.setHeader('x-internal-api-key', currentInternalKey);
-      // Re-emit the body the JSON parser consumed — but NEVER for multipart
-      // uploads (those stream raw; re-emitting would corrupt the file body).
-      if (!isMultipart(req)) fixRequestBody(proxyReq, req);
+      // Re-emit the body the JSON parser consumed so it reaches the upstream — but
+      // NEVER for multipart uploads (those stream raw; re-emitting would corrupt the
+      // file body). We re-stream explicitly instead of http-proxy-middleware's
+      // fixRequestBody(): in v3 that helper silently bails (writing NOTHING) when it
+      // can't read a Content-Type off the OUTGOING request, yet http-proxy has already
+      // copied the ORIGINAL Content-Length onto the upstream request — so the backend's
+      // body parser blocks forever waiting for bytes that never arrive and EVERY POST
+      // hangs. Writing the parsed JSON back with a corrected Content-Length fixes it.
+      // Non-JSON bodies (urlencoded, etc.) were never consumed by the JSON parser, so their raw stream
+      // passes through untouched. Keying off the request's JSON CONTENT-TYPE (not off whether the parsed
+      // object has keys) is essential: an empty body `{}` still arrives with the original Content-Length
+      // copied onto the upstream request, so skipping it would leave the backend's express.json() blocking
+      // on bytes that never come — which hung every POST/PUT carrying a `{}` payload (e.g. /coding/scrub,
+      // /coding/raf, eligibility verify). Serializing `{}` sends a correct 2-byte body + Content-Length.
+      // The JSON/urlencoded parser already drained AND ended `req`, so http-proxy's `req.pipe(proxyReq)`
+      // never fires `.end()` on the upstream request — we write the buffered body and end it ourselves so
+      // the backend's parser sees a complete request instead of blocking on Content-Length bytes forever.
+      // Multipart streams raw to multer (never buffered here). Content-type keys the re-serialization so an
+      // empty body (`{}`) is still re-sent with a correct Content-Length rather than skipped (which hung
+      // every POST/PUT with a `{}` payload).
+      if (!isMultipart(req) && req.body && typeof req.body === 'object') {
+        let bodyData = null; let contentType = null;
+        if (isJson(req)) { bodyData = JSON.stringify(req.body); contentType = 'application/json'; }
+        else if (isUrlEncoded(req)) { bodyData = new URLSearchParams(req.body).toString(); contentType = 'application/x-www-form-urlencoded'; }
+        if (bodyData !== null) {
+          proxyReq.setHeader('Content-Type', contentType);
+          proxyReq.setHeader('Content-Length', Buffer.byteLength(bodyData));
+          proxyReq.end(bodyData);
+        }
+      }
     },
     error: (err, req, res) => {
       logger.error({ err: err.message, url: req.originalUrl }, 'Proxy error');
@@ -322,7 +382,22 @@ setInterval(refreshInternalKey, Math.max(5000, KEY_REFRESH_MS)).unref?.();
 refreshInternalKey();
 
 app.use('/api/auth', authEdgeLimiter);
-app.use('/api', edgeLimiter, skipForUploads(jsonParser), skipForUploads(waf), apiProxy);
+// The gateway TERMINATES the client's Expect: 100-continue at ingress (Node answers
+// the continue and body-parser reads the body here). The upstream hop must NOT carry
+// that header forward: node-http-proxy would copy it onto the loopback request and
+// then stall waiting for the backend to re-negotiate a 100-continue for a body we've
+// already consumed — hanging every POST/PUT/PATCH. Strip it before proxying.
+const stripHopHeaders = (req, _res, next) => { delete req.headers.expect; next(); };
+app.use(
+  '/api',
+  edgeLimiter,
+  stripHopHeaders,
+  enforceBodyContentType,     // reject bodies in content-types the API doesn't use (no unscanned passthrough)
+  skipForUploads(jsonParser), // parse + expose JSON for WAF inspection
+  urlencodedOnly,             // parse + expose urlencoded (SMART OAuth token) for WAF inspection
+  skipForUploads(waf),        // signature scan over URL + query + parsed body
+  apiProxy,
+);
 
 // ---------------------------------------------------------------------------
 // SPA delivery. Two supported topologies — the gateway is the edge either way,
@@ -426,8 +501,15 @@ async function start() {
     // Plain-HTTP listener that permanently redirects to HTTPS.
     http
       .createServer((req, res) => {
-        const host = (req.headers.host || `localhost:${HTTPS_PORT}`).replace(/:\d+$/, `:${HTTPS_PORT}`);
-        res.writeHead(301, { Location: `https://${host}${req.url}` });
+        // Redirect to a CONFIGURED canonical host — never blindly reflect the client-controlled Host
+        // header (a reflected open-redirect / cache-poisoning vector). When GATEWAY_CANONICAL_HOST is
+        // unset, fall back to the request Host but strip it to hostname/port chars only (defeats header
+        // injection); set GATEWAY_CANONICAL_HOST in production to close the reflection entirely.
+        const raw = process.env.GATEWAY_CANONICAL_HOST
+          || (req.headers.host || `localhost:${HTTPS_PORT}`).replace(/[^A-Za-z0-9.:-]/g, '');
+        const host = raw.replace(/:\d+$/, `:${HTTPS_PORT}`);
+        const path = String(req.url || '/').replace(/[\r\n]/g, '');
+        res.writeHead(301, { Location: `https://${host}${path}` });
         res.end();
       })
       .listen(PORT, HOST, () => logger.info(`HTTP :${PORT} → HTTPS :${HTTPS_PORT} redirect active`));

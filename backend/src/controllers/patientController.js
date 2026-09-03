@@ -75,7 +75,13 @@ async function ownedPatientOr404(req) {
   const row = await getRawByUuid(req.params.uuid);
   if (!row) { const e = new Error('Patient not found.'); e.status = 404; e.code = 'NOT_FOUND'; throw e; }
   if (Number(row.provider_id) !== Number(req.authUserId)) {
-    if (await hasActiveEmergencyGrant(req.authUserId, row.id)) {
+    // Break-glass authorizes emergency READ ONLY. It is honored solely for safe (GET) requests, so a
+    // grant can NEVER be used to modify, delete, upload to, or re-verify another provider's patient
+    // record — those endpoints (PATCH/POST/DELETE) fail closed to 404 even with an active grant. This
+    // scopes the ONC (d)(6) override to reading the chart in an emergency, not mutating it. Every
+    // emergency read is still written to the tamper-evident audit log.
+    const emergencyReadAllowed = req.method === 'GET';
+    if (emergencyReadAllowed && await hasActiveEmergencyGrant(req.authUserId, row.id)) {
       await recordAudit({
         actorUserId: req.authUserId, action: 'patient.emergency_access.use', outcome: 'success',
         entityType: 'patient', entityId: row.uuid, ...ctx(req),

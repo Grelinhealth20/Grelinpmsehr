@@ -28,9 +28,14 @@ export async function authenticate(req, res, next) {
     // This is what makes a password change / admin force-logout / role or status change actually
     // invalidate live, stateless access tokens (not just refresh tokens) — closing the window where a
     // stolen access token keeps working after a revoke. `iat` is in seconds; compare at that resolution.
-    if (row.tokens_valid_after) {
-      const cutSec = Math.floor(new Date(row.tokens_valid_after).getTime() / 1000);
-      if (typeof claims.iat === 'number' && claims.iat < cutSec) {
+    // Compare the JWT `iat` (a UTC epoch) against a DB-computed UTC epoch of tokens_valid_after
+    // (tokens_valid_after_epoch = UNIX_TIMESTAMP(...)). This is timezone-agnostic on ALL zones:
+    // parsing the raw DATETIME in JS instead would apply the Node process's LOCAL timezone (mysql2's
+    // default), shifting the cutoff by the UTC offset and wrongly rejecting every freshly-issued
+    // token ("Session no longer valid.") whenever the server is not on UTC.
+    if (row.tokens_valid_after_epoch != null) {
+      const cutSec = Number(row.tokens_valid_after_epoch);
+      if (Number.isFinite(cutSec) && typeof claims.iat === 'number' && claims.iat < cutSec) {
         return res.status(401).json({ error: 'Session no longer valid.', code: 'TOKEN_REVOKED' });
       }
     }
