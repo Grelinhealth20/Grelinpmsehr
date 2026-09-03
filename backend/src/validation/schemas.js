@@ -50,6 +50,12 @@ const credentials = z.array(z.string().trim().min(1).max(20)).max(12).optional()
 const providerNpi = z.union([z.string().regex(/^\d{10}$/, 'NPI must be 10 digits.'), z.literal('')]).nullable().optional();
 const taxonomyDesc = z.union([z.string().trim().max(160), z.literal('')]).nullable().optional();
 const taxonomyCode = z.union([z.string().trim().max(16), z.literal('')]).nullable().optional();
+// Additional NPPES (NPI-1) individual-provider details captured from the registry (nothing dropped).
+const nppesStr = (n) => z.union([z.string().trim().max(n), z.literal('')]).nullable().optional();
+const providerNppes = {
+  licenseNumber: nppesStr(32), licenseState: nppesStr(2), providerGender: nppesStr(16),
+  soleProprietor: nppesStr(8), enumerationDate: nppesStr(20), nppesStatus: nppesStr(16),
+};
 
 export const createUserSchema = z
   .object({
@@ -63,6 +69,7 @@ export const createUserSchema = z
     npi: providerNpi,
     taxonomy: taxonomyDesc,
     taxonomyCode,
+    ...providerNppes,
     temporaryPassword: z.string().min(12).max(200),
   })
   .strict();
@@ -78,6 +85,7 @@ export const updateUserSchema = z
     npi: providerNpi,
     taxonomy: taxonomyDesc,
     taxonomyCode,
+    ...providerNppes,
   })
   .strict()
   .refine((v) => Object.keys(v).length > 0, { message: 'No fields to update.' });
@@ -226,13 +234,15 @@ export const updateEncounterSchema = z
 
 // CMS-compliant SNF MD note types.
 // SNF provider-focused, free-form note types: Admission H&P, SOAP, Progress, Discharge.
-export const NOTE_TYPES = ['hp', 'soap', 'progress', 'discharge'];
+export const NOTE_TYPES = ['hp', 'soap', 'progress', 'discharge',
+  'acuteChange', 'acp', 'hospice', 'telehealth', 'custom'];
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be YYYY-MM-DD');
 // Structured note body (PHI, encrypted at rest): narrative sections + Rx list.
 const prescriptionItem = z
   .object({
-    drug: optStr(160), dose: optStr(80), route: optStr(60), frequency: optStr(80),
+    drug: optStr(200), dose: optStr(80), route: optStr(60), frequency: optStr(80),
     quantity: optStr(40), refills: optStr(20), sig: optStr(400),
+    rxcui: optStr(20), // RxNorm code when the drug was picked from the medication assist
   })
   .strict();
 const vitalsSchema = z
@@ -241,19 +251,54 @@ const vitalsSchema = z
     spo2: optStr(20), weight: optStr(20), pain: optStr(20),
   })
   .strict();
-// Long-form clinical notes: a single section may hold a very long narrative (~80k words)
-// and a whole note may reach ~660k words — well beyond the "100k words" real-world ceiling —
-// while the total stays safely under the MEDIUMBLOB (16 MB) content column after encryption.
-const NOTE_SECTION_MAX = 500_000; // chars per section
-const NOTE_TOTAL_MAX = 4_000_000; // chars per note
+// Long-form clinical notes: supports 500,000+ WORDS PER RECORD. A single section may hold the whole
+// narrative if the provider concentrates it there (~570k words), and the whole note may reach ~690k
+// words. The total stays under the 6 MB gateway/backend JSON body cap (encrypted content ~4.6 MB) and
+// well under the MEDIUMBLOB (16 MB) content column. (avg clinical word ≈ 6.5 chars incl. spacing:
+// 500k words ≈ 3.25M chars, so 4.5M chars leaves ~40% headroom.)
+// 500k words ≈ 4.3M chars worst-case (long clinical terms). Caps set so a full 500k-word record fits
+// in ONE section OR spread across sections, with headroom, and the JSON body stays under the 6 MB cap.
+const NOTE_SECTION_MAX = 4_800_000; // chars per section — a single section can hold a full 500k-word narrative
+const NOTE_TOTAL_MAX = 4_800_000;   // chars per note (~500k+ words); encrypted ~4.8 MB < 16 MB, body < 6 MB
 const noteContentSchema = z
   .object({
     vitals: vitalsSchema.optional(),
+    // Encounter type (SNOMED CT concept) chosen by the provider — a real code + display, saved with the
+    // note so the encounter type is accurate and not a static default.
+    encounterType: z.object({ code: z.string().max(30), display: z.string().max(120) }).strict().optional(),
     sections: z.record(z.string().max(NOTE_SECTION_MAX)).optional(),
+    // Structured checkbox selections per section (key → list of ticked option labels). Additive to the
+    // free-form section text; kept inside the note's encrypted content, so it is isolated per note/patient.
+    checks: z.record(z.array(z.string().max(200)).max(60)).optional(),
+    // Custom-template SNAPSHOT: a note built from a provider's custom template carries the full section
+    // list (its own headings/prompts/checkboxes) + name, so the signed record is self-contained and the
+    // download renders the exact headings the provider wrote — even if the template is later changed.
+    templateName: optStr(120),
+    customSections: z.array(z.object({
+      key: z.string().max(64),
+      label: z.string().max(120),
+      prompt: z.string().max(500).optional(),
+      rows: z.number().int().min(2).max(8).optional(),
+      checks: z.array(z.string().max(200)).max(20).optional(),
+    }).strict()).max(60).optional(),
     prescriptions: z.array(prescriptionItem).max(40).optional(),
     // The template's clinical section order — so the record renders in the exact
     // provider order for this note type (dynamic per note type).
     sectionOrder: z.array(z.string().max(64)).max(80).optional(),
+    // SYSTEM-COMPOSED attestation captured on sign-off (compliance-proof, not hand-typed): the CMS
+    // attestation statement for the note type + the physician signer, and — when a non-physician
+    // practitioner performed the visit — the named rendering practitioner (split/shared). Written
+    // server-side on sign/amend; included here so the signed body re-validates on read/re-save.
+    signedAttestation: z.object({
+      statement: z.string().max(2000),
+      signer: z.string().max(200),
+      signerCredentials: z.array(z.string().max(20)).max(12).optional(),
+      rendering: z.object({
+        name: z.string().max(160),
+        creds: z.array(z.string().max(20)).max(12).optional(),
+        npi: z.string().max(10).optional(),
+      }).strict().nullable().optional(),
+    }).strict().optional(),
   })
   .strict()
   .refine((c) => JSON.stringify(c).length <= NOTE_TOTAL_MAX, { message: 'Note content exceeds the maximum size.' })
@@ -326,7 +371,9 @@ const facilityBase = {
   name: z.string().trim().min(1, 'Facility name is required.').max(200),
   address: optStr(200), city: optStr(120),
   state: z.union([z.string().trim().length(2), z.literal('')]).optional(),
-  zip: optStr(10), phone: optStr(24), taxonomy: optStr(160), taxId: optStr(32),
+  zip: optStr(10), phone: optStr(24), fax: optStr(24),
+  taxonomy: optStr(160), taxonomyCode: optStr(16), taxId: optStr(32),
+  authorizedOfficial: optStr(200), enumerationDate: optStr(20), mailingAddress: optStr(300), nppesStatus: optStr(16),
   // Facility logo as a data URI (base64 image) or empty to clear. ~700 KB cap.
   logo: z.union([
     z.string().regex(/^data:image\/(png|jpe?g|gif|webp|svg\+xml);base64,/, 'Logo must be a PNG, JPG, GIF, WEBP, or SVG image.').max(700000),

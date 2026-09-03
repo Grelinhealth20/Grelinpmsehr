@@ -3,11 +3,19 @@ import Modal from './Modal.jsx';
 import { useToast } from './Toast.jsx';
 import { patientsApi, encountersApi, toApiError } from '../lib/api.js';
 import BenefitsVerification from './BenefitsVerification.jsx';
-import { EncounterNotesModal, usDate, encNo, loadNoteDefs } from './EncounterNotes.jsx';
-import { NOTE_TYPES } from '../lib/noteTemplates.js';
+import { EncounterNotesModal, usDate, encNo, loadNoteDefs, loadCustomTemplates, CustomTemplateBuilder } from './EncounterNotes.jsx';
+import { NOTE_TYPES, SECTION_LABELS } from '../lib/noteTemplates.js';
 
 const ENC_PER_PAGE = 25;
 const procedureLabel = (r) => (r.noteTypes ? r.noteTypes.split(',').map((c) => NOTE_TYPES[c]?.label || c).join(', ') : '—');
+
+/** Windowed page numbers with ellipses, e.g. 1 … 4 5 6 … 20 — for the encounters pager. */
+function pageWindow(page, pages) {
+  const nums = [...new Set([1, pages, page, page - 1, page + 1])].filter((x) => x >= 1 && x <= pages).sort((a, b) => a - b);
+  const out = []; let prev = 0;
+  for (const n of nums) { if (n - prev > 1) out.push('…'); out.push(n); prev = n; }
+  return out;
+}
 
 const EMPTY = {
   demographics: { firstName: '', lastName: '', dob: '', gender: 'unknown', phone: '', email: '', address: '', city: '', state: '', zip: '', ssn: '' },
@@ -336,6 +344,8 @@ export default function PatientModal({ uuid = null, docMode = 'license', initial
   const [pendingNewEncType, setPendingNewEncType] = useState(null); // note type chosen from the dropdown (or null = pick in editor)
   const [noteMenuOpen, setNoteMenuOpen] = useState(false);
   const [noteTypeDefs, setNoteTypeDefs] = useState([]); // backend note types for the dropdown
+  const [customTpls, setCustomTpls] = useState([]); // provider's own custom templates for the dropdown
+  const [builderOpen, setBuilderOpen] = useState(false); // custom-template builder from the dropdown
 
   // Download the record that matches the tab in view — the Face Sheet, or the
   // benefits/eligibility document. Both are facility-branded, grayscale PDFs.
@@ -371,10 +381,11 @@ export default function PatientModal({ uuid = null, docMode = 'license', initial
     return () => { active = false; };
   }, [uuid, toast]);
 
-  // Backend-authoritative note types for the "New encounter" dropdown (shared, cached).
+  // Backend-authoritative note types + the provider's custom templates for the dropdown (shared, cached).
   useEffect(() => {
     let active = true;
     loadNoteDefs().then((d) => { if (active) setNoteTypeDefs(d.list || []); }).catch(() => { /* retried on open */ });
+    loadCustomTemplates().then((list) => { if (active) setCustomTpls(list || []); }).catch(() => { /* non-fatal */ });
     return () => { active = false; };
   }, []);
 
@@ -485,7 +496,9 @@ export default function PatientModal({ uuid = null, docMode = 'license', initial
 
   return (
     <Modal
-      title={pUuid ? 'Patient Face Sheet' : 'New Patient — Face Sheet'}
+      title={pUuid
+        ? `${patientDisplayName({ demographics: form.demographics }) || 'Patient'}${mrn ? ` · MRN ${mrn}` : ''}`
+        : 'New Patient — Face Sheet'}
       size="full"
       onClose={onClose}
       footer={
@@ -523,7 +536,11 @@ export default function PatientModal({ uuid = null, docMode = 'license', initial
                   New encounter
                 </button>
                 <button type="button" className={`newenc-caret ${noteMenuOpen ? 'is-open' : ''}`} aria-haspopup="menu" aria-expanded={noteMenuOpen} title="Start with a note type"
-                  onClick={() => { setNoteMenuOpen((o) => !o); if (noteTypeDefs.length === 0) loadNoteDefs().then((d) => setNoteTypeDefs(d.list || [])).catch(() => {}); }}>
+                  onClick={() => {
+                    setNoteMenuOpen((o) => !o);
+                    if (noteTypeDefs.length === 0) loadNoteDefs().then((d) => setNoteTypeDefs(d.list || [])).catch(() => {});
+                    loadCustomTemplates().then((list) => setCustomTpls(list || [])).catch(() => {});
+                  }}>
                   <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg>
                 </button>
                 {noteMenuOpen && (
@@ -531,15 +548,31 @@ export default function PatientModal({ uuid = null, docMode = 'license', initial
                     <div className="newenc-scrim" onClick={() => setNoteMenuOpen(false)} />
                     <div className="newenc-menu" role="menu">
                       <div className="newenc-menu-h">New encounter · start a note</div>
-                      {noteTypeDefs.length === 0 ? (
-                        <div className="newenc-menu-empty">Loading note types…</div>
-                      ) : noteTypeDefs.map((t) => (
-                        <button key={t.noteType} type="button" role="menuitem" className="newenc-menu-item"
-                          onClick={() => { setNoteMenuOpen(false); setPendingNewEncType(t.noteType); setViewTab('encounters'); setPendingNewEnc(true); }}>
-                          <span className="newenc-menu-lbl">{t.label}</span>
-                          <span className="newenc-menu-cat">{t.category}</span>
-                        </button>
-                      ))}
+                      <div className="newenc-menu-scroll">
+                        {noteTypeDefs.length === 0 ? (
+                          <div className="newenc-menu-empty">Loading note types…</div>
+                        ) : noteTypeDefs.map((t) => (
+                          <button key={t.noteType} type="button" role="menuitem" className="newenc-menu-item"
+                            onClick={() => { setNoteMenuOpen(false); setPendingNewEncType(t.noteType); setViewTab('encounters'); setPendingNewEnc(true); }}>
+                            <span className="newenc-menu-lbl">{t.label}</span>
+                            <span className="newenc-menu-cat">{t.category}</span>
+                          </button>
+                        ))}
+                        <div className="newenc-menu-sub">My custom templates</div>
+                        {customTpls.map((t) => (
+                          <button key={t.uuid} type="button" role="menuitem" className="newenc-menu-item"
+                            onClick={() => { setNoteMenuOpen(false); setPendingNewEncType(`custom:${t.uuid}`); setViewTab('encounters'); setPendingNewEnc(true); }}>
+                            <span className="newenc-menu-lbl">{t.label}</span>
+                            <span className="newenc-menu-cat">{t.sections.length} heading{t.sections.length === 1 ? '' : 's'} · custom</span>
+                          </button>
+                        ))}
+                      </div>
+                      {/* Fixed footer — OUTSIDE the scroll area, so it never overlaps the scrolling list. */}
+                      <button type="button" role="menuitem" className="newenc-menu-build"
+                        onClick={() => { setNoteMenuOpen(false); setBuilderOpen(true); }}>
+                        <span className="newenc-menu-lbl">+ Build custom template</span>
+                        <span className="newenc-menu-cat">Design your own headings — saved to your account</span>
+                      </button>
                     </div>
                   </>
                 )}
@@ -757,6 +790,22 @@ export default function PatientModal({ uuid = null, docMode = 'license', initial
           )}
         </div>
       )}
+      {builderOpen && (
+        <CustomTemplateBuilder
+          initial={{}}
+          headingDict={Object.entries(SECTION_LABELS)}
+          onSave={async ({ name, sections }) => {
+            try {
+              const { data } = await encountersApi.createCustomTemplate({ name, sections });
+              setCustomTpls((cs) => [data.template, ...cs]);
+              setBuilderOpen(false);
+              toast.success('Template saved — starting an encounter with it.');
+              if (pUuid) { setPendingNewEncType(`custom:${data.template.uuid}`); setViewTab('encounters'); setPendingNewEnc(true); }
+            } catch (e) { toast.error(toApiError(e).message); throw e; }
+          }}
+          onClose={() => setBuilderOpen(false)}
+        />
+      )}
     </Modal>
   );
 }
@@ -807,6 +856,9 @@ function EncountersTab({ patientUuid, patient, openNew = false, startNoteType = 
   }, [ePage, patientUuid, refreshKey, toast]);
 
   const ePages = Math.max(1, Math.ceil(encTotal / ENC_PER_PAGE));
+  // If the total shrinks (e.g. an encounter is removed) and the current page no longer exists,
+  // snap back to the last valid page so the table never shows a stale empty page.
+  useEffect(() => { if (ePage > ePages) setEPage(ePages); }, [ePages, ePage]);
   const reload = () => setRefreshKey((k) => k + 1);
   const encFor = (r) => ({ encounterUuid: r.encounterUuid, encounterNo: r.encounterNo, patientName: patient.patientName, mrn: patient.mrn, date: r.date, facilityName: patient.facilityName, dob: patient.dob, gender: patient.gender, renderingProvider: r.renderingProvider, signedOffProvider: r.signedOffProvider });
 
@@ -847,11 +899,13 @@ function EncountersTab({ patientUuid, patient, openNew = false, startNoteType = 
       </table>
       {ePages > 1 && (
         <div className="pager pager-c">
-          <span className="pager-label">{encTotal} encounters</span>
+          <span className="pager-label">Showing {(ePage - 1) * ENC_PER_PAGE + 1}–{Math.min(ePage * ENC_PER_PAGE, encTotal)} of {encTotal}</span>
           <span className="spacer" />
-          <button className="pager-btn" disabled={ePage <= 1} onClick={() => setEPage((p) => p - 1)}>‹ Prev</button>
-          <span className="pager-num is-on">{ePage}</span>
-          <button className="pager-btn" disabled={ePage >= ePages} onClick={() => setEPage((p) => p + 1)}>Next ›</button>
+          <button className="pager-btn" disabled={ePage <= 1 || eLoading} onClick={() => setEPage((p) => Math.max(1, p - 1))}>‹ Prev</button>
+          {pageWindow(ePage, ePages).map((x, i) => (x === '…'
+            ? <span key={`e${i}`} className="pager-ellipsis">…</span>
+            : <button key={x} className={`pager-num ${x === ePage ? 'is-on' : ''}`} disabled={eLoading} onClick={() => setEPage(x)}>{x}</button>))}
+          <button className="pager-btn" disabled={ePage >= ePages || eLoading} onClick={() => setEPage((p) => Math.min(ePages, p + 1))}>Next ›</button>
         </div>
       )}
 

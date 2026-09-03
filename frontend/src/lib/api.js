@@ -157,6 +157,11 @@ export const auditApi = {
   list: (params) => api.get('/audit', { params }),
 };
 
+// --- AI usage logs (super-admin only; real-time token usage per request) -----
+export const aiLogsApi = {
+  list: (params) => api.get('/ai-logs', { params }),
+};
+
 // --- System settings (feature flags) ---------------------------------------
 // GET readable by any authenticated user; PATCH is super-admin only (server-enforced).
 export const settingsApi = {
@@ -226,6 +231,25 @@ export const encountersApi = {
   updateStatus: (appointmentUuid, payload) => api.patch(`/encounters/${appointmentUuid}`, payload),
   // Backend-authoritative note-type templates (H&P / SOAP / Progress).
   noteTemplates: () => api.get('/encounters/note-templates'),
+  // Custom (provider-authored) note templates — owner-scoped.
+  listCustomTemplates: () => api.get('/encounters/custom-templates'),
+  createCustomTemplate: (payload) => api.post('/encounters/custom-templates', payload),
+  generateCustomTemplate: (prompt) => api.post('/encounters/custom-templates/generate', { prompt }),
+  updateCustomTemplate: (uuid, payload) => api.put(`/encounters/custom-templates/${uuid}`, payload),
+  deleteCustomTemplate: (uuid) => api.delete(`/encounters/custom-templates/${uuid}`),
+  // Encounter lab / imaging document attachments (S3-backed, per-encounter folders).
+  listEncounterDocs: (encounterUuid, kind) => api.get(`/encounters/${encounterUuid}/documents`, { params: { kind } }),
+  uploadEncounterDoc: (encounterUuid, kind, file, onProgress) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return api.post(`/encounters/${encounterUuid}/documents`, fd, {
+      params: { kind },
+      headers: { 'Content-Type': undefined }, // browser sets multipart boundary
+      onUploadProgress: onProgress,
+    });
+  },
+  encounterDocUrl: (docUuid) => api.get(`/encounters/documents/${docUuid}/url`),
+  deleteEncounterDoc: (docUuid) => api.delete(`/encounters/documents/${docUuid}`),
   // Authoritative encounter-header details (patient, MRN, DOB, age, facility, provider).
   encounterDetails: (encounterUuid) => api.get(`/encounters/${encounterUuid}/details`),
   // Clinical notes
@@ -248,6 +272,9 @@ export const encountersApi = {
 export const terminologyApi = {
   snomed: (q, pageSize) => api.get('/terminology/snomed', { params: { q, pageSize } }),
   rxnorm: (q, pageSize) => api.get('/terminology/rxnorm', { params: { q, pageSize } }),
+  // Real-time prescribing safety: FDA-label interactions/warnings + allergy + duplicate-therapy check.
+  rxSafety: ({ name, rxcui, allergies, current }) =>
+    api.get('/terminology/rx-safety', { params: { name, rxcui, allergies, current } }),
   cpt: (q, pageSize) => api.get('/terminology/cpt', { params: { q, pageSize } }),
   search: (q, source, pageSize) => api.get('/terminology/search', { params: { q, source, pageSize } }),
   // SNOMED concept → billable ICD-10-CM (official complex map).

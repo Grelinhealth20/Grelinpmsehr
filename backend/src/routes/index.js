@@ -12,6 +12,8 @@ import payerRoutes from './payerRoutes.js';
 import settingsRoutes from './settingsRoutes.js';
 import terminologyRoutes from './terminologyRoutes.js';
 import codingRoutes from './codingRoutes.js';
+import aiLogsRoutes from './aiLogsRoutes.js';
+import fhirRoutes from '../fhir/fhirRoutes.js';
 
 const router = Router();
 
@@ -30,5 +32,8 @@ router.use('/audit', auditRoutes);
 router.use('/settings', settingsRoutes);
 router.use('/terminology', terminologyRoutes);
 router.use('/coding', codingRoutes);
+router.use('/ai-logs', aiLogsRoutes);
+// FHIR R4 / US Core API (ONC (g)(10) foundation). /metadata is public; resources are provider-scoped.
+router.use('/fhir/R4', fhirRoutes);
 
 export default router;

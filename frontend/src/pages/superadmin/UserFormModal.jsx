@@ -64,6 +64,13 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
   const [npi, setNpi] = useState(user?.npi || '');
   const [taxonomy, setTaxonomy] = useState(user?.taxonomy || '');
   const [taxonomyCode, setTaxonomyCode] = useState(user?.taxonomyCode || '');
+  // Full NPPES (NPI-1) registry details — captured so nothing is dropped.
+  const [licenseNumber, setLicenseNumber] = useState(user?.licenseNumber || '');
+  const [licenseState, setLicenseState] = useState(user?.licenseState || '');
+  const [providerGender, setProviderGender] = useState(user?.gender || '');
+  const [soleProprietor, setSoleProprietor] = useState(user?.soleProprietor || '');
+  const [enumerationDate, setEnumerationDate] = useState(user?.enumerationDate || '');
+  const [nppesStatus, setNppesStatus] = useState(user?.nppesStatus || '');
   const [npiTerm, setNpiTerm] = useState('');
   const [npiResults, setNpiResults] = useState([]);
   const [npiSearching, setNpiSearching] = useState(false);
@@ -177,6 +184,12 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
     setNpi(r.npi || '');
     setTaxonomy(r.taxonomy || '');
     setTaxonomyCode(r.taxonomyCode || '');
+    setLicenseNumber(r.licenseNumber || '');
+    setLicenseState(r.licenseState || '');
+    setProviderGender(r.gender || '');
+    setSoleProprietor(r.soleProprietor || '');
+    setEnumerationDate(r.enumerationDate || '');
+    setNppesStatus(r.nppesStatus || r.status || '');
     if (Array.isArray(r.credentials) && r.credentials.length) {
       setCredentials((l) => Array.from(new Set([...l, ...r.credentials])));
     }
@@ -207,6 +220,12 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
           npi: isProvider ? npi.trim() : '',
           taxonomy: isProvider ? taxonomy.trim() : '',
           taxonomyCode: isProvider ? taxonomyCode.trim() : '',
+          licenseNumber: isProvider ? licenseNumber.trim() : '',
+          licenseState: isProvider ? licenseState.trim() : '',
+          providerGender: isProvider ? providerGender.trim() : '',
+          soleProprietor: isProvider ? soleProprietor.trim() : '',
+          enumerationDate: isProvider ? enumerationDate.trim() : '',
+          nppesStatus: isProvider ? nppesStatus.trim() : '',
         };
         if (!isMasterUser) payload.role = role; // master admin role is immutable
         await usersApi.update(user.uuid, payload);
@@ -222,6 +241,12 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
           npi: isProvider ? npi.trim() : undefined,
           taxonomy: isProvider ? taxonomy.trim() : undefined,
           taxonomyCode: isProvider ? taxonomyCode.trim() : undefined,
+          licenseNumber: isProvider ? licenseNumber.trim() : undefined,
+          licenseState: isProvider ? licenseState.trim() : undefined,
+          providerGender: isProvider ? providerGender.trim() : undefined,
+          soleProprietor: isProvider ? soleProprietor.trim() : undefined,
+          enumerationDate: isProvider ? enumerationDate.trim() : undefined,
+          nppesStatus: isProvider ? nppesStatus.trim() : undefined,
           temporaryPassword: tempPassword,
         });
         // Assign the selected facilities to the freshly created user.
@@ -326,6 +351,14 @@ export default function UserFormModal({ mode, user, lockedRole, onClose, onSaved
               </div>
             </div>
             {taxonomyCode && <span className="hint">Taxonomy code: {taxonomyCode}</span>}
+            <div className="fac-grid" style={{ marginTop: 10 }}>
+              <div className="fac-fld"><label>License #</label><input className="input" value={licenseNumber} maxLength={32} onChange={(e) => setLicenseNumber(e.target.value)} /></div>
+              <div className="fac-fld"><label>License state</label><input className="input" value={licenseState} maxLength={2} onChange={(e) => setLicenseState(e.target.value.toUpperCase().slice(0, 2))} /></div>
+              <div className="fac-fld"><label>Gender</label><input className="input" value={providerGender} maxLength={16} onChange={(e) => setProviderGender(e.target.value)} /></div>
+              <div className="fac-fld"><label>Sole proprietor</label><input className="input" value={soleProprietor} maxLength={8} onChange={(e) => setSoleProprietor(e.target.value)} /></div>
+              <div className="fac-fld"><label>Enumeration date</label><input className="input" value={enumerationDate} maxLength={20} onChange={(e) => setEnumerationDate(e.target.value)} /></div>
+              <div className="fac-fld"><label>NPPES status</label><input className="input" value={nppesStatus} maxLength={16} onChange={(e) => setNppesStatus(e.target.value)} /></div>
+            </div>
           </div>
         )}
 

@@ -5,12 +5,15 @@ import {
 } from '../services/keyRotationService.js';
 
 const OPTS = { issuer: 'grelin-pms', audience: 'grelin-web' };
+// Verification pins the algorithm to HS256 (all secrets are symmetric HMAC) — defense-in-depth against
+// algorithm-confusion / `alg:none` should the key material ever change type.
+const VERIFY_OPTS = { ...OPTS, algorithms: ['HS256'] };
 
 /** Try each secret in the rotation ring until one verifies; else throw the last error. */
 function verifyWithRing(token, secrets) {
   let lastErr = new Error('no signing secret available');
   for (const secret of secrets) {
-    try { return jwt.verify(token, secret, OPTS); } catch (err) { lastErr = err; }
+    try { return jwt.verify(token, secret, VERIFY_OPTS); } catch (err) { lastErr = err; }
   }
   throw lastErr;
 }

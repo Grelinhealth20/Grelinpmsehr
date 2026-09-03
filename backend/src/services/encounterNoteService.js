@@ -7,6 +7,7 @@ import { encrypt, decrypt } from '../utils/crypto.js';
 import { getOwnedEncounterId, getAccessibleEncounterId } from './encounterService.js';
 import { viewerScope, isFacilityWide, noteServiceLineWhere } from './accessScope.js';
 import { storeSignedNoteDoc } from './noteDocumentService.js';
+import { logger } from '../config/logger.js';
 
 // Build the READ-access SQL condition for a note by the viewer's scope: own note, OR a
 // facility-wide MD whose facilities include the patient's facility AND whose SERVICE
@@ -23,12 +24,43 @@ function noteAccess(scope, userId, params) {
  * Clinical notes for an encounter. Body is encrypted PHI (structured JSON).
  * A note is DRAFT until signed; once signed it is immutable and billing-ready.
  *
- * SIGN-OFF AUTHORITY: only a provider holding one of SIGNER_CREDENTIALS (MD)
- * may approve/sign a note. Enforced server-side — the UI gate is advisory only.
+ * SIGN-OFF AUTHORITY: only a PHYSICIAN (MD or DO) may approve/finalize a note for
+ * billing. NPPs (NP / APRN / PA) draft and route to a physician for the final signature.
+ * Enforced server-side — the UI gate is advisory only.
  */
-export const SIGNER_CREDENTIALS = ['MD'];
+export const SIGNER_CREDENTIALS = ['MD', 'DO'];
 
 function safeParse(buf) { try { return JSON.parse(decrypt(buf)); } catch { return null; } }
+/**
+ * Parse a NOTE BODY (encrypted clinical content). Unlike safeParse, a present-but-undecryptable
+ * body is NOT silently treated as empty — that would let the editor load a blank note and let
+ * autosave overwrite the real record with nothing. A null column is a legitimately empty note ({});
+ * a decrypt/parse failure is corruption and is raised loudly so the record is never silently lost.
+ */
+function parseNoteBody(buf) {
+  if (!buf) return {};
+  try { return JSON.parse(decrypt(buf)); }
+  catch {
+    const err = new Error('This note could not be opened — its saved content failed to decrypt (possible data corruption). It was NOT modified.');
+    err.status = 422; err.code = 'NOTE_CONTENT_UNREADABLE';
+    throw err;
+  }
+}
+/**
+ * Decrypt patient IDENTITY (demographics) for a generated record or coding. A null column is a
+ * legitimately empty value ({}); a present-but-undecryptable blob is corruption and is raised loudly
+ * rather than silently yielding a blank-identity billing/medical record. (safeParse||{} is retained
+ * only for SECONDARY context — insurance/facility — where a blank degrades gracefully.)
+ */
+function strictIdentity(buf, label = 'Patient demographics') {
+  if (!buf) return {};
+  try { return JSON.parse(decrypt(buf)); }
+  catch {
+    const err = new Error(`${label} could not be decrypted (possible data corruption) — the record cannot be generated.`);
+    err.status = 422; err.code = 'PATIENT_IDENTITY_UNREADABLE';
+    throw err;
+  }
+}
 function credsOf(raw) {
   if (Array.isArray(raw)) return raw;
   if (typeof raw === 'string') { try { return JSON.parse(raw); } catch { return []; } }
@@ -46,6 +78,63 @@ function signerDisplayName(fullNameEnc, credentials, npi) {
   let out = creds.length ? `${name}, ${creds.join(', ')}` : name;
   if (npi && /^\d{10}$/.test(String(npi).trim())) out += ` · NPI ${String(npi).trim()}`;
   return out;
+}
+const isPhysicianCreds = (credentials) =>
+  credsOf(credentials).map((c) => String(c).toUpperCase().trim()).some((c) => SIGNER_CREDENTIALS.includes(c));
+
+/**
+ * AUTOMATIC, compliance-proof attestation composed by the SYSTEM on sign-off — never hand-typed, so
+ * every finalized record carries the correct CMS attestation language for its note type plus the
+ * physician's identity. When a non-physician practitioner (NP/APRN/PA) performed the visit and a
+ * physician finalizes it, the NPP is named as the rendering practitioner and the physician as the
+ * attesting/finalizing physician (split/shared or collaborative service). The initial SNF visit (H&P)
+ * is a physician service and is never framed as split/shared.
+ */
+const ATTESTATION_STATEMENTS = {
+  hp: 'I personally performed this initial comprehensive visit in its entirety on the date of service. The initial SNF visit is a physician service and was not furnished as a split/shared visit.',
+  soap: 'I personally performed the substantive portion of this evaluation and management service on the date of service.',
+  progress: 'I personally performed the substantive portion of this evaluation and management service on the date of service.',
+  discharge: 'I personally performed this discharge-day evaluation and management service on the date of service.',
+  acuteChange: 'I personally performed this medically necessary unscheduled evaluation and management service on the date of service.',
+  acp: 'I personally performed this advance care planning discussion on the date of service.',
+  hospice: 'I am the patient’s designated attending physician (not employed by the hospice) and personally performed this visit on the date of service.',
+  telehealth: 'This evaluation and management service was furnished via telehealth as attested; the billing team applies the telehealth modifier and place of service.',
+  custom: 'I personally performed and reviewed this service on the date of service.',
+};
+// The initial comprehensive visit (H&P) must be physician-performed — never framed as split/shared.
+const SPLIT_SHARED_TYPES = new Set(['soap', 'progress', 'discharge', 'acuteChange', 'acp', 'hospice', 'telehealth', 'custom']);
+
+export function buildSignedAttestation({ noteType, signerName, signerCreds, rendering }) {
+  const base = ATTESTATION_STATEMENTS[noteType] || ATTESTATION_STATEMENTS.custom;
+  const parts = [base];
+  if (rendering && SPLIT_SHARED_TYPES.has(noteType)) {
+    const rc = rendering.creds?.length ? `, ${rendering.creds.join(', ')}` : '';
+    const rn = rendering.npi ? ` (NPI ${rendering.npi})` : '';
+    parts.push(`This visit was furnished as a split/shared or collaborative service: ${rendering.name}${rc}${rn} served as the rendering practitioner, and I, as the attending physician, personally performed the substantive portion and take responsibility for the care documented.`);
+  }
+  return {
+    statement: parts.join(' '),
+    signer: signerName || 'Provider',
+    signerCredentials: (signerCreds || []).map((c) => String(c).toUpperCase().trim()).filter(Boolean),
+    rendering: rendering || null,
+    // signedAt / signedBy come from the note's signed_at / signed_by_name columns (authoritative).
+  };
+}
+
+/** Resolve the rendering NON-PHYSICIAN practitioner (the note's author) when a physician finalizes
+ *  a note someone else drafted. Returns null when the author is the signer or is themselves a physician. */
+async function renderingNppFor(createdBy, signerId) {
+  if (!createdBy || createdBy === signerId) return null;
+  const [rows] = await execute('SELECT full_name_enc, credentials, npi FROM users WHERE id = :id LIMIT 1', { id: createdBy });
+  const a = rows[0];
+  if (!a || !a.full_name_enc || isPhysicianCreds(a.credentials)) return null;
+  let name; try { name = decrypt(a.full_name_enc); } catch { return null; }
+  if (!name) return null;
+  return {
+    name,
+    creds: credsOf(a.credentials).map((c) => String(c).toUpperCase().trim()).filter(Boolean),
+    npi: a.npi && /^\d{10}$/.test(String(a.npi).trim()) ? String(a.npi).trim() : '',
+  };
 }
 
 export async function listNotes(encounterUuid, providerId) {
@@ -93,7 +182,7 @@ export async function getNote(noteUuid, providerId) {
   if (!r) return null;
   return {
     uuid: r.uuid, noteType: r.note_type, reason: r.reason,
-    content: r.content_enc ? (safeParse(r.content_enc) || {}) : {},
+    content: parseNoteBody(r.content_enc),
     status: r.status, billingReady: !!r.billing_ready,
     signedByName: r.signed_by_name, signedAt: r.signed_at,
     isOwner: !!Number(r.is_owner),
@@ -167,7 +256,7 @@ async function noteRafPatient(noteUuid, providerId) {
        LEFT JOIN patients p ON p.id = e.patient_id
       WHERE n.uuid = :u AND ${access} LIMIT 1`, params);
   const r = rows[0]; if (!r) return null;
-  const demo = safeParse(r.demographics_enc) || {};
+  const demo = strictIdentity(r.demographics_enc);
   const insRaw = r.insurance_enc ? safeParse(r.insurance_enc) : null;
   const insurance = Array.isArray(insRaw) ? insRaw : insRaw ? [insRaw] : [];
   const facility = r.facility_enc ? safeParse(r.facility_enc) : null;
@@ -262,7 +351,7 @@ export async function signNote(noteUuid, providerId, { content, reason } = {}) {
   const sp = { u: noteUuid };
   const access = noteAccess(scope, providerId, sp);
   const [srows] = await execute(
-    `SELECT n.id, n.status FROM encounter_notes n
+    `SELECT n.id, n.status, n.note_type, n.created_by, n.content_enc FROM encounter_notes n
        JOIN encounters e ON e.id = n.encounter_id
        LEFT JOIN patients p ON p.id = e.patient_id
       WHERE n.uuid = :u AND ${access} LIMIT 1`,
@@ -272,9 +361,16 @@ export async function signNote(noteUuid, providerId, { content, reason } = {}) {
   if (!r) return null;
   if (r.status === 'signed') return { locked: true };
   const signerName = signerDisplayName(u.full_name_enc, u.credentials, u.npi);
-  const sets = ['status = \'signed\'', 'billing_ready = 1', 'signed_by = :pid', 'signed_by_name = :name', 'signed_at = NOW()'];
-  const params = { id: r.id, pid: providerId, name: signerName };
-  if (content !== undefined) { sets.push('content_enc = :content'); params.content = content ? encrypt(JSON.stringify(content)) : null; }
+  // AUTO-ATTESTATION: compose the compliance attestation server-side and ALWAYS persist it with the
+  // body, so every signed record carries it — independent of the client. Base is the client's final
+  // edits when sent, otherwise the current stored body (never wiping content on sign).
+  const base = content !== undefined ? (content || {}) : parseNoteBody(r.content_enc);
+  const rendering = await renderingNppFor(r.created_by, providerId);
+  const signedAttestation = buildSignedAttestation({ noteType: r.note_type, signerName, signerCreds: credsOf(u.credentials), rendering });
+  const finalContent = { ...base, signedAttestation };
+  const sets = ['status = \'signed\'', 'billing_ready = 1', 'signed_by = :pid', 'signed_by_name = :name', 'signed_at = NOW()',
+    'content_enc = :content'];
+  const params = { id: r.id, pid: providerId, name: signerName, content: encrypt(JSON.stringify(finalContent)) };
   if (reason !== undefined) { sets.push('reason = :reason'); params.reason = reason || null; }
   // Guard against a double-sign race: only a still-draft row transitions to signed.
   const [res] = await execute(`UPDATE encounter_notes SET ${sets.join(', ')} WHERE id = :id AND status = 'draft'`, params);
@@ -301,7 +397,15 @@ async function generateSignedDoc(noteId, note, signerName) {
   );
   const m = meta[0];
   if (!m || !m.patient_uuid) return;
-  const demo = safeParse(m.demographics_enc) || {};
+  // The note is already signed & committed at this point; document generation is best-effort and must
+  // never break that. But it must also never emit a blank-IDENTITY legal record — if the patient
+  // demographics can't be decrypted, log loudly and skip generation rather than produce a wrong doc.
+  let demo;
+  try { demo = m.demographics_enc ? JSON.parse(decrypt(m.demographics_enc)) : {}; }
+  catch {
+    logger.error({ noteId }, 'Signed-note document NOT generated: patient demographics failed to decrypt (possible corruption)');
+    return;
+  }
   const fac = safeParse(m.facility_enc) || {};
   const patientName = `${demo.firstName || ''} ${demo.lastName || ''}`.trim() || 'Patient';
   let providerName = '';
@@ -342,7 +446,7 @@ export async function amendSignedNote(noteUuid, providerId, { content, reason } 
   const sp = { u: noteUuid };
   const access = noteAccess(scope, providerId, sp);
   const [srows] = await execute(
-    `SELECT n.id, n.status FROM encounter_notes n
+    `SELECT n.id, n.status, n.note_type, n.created_by, n.content_enc FROM encounter_notes n
        JOIN encounters e ON e.id = n.encounter_id
        LEFT JOIN patients p ON p.id = e.patient_id
       WHERE n.uuid = :u AND ${access} LIMIT 1`,
@@ -352,11 +456,13 @@ export async function amendSignedNote(noteUuid, providerId, { content, reason } 
   if (!r) return null;
   if (r.status !== 'signed') return { notSigned: true }; // only signed notes are "amended"
   const signerName = signerDisplayName(u.full_name_enc, u.credentials, u.npi);
-  const sets = ['signed_by = :pid', 'signed_by_name = :name', 'signed_at = NOW()'];
-  const params = { pid: providerId, name: signerName, id: r.id };
-  // Never null the clinical content on a metadata-only amendment — that would
-  // destroy a finalized, billing-ready medical record. Only replace it when sent.
-  if (content !== undefined) { sets.push('content_enc = :content'); params.content = content ? encrypt(JSON.stringify(content)) : null; }
+  // Re-compose the attestation for the AMENDING physician (the record is now attested by them).
+  const base = content !== undefined ? (content || {}) : parseNoteBody(r.content_enc);
+  const rendering = await renderingNppFor(r.created_by, providerId);
+  const signedAttestation = buildSignedAttestation({ noteType: r.note_type, signerName, signerCreds: credsOf(u.credentials), rendering });
+  const finalContent = { ...base, signedAttestation };
+  const sets = ['signed_by = :pid', 'signed_by_name = :name', 'signed_at = NOW()', 'content_enc = :content'];
+  const params = { pid: providerId, name: signerName, id: r.id, content: encrypt(JSON.stringify(finalContent)) };
   const [res] = await execute(`UPDATE encounter_notes SET ${sets.join(', ')} WHERE id = :id AND status = 'signed'`, params);
   if (res.affectedRows === 0) return null;
   const amended = await getNote(noteUuid, providerId);

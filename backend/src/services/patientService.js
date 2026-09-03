@@ -246,6 +246,13 @@ export async function applyPatientUpdateLocked(uuid, mergeFn) {
   return withTransaction(async (exec) => {
     const [rows] = await exec('SELECT * FROM patients WHERE uuid = :uuid FOR UPDATE', { uuid });
     if (!rows[0]) return null;
+    // Read-modify-write guard: NEVER merge onto a silently-blanked snapshot. demographics_enc is
+    // NOT NULL, so if it fails to decrypt the row is corrupt — abort loudly rather than risk
+    // overwriting real PHI (name/insurance) with an empty merge. (A null column is impossible here.)
+    if (rows[0].demographics_enc) {
+      try { JSON.parse(decrypt(rows[0].demographics_enc)); }
+      catch { const e = new Error('Patient record could not be decrypted — update aborted to protect the record.'); e.status = 422; e.code = 'PATIENT_UNREADABLE'; throw e; }
+    }
     const patch = mergeFn(toPublicPatient(rows[0])) || {};
     const { sets, params } = buildPatientSets(patch);
     if (sets.length) await exec(`UPDATE patients SET ${sets.join(', ')} WHERE uuid = :uuid`, { ...params, uuid });

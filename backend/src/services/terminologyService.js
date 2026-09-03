@@ -126,13 +126,20 @@ export async function searchRxnorm(query, { pageSize = 20 } = {}) {
       'SELECT rxcui AS code, name, tty FROM rxnorm_concepts WHERE rxcui = ? LIMIT ?', [q, limit]);
     return rows.map((r) => ({ code: String(r.code), name: r.name, source: 'RXNORM', tty: r.tty }));
   }
-  // Prefer prescribable/ingredient/brand types, then prefix matches, then shorter names.
+  // Multi-token AND search — every word must appear (so "metformin 500" matches "metformin
+  // hydrochloride 500 MG Oral Tablet"). Ranking puts PRESCRIBABLE forms (a real drug with strength +
+  // form: SCD/SBD/GPCK/BPCK) FIRST — that's what a provider writes on a prescription — then ingredient/
+  // brand names, then a prefix-match and shorter-name tiebreak.
+  const tokens = q.split(/\s+/).map((w) => w.trim()).filter(Boolean).slice(0, 6);
+  const whereLike = tokens.map(() => 'name LIKE ?').join(' AND ');
+  const params = tokens.map((t) => `%${t}%`);
   const [rows] = await pool.query(
     `SELECT rxcui AS code, name, tty FROM rxnorm_concepts
-      WHERE name LIKE ?
-      ORDER BY FIELD(tty,'SCD','SBD','BPCK','GPCK','BN','IN','PIN','MIN') = 0,
+      WHERE ${whereLike}
+      ORDER BY (FIELD(tty,'SCD','SBD','GPCK','BPCK') = 0),
+               (FIELD(tty,'BN','IN','PIN','MIN','SBDF','SCDF') = 0),
                (name LIKE ?) DESC, CHAR_LENGTH(name) LIMIT ?`,
-    [`%${q}%`, `${q}%`, limit]);
+    [...params, `${tokens[0] || q}%`, limit]);
   return rows.map((r) => ({ code: String(r.code), name: r.name, source: 'RXNORM', tty: r.tty }));
 }
 

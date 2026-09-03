@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { execute } from '../db/pool.js';
 import { encrypt, decrypt, blindIndex } from '../utils/crypto.js';
+import { logger } from '../config/logger.js';
 
 /**
  * Benefits Verification (X12 271 real-time eligibility).
@@ -464,17 +465,25 @@ export function normalize271(resp) {
 
 export function toPublicCheck(row) {
   if (!row) return null;
+  // Distinguish a null column (no stored summary) from a present-but-undecryptable one (corruption).
+  // Corruption must NOT be presented as a valid benefit with blank cost-shares — flag it loudly so the
+  // UI shows "verification unreadable" rather than empty-but-valid coverage.
   let summary = null;
-  try { summary = row.summary_enc ? JSON.parse(decrypt(row.summary_enc)) : null; } catch { summary = null; }
+  let summaryError = false;
+  if (row.summary_enc) {
+    try { summary = JSON.parse(decrypt(row.summary_enc)); }
+    catch (e) { summaryError = true; logger.error({ err: e.message, uuid: row.uuid }, 'Eligibility summary failed to decrypt (corruption) — flagged, not shown as valid'); }
+  }
   return {
     uuid: row.uuid,
     policyIndex: Number(row.policy_index),
     payer: row.payer_name || summary?.payer?.name || '',
-    status: row.status || summary?.status || 'unknown',
+    status: summaryError ? 'unreadable' : (row.status || summary?.status || 'unknown'),
     serviceDate: row.service_date || summary?.plan?.serviceDate || null,
     planEnd: row.plan_end || summary?.plan?.end || null,
     verifiedAt: row.created_at,
     summary,
+    ...(summaryError ? { summaryError: true } : {}),
   };
 }
 

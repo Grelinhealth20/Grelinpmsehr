@@ -361,19 +361,20 @@ export async function getOwnedEncounterId(encounterUuid, providerId) {
 }
 
 /**
- * READ access to an encounter by the viewer's scope: the encounter's own provider,
- * OR a facility-wide MD whose assigned facilities include the patient's facility.
- * Returns the internal encounter id, or null when out of scope (strict isolation).
+ * READ access to an encounter by the viewer's scope: the encounter's own provider, OR a facility-wide
+ * MD whose assigned facilities include the patient's facility AND whose SERVICE LINE matches the owning
+ * provider's (a Pain MD never reaches an SNF encounter and vice versa). Uses the SAME facility+line
+ * predicate as patientScopeWhere so encounter-header details and encounter documents can never leak
+ * across the service-line boundary. Returns the internal encounter id, or null when out of scope.
  */
 export async function getAccessibleEncounterId(encounterUuid, userId, scope = null) {
   const sc = scope || (await viewerScope(userId));
   if (!isFacilityWide(sc)) return getOwnedEncounterId(encounterUuid, userId);
-  const params = { u: encounterUuid, pid: userId };
-  const ph = sc.facilityIds.map((id, i) => { params[`f${i}`] = id; return `:f${i}`; }).join(',');
+  const pscope = patientScopeWhere(sc, userId, 'p'); // facility IN (...) AND owning-provider service-line bound
   const [rows] = await execute(
     `SELECT e.id FROM encounters e LEFT JOIN patients p ON p.id = e.patient_id
-      WHERE e.uuid = :u AND (e.provider_id = :pid OR p.facility_id IN (${ph})) LIMIT 1`,
-    params,
+      WHERE e.uuid = :u AND (e.provider_id = :pid OR (${pscope.sql})) LIMIT 1`,
+    { u: encounterUuid, pid: userId, ...pscope.params },
   );
   return rows[0]?.id || null;
 }

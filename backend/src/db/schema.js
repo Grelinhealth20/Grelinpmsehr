@@ -23,6 +23,7 @@ export const SCHEMA_STATEMENTS = [
     locked_until    DATETIME        NULL,
     last_login_at   DATETIME        NULL,
     password_changed_at DATETIME    NULL,
+    tokens_valid_after DATETIME     NULL,
     created_by      BIGINT UNSIGNED NULL,
     created_at      DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -61,6 +62,60 @@ export const SCHEMA_STATEMENTS = [
     CONSTRAINT fk_refresh_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 
+  // Break-glass emergency access (ONC (d)(6)). A time-boxed, reason-mandatory grant that lets an
+  // authorized clinician reach a patient outside their normal scope during an emergency. Every grant
+  // AND every use is written to the tamper-evident audit log, so the override is fully reviewable.
+  `CREATE TABLE IF NOT EXISTS emergency_access (
+    id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    uuid        CHAR(36)        NOT NULL,
+    user_id     BIGINT UNSIGNED NOT NULL,
+    patient_id  BIGINT UNSIGNED NOT NULL,
+    reason      VARCHAR(500)    NOT NULL,
+    granted_at  DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at  DATETIME        NOT NULL,
+    ip          VARCHAR(64)     NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_ea_uuid (uuid),
+    KEY idx_ea_active (user_id, patient_id, expires_at),
+    CONSTRAINT fk_ea_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_ea_patient FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+  // SMART-on-FHIR / OAuth 2.0 registered clients (ONC (g)(10)). Public clients use PKCE; confidential
+  // clients store a hashed secret. redirect_uris is a JSON array — codes are bound to an exact match.
+  `CREATE TABLE IF NOT EXISTS oauth_clients (
+    id                 BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    client_id          CHAR(36)        NOT NULL,
+    name               VARCHAR(160)    NOT NULL,
+    redirect_uris      TEXT            NOT NULL,
+    confidential       TINYINT(1)      NOT NULL DEFAULT 0,
+    client_secret_hash CHAR(64)        NULL,
+    scopes             VARCHAR(500)    NOT NULL DEFAULT 'openid fhirUser launch/patient patient/*.read offline_access',
+    created_by         BIGINT UNSIGNED NULL,
+    created_at         DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_oauth_client (client_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+  // Transient OAuth 2.0 authorization codes (single-use, short-lived, hashed at rest, PKCE-bound).
+  `CREATE TABLE IF NOT EXISTS oauth_codes (
+    id                    BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    code_hash             CHAR(64)        NOT NULL,
+    client_id             CHAR(36)        NOT NULL,
+    user_id               BIGINT UNSIGNED NOT NULL,
+    redirect_uri          VARCHAR(500)    NOT NULL,
+    scope                 VARCHAR(500)    NOT NULL,
+    code_challenge        VARCHAR(128)    NULL,
+    code_challenge_method VARCHAR(8)      NULL,
+    patient_id            BIGINT UNSIGNED NULL,
+    expires_at            DATETIME        NOT NULL,
+    used_at               DATETIME        NULL,
+    created_at            DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_code (code_hash),
+    KEY idx_code_exp (expires_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
   // --- Audit log (append-only; HIPAA §164.312(b)) ----------------------------
   `CREATE TABLE IF NOT EXISTS audit_logs (
     id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -75,11 +130,23 @@ export const SCHEMA_STATEMENTS = [
     user_agent   VARCHAR(255)    NULL,
     metadata     JSON            NULL,
     created_at   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    prev_hash    CHAR(64)        NULL,
+    row_hash     CHAR(64)        NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uq_audit_uuid (uuid),
     KEY idx_audit_actor (actor_user_id),
     KEY idx_audit_action (action),
     KEY idx_audit_created (created_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+  // Single-row serialization point for the tamper-evident audit hash-chain (ONC (d)(2)). Each new
+  // audit_logs row's row_hash = SHA-256(prev row_hash || canonical row content); this row holds the
+  // latest hash and is locked FOR UPDATE during append so concurrent writers chain deterministically.
+  `CREATE TABLE IF NOT EXISTS audit_chain (
+    id           TINYINT UNSIGNED NOT NULL,
+    last_hash    CHAR(64)         NOT NULL,
+    updated_at   DATETIME         NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 
   // --- Specialties (managed list, wired to provider users) -------------------
@@ -290,6 +357,55 @@ export const SCHEMA_STATEMENTS = [
     CONSTRAINT fk_note_provider FOREIGN KEY (provider_id) REFERENCES users(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 
+  // --- Custom note templates (provider-authored) -----------------------------
+  // A provider can design their OWN note template — an ordered list of headings
+  // (each free-form, optionally with checkboxes). Templates are STRUCTURE, not PHI
+  // (no patient data), so the section list is stored as plaintext JSON. Owner-scoped:
+  // a provider sees only their own custom templates. A note created from one snapshots
+  // the sections into the note's own content, so the signed record stays self-contained
+  // even if the template is later edited or deleted (immutable medical record).
+  `CREATE TABLE IF NOT EXISTS custom_note_templates (
+    id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    uuid         CHAR(36)        NOT NULL,
+    owner_id     BIGINT UNSIGNED NOT NULL,
+    name         VARCHAR(120)    NOT NULL,
+    category     VARCHAR(160)    NULL,
+    sections     JSON            NOT NULL,
+    active       TINYINT(1)      NOT NULL DEFAULT 1,
+    created_at   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_ctpl_uuid (uuid),
+    KEY idx_ctpl_owner (owner_id),
+    CONSTRAINT fk_ctpl_owner FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+  // --- AI usage logs ---------------------------------------------------------
+  // Every AI (custom-template) request, captured in real time for Super-Admin oversight: who called,
+  // model, real OpenAI token usage (prompt/completion/total), status, latency, and a short prompt
+  // preview (NOT PHI — provider-typed template description). Retained for cost/audit visibility.
+  `CREATE TABLE IF NOT EXISTS ai_usage_logs (
+    id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    uuid            CHAR(36)        NOT NULL,
+    user_id         BIGINT UNSIGNED NULL,
+    action          VARCHAR(48)     NOT NULL,
+    model           VARCHAR(60)     NULL,
+    status          ENUM('ok','error') NOT NULL,
+    error_code      VARCHAR(40)     NULL,
+    prompt_tokens   INT UNSIGNED    NOT NULL DEFAULT 0,
+    completion_tokens INT UNSIGNED  NOT NULL DEFAULT 0,
+    total_tokens    INT UNSIGNED    NOT NULL DEFAULT 0,
+    sections        SMALLINT UNSIGNED NULL,
+    latency_ms      INT UNSIGNED    NULL,
+    prompt_preview  VARCHAR(200)    NULL,
+    created_at      DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_ai_uuid (uuid),
+    KEY idx_ai_created (created_at),
+    KEY idx_ai_user (user_id),
+    CONSTRAINT fk_ai_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
   // --- Facilities ------------------------------------------------------------
   // First-class facility records. Facility data is PUBLIC (CMS NPPES registry),
   // NOT PHI, so it is stored in plaintext and is searchable. A Super/Master admin
@@ -481,6 +597,42 @@ export const SCHEMA_STATEMENTS = [
     PRIMARY KEY (rxcui),
     KEY idx_rxnorm_tty (tty),
     KEY idx_rxnorm_name (name(96))
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+  // Denormalized RxNorm-ingredient → drug-class table — the runtime source for medication-safety
+  // screening (one indexed lookup per ingredient, no request-time API). Precomputed by
+  // scripts/precompute_drug_class.mjs from the official UMLS Metathesaurus: RXNORM rxcui↔CUI atoms
+  // bridged to WHO-ATC subgroups (ATC4/ATC3) and MED-RT structural/therapeutic classes. A substance
+  // carries several rows (e.g. ibuprofen ATC4 M01AE + MED-RT "Anti-inflammatory Agent"); all count for
+  // allergy matching, ATC4 keys therapeutic-duplication. See [[med-safety-check]].
+  `CREATE TABLE IF NOT EXISTS rxnorm_drug_class (
+    rxcui         BIGINT UNSIGNED NOT NULL,
+    ingredient    VARCHAR(255)    NOT NULL,
+    class_system  VARCHAR(16)     NOT NULL,
+    class_id      VARCHAR(32)     NOT NULL,
+    class_name    VARCHAR(255)    NOT NULL,
+    PRIMARY KEY (rxcui, class_system, class_id),
+    KEY idx_dc_ing (ingredient),
+    KEY idx_dc_sys (class_system)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+  // UMLS relationships (MRREL) — the concept-to-concept edges from the official Metathesaurus, loaded
+  // for the medication-class sources (MED-RT, ATC, RXNORM). Carries the drug→class edges that power
+  // deterministic allergen-class screening: MED-RT `ci_chemclass` (allergen chemical class, e.g.
+  // amoxicillin→Penicillins), `has_MoA`/`has_PE`/`isa`, ATC hierarchy, and RxNorm `has_ingredient`.
+  `CREATE TABLE IF NOT EXISTS umls_rel (
+    id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    cui1          CHAR(10)        NOT NULL,
+    cui2          CHAR(10)        NOT NULL,
+    rel           VARCHAR(8)      NULL,
+    rela          VARCHAR(64)     NULL,
+    sab           VARCHAR(40)     NOT NULL,
+    aui1          VARCHAR(12)     NULL,
+    aui2          VARCHAR(12)     NULL,
+    PRIMARY KEY (id),
+    KEY idx_rel_cui1 (cui1, rela),
+    KEY idx_rel_cui2 (cui2, rela),
+    KEY idx_rel_sab (sab, rela)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 
   // UMLS semantic types (MRSTY) — one or more per concept (CUI). REAL UMLS data.

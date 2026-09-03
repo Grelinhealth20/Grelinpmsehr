@@ -27,6 +27,13 @@ export function toPublicUser(row) {
     npi: row.npi || null,
     taxonomy: row.taxonomy || null,
     taxonomyCode: row.taxonomy_code || null,
+    // Full NPPES (NPI-1) registry details — captured so nothing is dropped.
+    licenseNumber: row.license_number || null,
+    licenseState: row.license_state || null,
+    gender: row.provider_gender || null,
+    soleProprietor: row.sole_proprietor || null,
+    enumerationDate: row.enumeration_date || null,
+    nppesStatus: row.nppes_status || null,
     mustResetPassword: !!row.must_reset_password,
     // MFA policy + enrollment state (never the secret) — drives the Super Admin toggle + user UI.
     mfaEnabled: !!row.mfa_enabled,
@@ -48,10 +55,12 @@ function safeJson(v) {
 }
 
 const USER_SELECT = `SELECT u.id, u.uuid, u.email_enc, u.email_bidx, u.full_name_enc, u.role, u.status,
-  u.access_level, u.credentials, u.npi, u.taxonomy, u.taxonomy_code, u.password_hash, u.must_reset_password,
+  u.access_level, u.credentials, u.npi, u.taxonomy, u.taxonomy_code,
+  u.license_number, u.license_state, u.provider_gender, u.sole_proprietor, u.enumeration_date, u.nppes_status,
+  u.password_hash, u.must_reset_password,
   u.mfa_enabled, u.mfa_secret_enc, u.mfa_confirmed_at, u.mfa_recovery_enc, u.mfa_last_step, u.mfa_failed_attempts, u.mfa_locked_until,
   u.failed_login_attempts, u.locked_until,
-  u.last_login_at, u.password_changed_at, u.created_at, u.updated_at, u.specialty_id,
+  u.last_login_at, u.password_changed_at, u.tokens_valid_after, u.created_at, u.updated_at, u.specialty_id,
   s.uuid AS specialty_uuid, s.name AS specialty_name, s.service_line AS specialty_service_line,
   (SELECT JSON_ARRAYAGG(JSON_OBJECT('uuid', sp.uuid, 'name', sp.name, 'serviceLine', sp.service_line))
      FROM user_specialties us2 JOIN specialties sp ON sp.id = us2.specialty_id WHERE us2.user_id = u.id) AS specialties_json
@@ -113,6 +122,12 @@ export async function createUser({
   npi = null,
   taxonomy = null,
   taxonomyCode = null,
+  licenseNumber = null,
+  licenseState = null,
+  providerGender = null,
+  soleProprietor = null,
+  enumerationDate = null,
+  nppesStatus = null,
   passwordHash,
   mustResetPassword = true,
   createdBy = null,
@@ -122,10 +137,12 @@ export async function createUser({
   const [ins] = await execute(
     `INSERT INTO users
        (uuid, email_enc, email_bidx, full_name_enc, role, status, access_level, credentials, specialty_id,
-        npi, taxonomy, taxonomy_code, password_hash, must_reset_password, created_by, password_changed_at)
+        npi, taxonomy, taxonomy_code, license_number, license_state, provider_gender, sole_proprietor,
+        enumeration_date, nppes_status, password_hash, must_reset_password, created_by, password_changed_at)
      VALUES
        (:uuid, :emailEnc, :emailBidx, :nameEnc, :role, :status, :accessLevel, :credentials, :specialtyId,
-        :npi, :taxonomy, :taxonomyCode, :passwordHash, :mrp, :createdBy, NOW())`,
+        :npi, :taxonomy, :taxonomyCode, :licenseNumber, :licenseState, :providerGender, :soleProprietor,
+        :enumerationDate, :nppesStatus, :passwordHash, :mrp, :createdBy, NOW())`,
     {
       uuid,
       emailEnc: encrypt(email),
@@ -139,6 +156,12 @@ export async function createUser({
       npi: npi || null,
       taxonomy: taxonomy || null,
       taxonomyCode: taxonomyCode || null,
+      licenseNumber: licenseNumber || null,
+      licenseState: licenseState || null,
+      providerGender: providerGender || null,
+      soleProprietor: soleProprietor || null,
+      enumerationDate: enumerationDate || null,
+      nppesStatus: nppesStatus || null,
       passwordHash,
       mrp: mustResetPassword ? 1 : 0,
       createdBy,
@@ -188,7 +211,7 @@ async function userIdByUuid(uuid) {
   return rows[0]?.id || null;
 }
 
-export async function updateUserProfile(uuid, { fullName, role, accessLevel, credentials, specialtyId, specialtyIds, npi, taxonomy, taxonomyCode }) {
+export async function updateUserProfile(uuid, { fullName, role, accessLevel, credentials, specialtyId, specialtyIds, npi, taxonomy, taxonomyCode, licenseNumber, licenseState, providerGender, soleProprietor, enumerationDate, nppesStatus }) {
   // Multi-specialty assignment (join table) — handled separately from the users columns so a
   // specialties-only edit still applies even when no other column changed.
   if (specialtyIds !== undefined) {
@@ -230,6 +253,13 @@ export async function updateUserProfile(uuid, { fullName, role, accessLevel, cre
     sets.push('taxonomy_code = :taxonomyCode');
     params.taxonomyCode = taxonomyCode || null;
   }
+  // Full NPPES (NPI-1) details.
+  if (licenseNumber !== undefined) { sets.push('license_number = :licenseNumber'); params.licenseNumber = licenseNumber || null; }
+  if (licenseState !== undefined) { sets.push('license_state = :licenseState'); params.licenseState = licenseState || null; }
+  if (providerGender !== undefined) { sets.push('provider_gender = :providerGender'); params.providerGender = providerGender || null; }
+  if (soleProprietor !== undefined) { sets.push('sole_proprietor = :soleProprietor'); params.soleProprietor = soleProprietor || null; }
+  if (enumerationDate !== undefined) { sets.push('enumeration_date = :enumerationDate'); params.enumerationDate = enumerationDate || null; }
+  if (nppesStatus !== undefined) { sets.push('nppes_status = :nppesStatus'); params.nppesStatus = nppesStatus || null; }
   if (!sets.length) return findRawByUuid(uuid);
   await execute(`UPDATE users SET ${sets.join(', ')} WHERE uuid = :uuid`, params);
   invalidateUserCache(uuid);

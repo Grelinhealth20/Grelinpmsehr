@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import mysql from 'mysql2/promise';
 import { config } from '../config/env.js';
 import { logger } from '../config/logger.js';
@@ -14,13 +15,27 @@ function buildDbSsl() {
   if (!config.db.ssl) return undefined;
   const opts = { minVersion: 'TLSv1.2', rejectUnauthorized: config.db.sslRejectUnauthorized };
   if (config.db.sslCa) {
-    try {
-      opts.ca = fs.readFileSync(config.db.sslCa);
-      opts.rejectUnauthorized = true; // pinned CA → always verify the chain
-      opts.checkServerIdentity = () => undefined; // CN is not the host; CA pinning is the anchor
-    } catch (err) {
-      logger.warn({ err: err.message, ca: config.db.sslCa }, 'DB CA not readable — TLS without pinned verification');
-    }
+    // FAIL CLOSED: a configured pinned CA that can't be read is a misconfiguration, NOT a reason to
+    // silently downgrade to system-root TLS for a PHI database. Refuse to build the pool instead.
+    let ca;
+    try { ca = fs.readFileSync(config.db.sslCa); }
+    catch (err) { throw new Error(`[db] pinned DB CA is configured but unreadable (${config.db.sslCa}): ${err.message}`); }
+    opts.ca = ca;
+    opts.rejectUnauthorized = true; // pinned CA → always verify the chain
+
+    // Identity is anchored by the pinned CA (MySQL's auto-generated cert CN isn't the host). Optionally
+    // ALSO pin the server leaf's public key — SPKI SHA-256 (base64) via DB_CERT_SPKI_SHA256 — as defense
+    // against the CA ever signing a second/substitute server cert. When set it is ENFORCED (fail-closed);
+    // when unset, CA-pinning remains the anchor (unchanged behavior).
+    const pin = config.db.sslPinSpki;
+    opts.checkServerIdentity = (host, cert) => {
+      if (!pin) return undefined;
+      try {
+        const spki = crypto.createHash('sha256').update(cert.pubkey).digest('base64');
+        if (spki !== pin) return new Error('[db] server leaf SPKI does not match DB_CERT_SPKI_SHA256 pin');
+      } catch (err) { return new Error(`[db] SPKI pin verification failed: ${err.message}`); }
+      return undefined;
+    };
   }
   return opts;
 }

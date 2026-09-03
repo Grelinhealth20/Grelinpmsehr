@@ -15,8 +15,24 @@ one place. This service is a generic structured-OCR provider.
 """
 import io
 import os
+import warnings
 import numpy as np
 from PIL import Image
+
+# --- Resource-exhaustion guards (defensive DoS hardening) -------------------
+# A crafted PDF can declare thousands of pages; rendering each at 150 DPI would
+# exhaust memory/CPU. Cap how many pages we render (env-overridable). Pages
+# beyond the cap are ignored rather than processed.
+MAX_PDF_PAGES = max(1, int(os.environ.get("OCR_MAX_PDF_PAGES", "100")))
+# PIL "decompression bomb": a tiny file can decode to an enormous raster. Cap
+# the total pixel count PIL will decode (env-overridable, ~40 MP default).
+Image.MAX_IMAGE_PIXELS = int(os.environ.get("OCR_MAX_IMAGE_PIXELS", str(40_000_000)))
+# Hard ceiling on either dimension, checked from the header BEFORE full decode.
+MAX_IMAGE_DIM = int(os.environ.get("OCR_MAX_IMAGE_DIM", "12000"))
+# Promote PIL's DecompressionBombWarning to an exception: images between the
+# warn threshold and MAX_IMAGE_PIXELS only warn by default and would still be
+# decoded. Turning it into an error lets image_bytes_to_array reject them.
+warnings.simplefilter("error", Image.DecompressionBombWarning)
 
 # Optional local model dir (offline / air-gapped hosts). If set and populated,
 # PP-Structure loads from disk instead of downloading from Baidu's CDN.
@@ -132,7 +148,18 @@ def warmup():
 
 # --- Input decoding ---------------------------------------------------------
 def image_bytes_to_array(data: bytes) -> np.ndarray:
-    img = Image.open(io.BytesIO(data)).convert("RGB")
+    try:
+        img = Image.open(io.BytesIO(data))
+        # Reject oversized rasters from the header BEFORE the full decode.
+        w, h = img.size
+        if w > MAX_IMAGE_DIM or h > MAX_IMAGE_DIM:
+            raise ValueError(f"Image dimensions {w}x{h} exceed the {MAX_IMAGE_DIM}px limit.")
+        img = img.convert("RGB")  # forces the decode; may trip the bomb guards
+    except Image.DecompressionBombError as e:
+        # Over MAX_IMAGE_PIXELS: PIL refuses outright. Surface as a clean 400.
+        raise ValueError("Image is too large to process safely.") from e
+    except Image.DecompressionBombWarning as e:  # promoted to error at module load
+        raise ValueError("Image is too large to process safely.") from e
     return np.array(img)
 
 
@@ -144,7 +171,17 @@ def pdf_to_images(data: bytes, dpi: int = 150):
     mat = fitz.Matrix(zoom, zoom)
     imgs = []
     try:
-        for page in doc:
+        # Cap rendered pages so a PDF that declares thousands of pages can't exhaust memory/CPU.
+        # REJECT over-cap documents with a clear error rather than silently rasterizing only the first
+        # N — silently dropping pages would lose real clinical content (no silent-truncation fallback).
+        # The cap (default 100) is well above any legitimate single upload and far below a DoS PDF.
+        total = doc.page_count
+        if total > MAX_PDF_PAGES:
+            raise ValueError(
+                f"Document has {total} pages, exceeding the {MAX_PDF_PAGES}-page limit. "
+                "Please split it into smaller files and upload them separately.")
+        for i in range(total):
+            page = doc[i]
             pix = page.get_pixmap(matrix=mat, alpha=False)
             img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
             imgs.append(np.array(img))

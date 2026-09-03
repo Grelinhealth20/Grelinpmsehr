@@ -13,6 +13,7 @@ import {
   getLockState,
   setPassword,
   getPasswordHistory,
+  invalidateUserCache,
 } from './userService.js';
 import { recordAudit } from './auditService.js';
 
@@ -85,15 +86,16 @@ export async function login(email, password, ctx = {}) {
     throw genericFail;
   }
 
-  if (user.status === USER_STATUS.DISABLED) {
-    await logAttempt(email, ctx.ip, false);
-    throw new AuthError('This account has been disabled.', 403, 'ACCOUNT_DISABLED');
-  }
+  // NOTE: account state (disabled / restricted) is checked only AFTER the password is verified (below),
+  // so an unauthenticated caller cannot use the response to confirm an account exists or learn its state
+  // (anti-enumeration). Lockout still runs pre-password because it must fire on repeated wrong guesses.
 
-  // The master admin — by role OR the configured master email — is never locked
-  // out (the top account must always remain reachable).
-  const isMaster = user.role === ROLES.MASTER_ADMIN || user.email_bidx === blindIndex(config.masterAdmin.email);
-  const lockable = !isMaster;
+  // Brute-force lockout applies to EVERY account, including the master admin. Exempting the most
+  // privileged account gave it no per-account lockout — a distributed/botnet attacker rotating source
+  // IPs could bypass the IP limiter and guess the master password unthrottled. The lock is time-based
+  // and auto-unlocks after the window, so the master remains recoverable (break-glass = wait out the
+  // window, or an operator clears users.locked_until) — protection is chosen over convenience.
+  const lockable = true;
 
   // Time-based lockout, evaluated DB-side (timezone-safe). Locked only while the
   // window is still in the future; once it lapses the account auto-unlocks.
@@ -142,6 +144,12 @@ export async function login(email, password, ctx = {}) {
     throw genericFail;
   }
 
+  // Account-state gates — only reached once the password is proven correct, so they never leak
+  // existence/state to an unauthenticated guesser.
+  if (user.status === USER_STATUS.DISABLED) {
+    await logAttempt(email, ctx.ip, false);
+    throw new AuthError('This account has been disabled.', 403, 'ACCOUNT_DISABLED');
+  }
   if (user.status === USER_STATUS.RESTRICTED) {
     await logAttempt(email, ctx.ip, false);
     throw new AuthError('Access to this account is currently restricted.', 403, 'ACCOUNT_RESTRICTED');
@@ -186,7 +194,24 @@ export async function refresh(refreshToken, ctx = {}) {
     { hash },
   );
   const record = rows[0];
-  if (!record || record.revoked_at || new Date(record.expires_at) < new Date()) {
+  if (!record) {
+    throw new AuthError('Session expired. Please sign in again.', 401, 'REFRESH_EXPIRED');
+  }
+  // Reuse detection: a token that EXISTS but is already revoked was rotated out — presenting it again
+  // is a theft signal (the legitimate client would use the current token). Nuke the whole session
+  // family and audit, so a stolen-then-rotated token can't quietly ride alongside the real one.
+  if (record.revoked_at) {
+    await revokeAllSessions(record.user_id);
+    await recordAudit({
+      actorUserId: record.user_id,
+      action: 'auth.refresh.reuse',
+      outcome: 'failure',
+      ip: ctx.ip,
+      userAgent: ctx.userAgent,
+    });
+    throw new AuthError('Session expired. Please sign in again.', 401, 'REFRESH_REUSE');
+  }
+  if (new Date(record.expires_at) < new Date()) {
     throw new AuthError('Session expired. Please sign in again.', 401, 'REFRESH_EXPIRED');
   }
 
@@ -195,7 +220,7 @@ export async function refresh(refreshToken, ctx = {}) {
     throw new AuthError('Session no longer valid.', 401, 'USER_INVALID');
   }
 
-  // Rotate: revoke the presented token, issue a fresh pair (refresh-token reuse detection ready).
+  // Rotate: revoke the presented token, issue a fresh pair.
   await execute(`UPDATE refresh_tokens SET revoked_at = NOW() WHERE id = :id`, { id: record.id });
   const session = await issueSession(user, ctx);
   return { user, ...session };
@@ -217,10 +242,17 @@ export async function logout(refreshToken, ctx = {}) {
 }
 
 export async function revokeAllSessions(userId) {
+  // Revoke refresh tokens AND stamp tokens_valid_after=now so every already-issued (stateless) access
+  // token for this user is rejected by `authenticate` immediately — a full credential cut, not just
+  // refresh revocation. Used on password change, admin force-logout, and role/status changes.
   await execute(
     `UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = :id AND revoked_at IS NULL`,
     { id: userId },
   );
+  const [urows] = await execute(`UPDATE users SET tokens_valid_after = NOW() WHERE id = :id`, { id: userId });
+  // Drop the 20s identity cache so the new cutoff takes effect on the very next request (not up to 20s later).
+  invalidateUserCache();
+  return urows;
 }
 
 /**

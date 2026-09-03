@@ -58,7 +58,20 @@ export const NOTE_TITLES = {
   tcm_non_face_to_face: 'TCM Non-Face-to-Face Care Management',
   tcm_follow_up: 'TCM Interim Follow-Up / Care Coordination',
   tcm_closeout: 'TCM 30-Day Service Period Close-Out',
+  // SNF added note types.
+  acuteChange: 'SNF Acute Change in Condition / Unscheduled Visit',
+  acp: 'SNF Advance Care Planning Note',
+  annual: 'SNF Annual Assessment / Comprehensive Visit',
+  hospice: 'SNF Hospice Attending Physician / NPP Visit',
+  telehealth: 'SNF Telehealth Visit Attestation',
+  custom: 'Custom Clinical Note',
 };
+
+/** Document title for a note — the custom-template NAME for a custom note, else the note-type title. */
+export function noteTitle(note = {}) {
+  if (note.noteType === 'custom' && note.content?.templateName) return String(note.content.templateName);
+  return NOTE_TITLES[note.noteType] || 'Clinical Note';
+}
 
 // Canonical section labels (must match the frontend note templates' section keys).
 export const SECTION_LABELS = {
@@ -152,6 +165,18 @@ export const SECTION_LABELS = {
   tcmComplexity: 'Medical Decision Making & TCM Complexity (99495 / 99496)',
   transitionGoals: 'Transition Goals & Self-Management Plan',
   tcmAttestation: 'TCM Service Period, Timeline & Billing Attestation',
+  // SNF added note types (acute change / ACP / annual / hospice / telehealth)
+  diagnosisReview: 'Diagnosis List Review',
+  prevention: 'Prevention & Screening',
+  symptomAssessment: 'Symptom Assessment',
+  telehealthEligibility: 'Telehealth Eligibility',
+  locations: 'Patient & Provider Locations',
+  staffPresent: 'Staff Present With Patient',
+  examLimitations: 'Exam Performed & Limitations',
+  technicalQuality: 'Technical Quality',
+  prescriptionOrders: 'Medications / Prescription Orders',
+  labOrders: 'Lab Orders',
+  imagingOrders: 'Imaging Orders',
 };
 // Canonical clinical documentation order (Bates'/standard H&P). ROS is the LAST
 // subjective element, right before the objective exam; functional status sits with
@@ -161,18 +186,19 @@ const SECTION_ORDER = [
   // Subjective
   'chiefComplaint', 'subjective', 'changeDescription', 'hpi', 'painHistory', 'painScale', 'interval', 'hospitalCourse',
   'dischargeInfo', 'interactiveContact', 'transitionGoals',
-  'pmh', 'psh', 'familyHistory', 'socialHistory', 'psychHistory',
+  'telehealthEligibility', 'consent', 'locations', 'staffPresent',
+  'diagnosisReview', 'pmh', 'psh', 'familyHistory', 'socialHistory', 'psychHistory',
   'medications', 'medChanges', 'allergies', 'adverseEffects', 'priorTreatments',
-  'pdmpReview', 'udsResult', 'opioidRisk', 'ros',
+  'pdmpReview', 'udsResult', 'opioidRisk', 'symptomAssessment', 'ros',
   // Objective
-  'vitals', 'objective', 'exam', 'mentalStatus', 'cognitiveAssessment', 'neuroPsych',
-  'wound', 'treatment', 'results', 'functionalStatus',
+  'vitals', 'objective', 'exam', 'examLimitations', 'technicalQuality', 'mentalStatus', 'cognitiveAssessment', 'neuroPsych',
+  'wound', 'treatment', 'results', 'prevention', 'functionalStatus',
   // Procedure body (kept together, in operative-note order)
   'procedureName', 'indication', 'consent', 'procTechnique', 'injectate', 'procFindings', 'specimen', 'ebl', 'complications', 'postProcedure',
   // Assessment
   'prognosis', 'carePlanReview', 'riskAssessment', 'safetyEval', 'caregiver', 'assessment', 'mdm',
   // Plan
-  'tcmComplexity', 'plan', 'dementiaPlan', 'orders', 'notifications',
+  'tcmComplexity', 'plan', 'dementiaPlan', 'prescriptionOrders', 'labOrders', 'imagingOrders', 'orders', 'notifications',
   'pendingFollowUp', 'communityServices', 'caregiverEducation',
   'goals', 'participants', 'decisionsMade', 'codeStatus', 'advanceDirective', 'careCoordination',
   // Discharge block
@@ -187,10 +213,16 @@ const SECTION_ORDER = [
 // record reads identically to what the provider saw on screen).
 export const NOTE_LABEL_OVERRIDES = {
   // SNF note types — headings match the facility's SNF documentation templates exactly.
-  hp: { chiefComplaint: 'Chief Complaint', codeStatus: 'Code Status', hospitalCourse: 'HPI / Hospital Course', medications: 'Medications & Allergies', pmh: 'Past Medical & Surgical History', socialHistory: 'Social & Prior Function', vitals: 'Vitals', exam: 'Physical Examination', functionalStatus: 'Function & Cognition', results: 'Labs / Imaging / Records', assessment: 'Assessment & Plan', timeSpent: 'Time / Complexity' },
-  soap: { chiefComplaint: 'Chief Complaint', vitals: 'Vitals' },
+  hp: { chiefComplaint: 'Chief Complaint', codeStatus: 'Code Status', hospitalCourse: 'HPI', medications: 'Medications & Allergies', pmh: 'Past Medical History', socialHistory: 'Social History', vitals: 'Vitals', exam: 'Physical Examination', functionalStatus: 'Function & Cognition', results: 'Labs & Imaging', assessment: 'Assessment & Plan', timeSpent: 'Time / Complexity' },
+  soap: { chiefComplaint: 'Chief Complaint', codeStatus: 'Code Status', hpi: 'HPI', allergies: 'Allergy', medications: 'Home Medications', results: 'Labs / Imaging / Microbiology', assessment: 'Assessment & Plan', vitals: 'Vitals' },
   progress: { chiefComplaint: 'Reason for Visit', interval: 'Interval History', medChanges: 'Medication Changes', vitals: 'Vitals', exam: 'Focused Exam', results: 'Labs & Results', assessment: 'Assessment & Plan', followUp: 'Follow-Up & Time' },
   discharge: { chiefComplaint: 'Reason for SNF Admission', hospitalCourse: 'Course in Facility', functionalStatus: 'Condition at Discharge', dischargeMeds: 'Discharge Medications', pendingFollowUp: 'Pending Items', followUp: 'Follow-Up Appointments', dischargeInstructions: 'Instructions Given', timeSpent: 'Time Spent on Discharge' },
+  // SNF added note types — headings mirror the editor templates EXACTLY (PDF == on-screen note).
+  acuteChange: { chiefComplaint: 'Reason for Unscheduled Visit', changeDescription: 'Presenting Change / Event', interval: 'Focused History', vitals: 'Vital Signs', exam: 'Focused Physical Examination', results: 'Labs / Tests', assessment: 'Assessment', disposition: 'Disposition: Treat in Place or Transfer', orders: 'Orders & Monitoring', timeSpent: 'Time / Complexity' },
+  acp: { chiefComplaint: 'Reason for Discussion', participants: 'Participants & Capacity', goals: 'Discussion Summary', decisionsMade: 'Decisions & Documents Completed', timeSpent: 'Time Spent (ACP Only)', followUp: 'Follow-Up' },
+  annual: { chiefComplaint: 'Reason for Annual Review', interval: 'Interval History (Past 12 Months)', diagnosisReview: 'Diagnosis List Review', medications: 'Medication Review', functionalStatus: 'Function, Cognition, Mood, Behavior', prevention: 'Prevention & Screening', vitals: 'Vital Signs', exam: 'Physical Examination', goals: 'Goals of Care Review', assessment: 'Assessment & Plan', timeSpent: 'Time / Complexity' },
+  hospice: { chiefComplaint: 'Reason for Visit & Relation to Terminal Illness', interval: 'Interval History', symptomAssessment: 'Symptom Assessment', vitals: 'Vital Signs', exam: 'Physical Examination', goals: 'Goals of Care', assessment: 'Assessment & Plan', careCoordination: 'Coordination With Hospice & Family', timeSpent: 'Time / Complexity' },
+  telehealth: { chiefComplaint: 'Visit This Attestation Attaches To', telehealthEligibility: 'Telehealth Eligibility', consent: 'Patient Consent', locations: 'Patient & Provider Locations', staffPresent: 'Staff Present With Patient', examLimitations: 'Exam Performed & Limitations', technicalQuality: 'Technical Quality', timeSpent: 'Time' },
   hp_admission: { chiefComplaint: 'Reason for Admission', results: 'Diagnostic Data on Admission', medications: 'Admission Medication Reconciliation', functionalStatus: 'Functional / Rehabilitation Status', prognosis: 'Rehabilitation Potential & Prognosis' },
   progress: { chiefComplaint: 'Reason for Visit', interval: 'Interval History (Since Last Visit)', exam: 'Focused Interval Examination' },
   acute_visit: { chiefComplaint: 'Presenting Acute Problem', exam: 'Focused Examination (Problem-Directed)', results: 'Point-of-Care / STAT Data' },
@@ -286,7 +318,7 @@ function rxTable(prescriptions) {
 }
 
 export async function buildNoteDocx({ patient, encounterDate, note, codes = { diagnoses: [], procedures: [] }, signerName, signedAt }) {
-  const title = NOTE_TITLES[note.noteType] || 'Clinical Note';
+  const title = noteTitle(note);
   const children = [];
 
   if (patient.facilityName) children.push(new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: patient.facilityName, bold: true, size: 24, color: DARK })] }));
@@ -297,6 +329,7 @@ export async function buildNoteDocx({ patient, encounterDate, note, codes = { di
   if (patient.encounterNo) children.push(kv('Encounter ID', patient.encounterNo));
   if (patient.dob) children.push(kv('Date of Birth', usDate(patient.dob)));
   children.push(kv('Date of Service', usDate(encounterDate)));
+  if (note.content?.encounterType?.display) children.push(kv('Encounter Type', `${note.content.encounterType.display} (SNOMED CT ${note.content.encounterType.code})`));
   if (note.reason) children.push(kv('Reason for Encounter', note.reason));
 
   // Vital signs at the top of the note.
@@ -309,6 +342,12 @@ export async function buildNoteDocx({ patient, encounterDate, note, codes = { di
   }
 
   const overrides = NOTE_LABEL_OVERRIDES[note.noteType] || {};
+  // A custom template stores its OWN section list — prefer those heading labels so the downloaded
+  // document shows exactly the headings the provider wrote. Then note-type overrides, then the canonical
+  // dictionary, then the raw key as a last resort (never dropped).
+  const customLabels = {};
+  for (const s of (note.content?.customSections || [])) if (s && s.key) customLabels[s.key] = s.label || s.key;
+  const labelFor = (key) => customLabels[key] || overrides[key] || SECTION_LABELS[key] || key;
   const sections = note.content?.sections || {};
   // Render in the note's OWN template order (matches the editor + the PDF exactly);
   // fall back to the canonical clinical order for legacy notes without a stored order.
@@ -316,12 +355,19 @@ export async function buildNoteDocx({ patient, encounterDate, note, codes = { di
   const base = Array.isArray(storedOrder) && storedOrder.length
     ? [...storedOrder, ...SECTION_ORDER.filter((k) => !storedOrder.includes(k))]
     : SECTION_ORDER;
-  // Append ANY saved section not already ordered, so a filled-in field is NEVER dropped
-  // from the record — even a legacy/unknown key (matches the PDF's never-drop guarantee).
-  const order = [...base, ...Object.keys(sections).filter((k) => !base.includes(k))];
+  // Append ANY saved section (text OR ticked checkboxes) not already ordered, so nothing filled in is
+  // EVER dropped from the record — even a legacy/unknown key (the PDF's never-drop guarantee).
+  const checks = note.content?.checks || {};
+  const extraKeys = [...Object.keys(sections), ...Object.keys(checks)].filter((k, i, a) => !base.includes(k) && a.indexOf(k) === i);
+  const order = [...base, ...extraKeys];
   for (const key of order) {
     const val = sections[key];
-    if (val && String(val).trim()) { children.push(heading(overrides[key] || SECTION_LABELS[key] || key)); children.push(...body(val)); }
+    const ticked = Array.isArray(checks[key]) ? checks[key].filter((x) => x && String(x).trim()) : [];
+    const hasText = val && String(val).trim();
+    if (!hasText && !ticked.length) continue; // section is empty — skip
+    children.push(heading(labelFor(key)));
+    if (ticked.length) children.push(new Paragraph({ children: [new TextRun({ text: ticked.map((t) => `☑ ${t}`).join('    '), size: 20, color: '1C2431' })] }));
+    if (hasText) children.push(...body(val));
   }
 
   const rx = note.content?.prescriptions?.filter((p) => p && p.drug) || [];
@@ -351,7 +397,18 @@ export async function buildNoteDocx({ patient, encounterDate, note, codes = { di
   }
 
   children.push(new Paragraph({ spacing: { before: 320 }, border: { top: { style: BorderStyle.SINGLE, size: 4, color: 'CCD6EA' } }, children: [] }));
-  children.push(new Paragraph({ spacing: { before: 80 }, children: [new TextRun({ text: `Electronically signed by ${signerName || 'Provider'}`, bold: true, size: 20, color: DARK })] }));
+  // System-composed compliance attestation captured on sign-off.
+  const att = note?.content?.signedAttestation;
+  if (att?.statement) {
+    children.push(new Paragraph({ spacing: { before: 80 }, children: [new TextRun({ text: 'ATTESTATION', bold: true, size: 16, color: '6B7688' })] }));
+    children.push(new Paragraph({ children: [new TextRun({ text: att.statement, size: 19, color: DARK })] }));
+    if (att.rendering?.name) {
+      const rc = att.rendering.creds?.length ? `, ${att.rendering.creds.join(', ')}` : '';
+      const rn = att.rendering.npi ? ` · NPI ${att.rendering.npi}` : '';
+      children.push(new Paragraph({ children: [new TextRun({ text: `Rendering practitioner: ${att.rendering.name}${rc}${rn}`, size: 18, color: '404A5A' })] }));
+    }
+  }
+  children.push(new Paragraph({ spacing: { before: 120 }, children: [new TextRun({ text: `Electronically signed by ${signerName || 'Provider'}`, bold: true, size: 20, color: DARK })] }));
   children.push(new Paragraph({ children: [new TextRun({ text: `Signed ${signedAt} · This note is finalized and ready for billing.`, size: 18, color: '404A5A' })] }));
 
   const doc = new Document({ sections: [{ children }] });

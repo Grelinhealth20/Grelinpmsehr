@@ -16,6 +16,13 @@ export default function NoteDocumentView({ note, meta }) {
   const content = note.content || {};
   const vitals = content.vitals || {};
   const sections = content.sections || {};
+  const checks = content.checks || {};
+  const ticked = (k) => (Array.isArray(checks[k]) ? checks[k].filter(Boolean) : []);
+  const hasSectionContent = (k) => (sections[k] || '').trim() || ticked(k).length > 0;
+  // Custom-template notes carry their own heading labels in the snapshot — prefer those.
+  const customLabels = {};
+  for (const s of (content.customSections || [])) if (s && s.key) customLabels[s.key] = s.label || s.key;
+  const labelFor = (k) => customLabels[k] || SECTION_LABELS[k] || k;
   // Render in the note's OWN stored section order (from the backend template it was created
   // with) — no client-side template copy. Labels come from the shared key→label dictionary.
   const order = (Array.isArray(content.sectionOrder) && content.sectionOrder.length)
@@ -30,7 +37,7 @@ export default function NoteDocumentView({ note, meta }) {
       <article className="nt-doc-page is-signed">
         <header className="nt-page-head">
           {meta?.facilityName && <div className="nt-page-fac">{meta.facilityName}</div>}
-          <div className="nt-page-title">{t.label || note.noteType}</div>
+          <div className="nt-page-title">{(note.noteType === 'custom' && content.templateName) || t.label || note.noteType}</div>
           <div className="nt-page-meta">
             <span><b>Patient:</b> {meta?.patientName || '—'}</span>
             <span><b>MRN:</b> {meta?.mrn || '—'}</span>
@@ -47,12 +54,19 @@ export default function NoteDocumentView({ note, meta }) {
           </section>
         )}
 
-        {order.filter((k) => k !== 'vitals' && (sections[k] || '').trim()).map((k) => (
+        {order.filter((k) => k !== 'vitals' && hasSectionContent(k)).map((k) => (
           <section className="nt-sec" key={k}>
-            <h4 className="nt-sec-h">{SECTION_LABELS[k] || k}</h4>
-            <div className="nt-sec-body">
-              {(sections[k]).split('\n').map((ln, i) => <p key={i}>{ln || ' '}</p>)}
-            </div>
+            <h4 className="nt-sec-h">{labelFor(k)}</h4>
+            {ticked(k).length > 0 && (
+              <div className="pf-checks read" style={{ marginBottom: (sections[k] || '').trim() ? 8 : 0 }}>
+                {ticked(k).map((opt) => <span className="pf-chk-tag" key={opt}>{opt}</span>)}
+              </div>
+            )}
+            {(sections[k] || '').trim() && (
+              <div className="nt-sec-body">
+                {(sections[k]).split('\n').map((ln, i) => <p key={i}>{ln || ' '}</p>)}
+              </div>
+            )}
           </section>
         ))}
 

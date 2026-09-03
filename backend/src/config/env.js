@@ -67,10 +67,22 @@ export const config = {
     ssl: process.env.DB_SSL !== undefined ? bool('DB_SSL', false) : DB_CA_EXISTS,
     sslCa: DB_CA_EXISTS ? DB_CA_PATH : '',
     sslRejectUnauthorized: bool('DB_SSL_REJECT_UNAUTHORIZED', true),
+    // Optional leaf-cert public-key pin (SPKI SHA-256, base64). When set, the DB server's leaf key must
+    // match — defense against the pinned CA ever signing a substitute cert. Unset = CA-pinning only.
+    sslPinSpki: (process.env.DB_CERT_SPKI_SHA256 || '').trim(),
   },
 
   crypto: {
     phiKey: required('PHI_ENC_KEY'),
+    // Version stamped into new PHI ciphertext (default 1). Bump on key rotation so new writes are
+    // tagged with the new key's version while old data still decrypts with its original key.
+    phiKeyVersion: int('PHI_ENC_KEY_VERSION', 1),
+    // Retired PHI keys kept for DECRYPT-ONLY during/after a rotation, so ciphertext written under an
+    // older key stays readable without a flag-day re-encrypt. Format: "<version>:<base64key>,..." e.g.
+    // "1:AAAA…==". Optional; empty when no rotation has happened.
+    phiKeysOld: String(process.env.PHI_ENC_KEY_OLD || '')
+      .split(',').map((s) => s.trim()).filter(Boolean)
+      .reduce((acc, pair) => { const i = pair.indexOf(':'); if (i > 0) acc[pair.slice(0, i).trim()] = pair.slice(i + 1).trim(); return acc; }, {}),
     blindIndexKey: required('BLIND_INDEX_KEY'),
   },
 
@@ -140,6 +152,16 @@ export const config = {
     baseUrl: process.env.STEDI_BASE_URL || 'https://healthcare.us.stedi.com/2024-04-01',
     timeoutMs: int('STEDI_TIMEOUT_MS', 20000),
     enabled: !!process.env.STEDI_API_KEY,
+  },
+  // OpenAI — powers the AI-assisted custom-template builder. Add OPENAI_API_KEY to .env (the key is a
+  // server-only secret; requests run entirely server-side, never from the browser). OPENAI_MODEL lets
+  // you pick the model. Disabled (feature hidden) until a key is present — no mock, no fallback output.
+  openai: {
+    apiKey: process.env.OPENAI_API_KEY || '',
+    model: process.env.OPENAI_MODEL || 'gpt-4o',
+    baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
+    timeoutMs: int('OPENAI_TIMEOUT_MS', 30000),
+    enabled: !!process.env.OPENAI_API_KEY,
   },
 };
 

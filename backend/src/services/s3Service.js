@@ -110,6 +110,26 @@ export async function ensurePatientFolder(ctx) {
   ]);
 }
 
+/** Prefix for one encounter's folder inside the patient folder. */
+export function encounterPrefix(ctx, encounterNo) {
+  return `${patientPrefix(ctx)}encounters/${seg(String(encounterNo), 'encounter')}/`;
+}
+/**
+ * Create the patient → encounters → <encounterNo> → {labs, imaging} folder chain with zero-byte
+ * markers, so every encounter has its own visible labs/imaging namespace even before the first upload.
+ * Automatically nested inside the patient's own folder (never outside it).
+ */
+export async function ensureEncounterFolder(ctx, encounterNo) {
+  if (!client) return;
+  const base = encounterPrefix(ctx, encounterNo);
+  await Promise.all([
+    putMarker(`${patientPrefix(ctx)}encounters/.keep`),
+    putMarker(`${base}.keep`),
+    putMarker(`${base}labs/.keep`),
+    putMarker(`${base}imaging/.keep`),
+  ]);
+}
+
 export async function uploadPatientObject(ctx, key, buffer, contentType) {
   if (!client) throw new Error('S3 is not configured.');
   const fullKey = `${patientPrefix(ctx)}${key}`;

@@ -15,6 +15,7 @@ import { verifyPatientEligibility, latestCheckForPolicy } from '../services/elig
 import { eligibilityEnabledForPatient } from '../services/facilityService.js';
 import { stediEnabled } from '../services/stediService.js';
 import { recordAudit } from '../services/auditService.js';
+import { grantEmergencyAccess, hasActiveEmergencyGrant } from '../services/emergencyAccessService.js';
 import { faceSheetPdf, benefitsPdf } from '../services/pdfExport.js';
 import { logger } from '../config/logger.js';
 
@@ -42,17 +43,51 @@ const RECORDS_MIME = new Set([
 const allowedMimes = (docType) => (docType === 'other' ? RECORDS_MIME : IMG_PDF);
 const MAX_BYTES = 10 * 1024 * 1024;
 
-/** STRICT isolation: a patient (and its documents) is only reachable by its owner. */
+/**
+ * Content sniffing (defense in depth): the browser-declared Content-Type is
+ * attacker-controlled, so verify the actual file bytes (magic numbers) before
+ * trusting it. Returns the canonical MIME inferred from the header, or null if
+ * the signature isn't one we recognize.
+ */
+function sniffMime(buf) {
+  if (!buf || buf.length < 4) return null;
+  const b = buf;
+  if (b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46) return 'application/pdf'; // %PDF
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png';        // \x89PNG
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';                        // JPEG
+  if (b.length >= 12 && b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
+      b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'image/webp';      // RIFF….WEBP
+  if ((b[0] === 0x49 && b[1] === 0x49 && b[2] === 0x2a && b[3] === 0x00) ||
+      (b[0] === 0x4d && b[1] === 0x4d && b[2] === 0x00 && b[3] === 0x2a)) return 'image/tiff';       // TIFF II*/MM*
+  // ZIP container → Office Open XML (.docx)
+  if (b[0] === 0x50 && b[1] === 0x4b && (b[2] === 0x03 || b[2] === 0x05 || b[2] === 0x07)) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  // OLE compound file → legacy .doc
+  if (b[0] === 0xd0 && b[1] === 0xcf && b[2] === 0x11 && b[3] === 0xe0) return 'application/msword';
+  return null;
+}
+
+const ctx = (req) => ({ ip: req.ip, userAgent: req.get('user-agent') });
+
+/** STRICT isolation: a patient (and its documents) is only reachable by its owner — OR, during a
+ *  declared emergency, by a user holding an active break-glass grant (ONC (d)(6)), whose every access
+ *  is written to the tamper-evident audit log. */
 async function ownedPatientOr404(req) {
   const row = await getRawByUuid(req.params.uuid);
   if (!row) { const e = new Error('Patient not found.'); e.status = 404; e.code = 'NOT_FOUND'; throw e; }
   if (Number(row.provider_id) !== Number(req.authUserId)) {
+    if (await hasActiveEmergencyGrant(req.authUserId, row.id)) {
+      await recordAudit({
+        actorUserId: req.authUserId, action: 'patient.emergency_access.use', outcome: 'success',
+        entityType: 'patient', entityId: row.uuid, ...ctx(req),
+        metadata: { path: (req.originalUrl || '').slice(0, 200), method: req.method },
+      });
+      return row;
+    }
     // 404 (not 403) so existence of other providers' patients isn't revealed.
     const e = new Error('Patient not found.'); e.status = 404; e.code = 'NOT_FOUND'; throw e;
   }
   return row;
 }
-const ctx = (req) => ({ ip: req.ip, userAgent: req.get('user-agent') });
 
 /* --- Patients -------------------------------------------------------------- */
 export async function list(req, res, next) {
@@ -78,6 +113,20 @@ export async function create(req, res, next) {
         catch (e) { logger.warn({ err: e.message }, 'patient folder create failed'); }
       }
     });
+  } catch (err) { next(err); }
+}
+
+/** Break-glass: declare time-boxed emergency access to a patient outside the caller's normal scope
+ *  (ONC (d)(6)). Requires a clinical justification; the override is written to the tamper-evident audit
+ *  log, as is every subsequent access made under the grant. */
+export async function emergencyAccess(req, res, next) {
+  try {
+    const row = await getRawByUuid(req.params.uuid);
+    if (!row) return res.status(404).json({ error: 'Patient not found.', code: 'NOT_FOUND' });
+    const grant = await grantEmergencyAccess({
+      userId: req.authUserId, patientId: row.id, patientUuid: row.uuid, reason: req.body?.reason, ...ctx(req),
+    });
+    res.status(201).json({ ok: true, expiresAt: grant.expiresAt, message: 'Emergency access granted and recorded in the audit log.' });
   } catch (err) { next(err); }
 }
 
@@ -140,6 +189,11 @@ export async function uploadDoc(req, res, next) {
       const msg = docType === 'other' ? 'Records accept images, PDF or Word documents.' : 'Use JPG, PNG, WEBP or PDF.';
       return res.status(400).json({ error: `Unsupported file type. ${msg}`, code: 'BAD_MIME' });
     }
+    // Verify the actual bytes match the declared, allowed type (the client can lie about MIME).
+    const sniffed = sniffMime(req.file.buffer);
+    if (!sniffed || !allowedMimes(docType).has(sniffed) || sniffed !== req.file.mimetype) {
+      return res.status(400).json({ error: 'File contents do not match the declared type.', code: 'BAD_CONTENT' });
+    }
     if (req.file.size > MAX_BYTES) return res.status(400).json({ error: 'File exceeds the 10 MB limit.', code: 'TOO_LARGE' });
 
     // Replace an existing slot (e.g. re-upload license front) — delete the old object.
@@ -186,6 +240,11 @@ export async function extractUpload(req, res, next) {
     if (!ocrEnabled()) return res.status(503).json({ error: 'Document extraction is not configured.', code: 'OCR_DISABLED' });
     if (!req.file) return res.status(400).json({ error: 'No file uploaded.', code: 'NO_FILE' });
     if (!EXTRACT_MIME.has(req.file.mimetype)) return res.status(400).json({ error: 'Auto-fill supports image (JPG, PNG, WEBP) or PDF face sheets.', code: 'BAD_MIME' });
+    // Content-sniff: the bytes must match the declared, allowed scan type.
+    const sniffed = sniffMime(req.file.buffer);
+    if (!sniffed || !EXTRACT_MIME.has(sniffed) || sniffed !== req.file.mimetype) {
+      return res.status(400).json({ error: 'File contents do not match the declared type.', code: 'BAD_CONTENT' });
+    }
     if (req.file.size > MAX_BYTES) return res.status(400).json({ error: 'File exceeds the 10 MB limit.', code: 'TOO_LARGE' });
 
     const suggestions = await extractDocument({ buffer: req.file.buffer, contentType: req.file.mimetype, fileName: req.file.originalname });

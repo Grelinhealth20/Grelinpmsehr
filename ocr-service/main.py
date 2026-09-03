@@ -21,6 +21,17 @@ log = logging.getLogger("grelin-ocr")
 API_KEY = os.environ.get("OCR_API_KEY", "")
 MAX_BYTES = int(os.environ.get("OCR_MAX_BYTES", str(15 * 1024 * 1024)))
 
+# Fail-closed auth. Dev/local stays convenient (no key => no auth), but in
+# production the OCR key is MANDATORY so the PHI endpoint is never open to the
+# network. We consider the service "production" when ENV/OCR_ENV/NODE_ENV says
+# so, or when REQUIRE_OCR_AUTH=true is set explicitly.
+_ENV = (os.environ.get("OCR_ENV") or os.environ.get("ENV") or os.environ.get("NODE_ENV") or "").lower()
+REQUIRE_AUTH = os.environ.get("REQUIRE_OCR_AUTH", "").lower() == "true" or _ENV in ("prod", "production")
+if REQUIRE_AUTH and not API_KEY:
+    # Refuse to boot rather than silently run auth-open in production.
+    raise RuntimeError(
+        "OCR_API_KEY is required in production (REQUIRE_OCR_AUTH=true or ENV=production) but is not set.")
+
 app = FastAPI(title="Grelin OCR Service", version="1.0.0")
 
 
@@ -36,6 +47,10 @@ def _startup():
 
 
 def _auth(x_ocr_key):
+    # Defense in depth: if prod requires auth but no key is configured, reject
+    # every request (startup already refuses to boot in this state — never open).
+    if REQUIRE_AUTH and not API_KEY:
+        raise HTTPException(status_code=401, detail="OCR authentication is not configured.")
     if API_KEY and x_ocr_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid or missing OCR key.")
 
@@ -67,6 +82,10 @@ async def extract(file: UploadFile = File(...), x_ocr_key: str = Header(default=
         return {"pages": pages, "pageCount": len(pages)}
     except HTTPException:
         raise
+    except ValueError as e:
+        # Clean 400 for the input-guard rejections raised by the extractor
+        # (decompression bomb / oversized image dimensions).
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         log.exception("OCR failed")
         raise HTTPException(status_code=500, detail=f"OCR failed: {e}")

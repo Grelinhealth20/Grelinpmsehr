@@ -10,6 +10,7 @@ import { useToast } from '../../components/Toast.jsx';
 import { useIdleTimeout } from '../../hooks/useIdleTimeout.js';
 import { usersApi, facilitiesApi, toApiError } from '../../lib/api.js';
 import AuditLogs from './AuditLogs.jsx';
+import AiLogs from './AiLogs.jsx';
 import SystemSettings from './SystemSettings.jsx';
 
 const TABS = [
@@ -39,6 +40,7 @@ export default function SuperAdminPanel() {
   const [modal, setModal] = useState(null);
   const isFacilities = tab === 'facilities';
   const isLogs = tab === 'logs';
+  const isAiLogs = tab === 'ailogs';
   const isSettings = tab === 'settings';
 
   // Facilities state (loaded on demand when the Facilities tab is opened).
@@ -151,7 +153,7 @@ export default function SuperAdminPanel() {
       <main className="admin-main">
         <div className="admin-head">
           <span className="admin-eyebrow">// {isSettings ? 'SYSTEM CONFIGURATION CONSOLE' : isLogs ? 'AUDIT & COMPLIANCE CONSOLE' : isFacilities ? 'FACILITY MANAGEMENT CONSOLE' : 'USER MANAGEMENT CONSOLE'}</span>
-          <h1>{isSettings ? 'System Settings' : isLogs ? 'Audit Logs' : isFacilities ? 'Facilities' : 'User Management'}</h1>
+          <h1>{isSettings ? 'System Settings' : isAiLogs ? 'AI Logs' : isLogs ? 'Audit Logs' : isFacilities ? 'Facilities' : 'User Management'}</h1>
           <p>{isSettings ? 'Enable or disable platform features across the EHR. Changes apply system-wide and are enforced on the server.' : isLogs ? 'Monitor, filter, and download the activity trail across every account, role, and facility.' : isFacilities ? 'Manage facilities and provider assignments.' : 'Create and govern accounts across roles.'}</p>
         </div>
 
@@ -188,6 +190,14 @@ export default function SuperAdminPanel() {
           </button>
           <button
             role="tab"
+            aria-selected={isAiLogs}
+            className={`sa-tab ${isAiLogs ? 'active' : ''}`}
+            onClick={() => setTab('ailogs')}
+          >
+            AI Logs
+          </button>
+          <button
+            role="tab"
             aria-selected={isSettings}
             className={`sa-tab ${isSettings ? 'active' : ''}`}
             onClick={() => setTab('settings')}
@@ -198,6 +208,8 @@ export default function SuperAdminPanel() {
 
         {isSettings ? (
           <SystemSettings />
+        ) : isAiLogs ? (
+          <AiLogs />
         ) : isLogs ? (
           <AuditLogs users={all} facilities={facilities} />
         ) : isFacilities ? (

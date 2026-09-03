@@ -15,9 +15,15 @@ export const NOTE_TYPES = {
   soap: { label: 'SOAP Note', category: 'SNF SOAP Note', cpt: '', service: 'snf' },
   progress: { label: 'Progress Note', category: 'SNF Progress Note', cpt: '', service: 'snf' },
   discharge: { label: 'Discharge Summary', category: 'SNF Discharge Summary', cpt: '', service: 'snf' },
+  acuteChange: { label: 'Acute Change / Unscheduled', category: 'SNF Acute Change in Condition · Unscheduled Visit', cpt: '', service: 'snf' },
+  acp: { label: 'Advance Care Planning', category: 'SNF Advance Care Planning · Physician / NPP Service', cpt: '', service: 'snf' },
+  annual: { label: 'Annual / Comprehensive', category: 'SNF Annual Assessment · Comprehensive Visit', cpt: '', service: 'snf' },
+  hospice: { label: 'Hospice Attending Visit', category: 'SNF Hospice Attending Physician / NPP Visit', cpt: '', service: 'snf' },
+  telehealth: { label: 'Telehealth Attestation', category: 'SNF Telehealth Visit Attestation · Addendum', cpt: '', service: 'snf' },
+  custom: { label: 'Custom Note', category: 'Custom template', cpt: '', service: 'snf' },
 };
 // The order the type chooser offers them in.
-export const NOTE_TYPE_ORDER = ['hp', 'soap', 'progress', 'discharge'];
+export const NOTE_TYPE_ORDER = ['hp', 'soap', 'progress', 'discharge', 'acuteChange', 'acp', 'annual', 'hospice', 'telehealth'];
 
 // Per-service menus — the "Common" primary choices and the rest under "More". The
 // provider's service line selects which menu is shown (and access is server-enforced).
@@ -141,6 +147,18 @@ export const SECTION_LABELS = {
   tcmComplexity: 'Medical Decision Making & TCM Complexity (99495 / 99496)',
   transitionGoals: 'Transition Goals & Self-Management Plan',
   tcmAttestation: 'TCM Service Period, Timeline & Billing Attestation',
+  // SNF added note types (acute change / ACP / annual / hospice / telehealth)
+  diagnosisReview: 'Diagnosis List Review',
+  prevention: 'Prevention & Screening',
+  symptomAssessment: 'Symptom Assessment',
+  telehealthEligibility: 'Telehealth Eligibility',
+  locations: 'Patient & Provider Locations',
+  staffPresent: 'Staff Present With Patient',
+  examLimitations: 'Exam Performed & Limitations',
+  technicalQuality: 'Technical Quality',
+  prescriptionOrders: 'Medications / Prescription Orders',
+  labOrders: 'Lab Orders',
+  imagingOrders: 'Imaging Orders',
 };
 
 export const SECTION_PROMPTS = {

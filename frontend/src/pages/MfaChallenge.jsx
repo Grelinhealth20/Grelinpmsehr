@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { useAuth } from '../context/AuthContext.jsx';
 import { authApi, toApiError } from '../lib/api.js';
+import OtpInput from '../components/OtpInput.jsx';
 
 /**
  * Login MFA challenge — shown after a correct password when the account has MFA enrolled. The user
@@ -12,16 +13,23 @@ export default function MfaChallenge() {
   const [mode, setMode] = useState('totp'); // 'totp' | 'recovery'
   const [err, setErr] = useState(null);
   const [busy, setBusy] = useState(false);
+  const submitting = useRef(false); // guard against auto-submit + click double-fire
 
-  async function onSubmit(e) {
-    e.preventDefault();
+  const submit = useCallback(async (raw) => {
+    if (submitting.current) return;
+    submitting.current = true;
     setErr(null); setBusy(true);
     try {
-      const clean = mode === 'totp' ? code.replace(/\D/g, '') : code.trim().toUpperCase();
+      const clean = mode === 'totp' ? String(raw).replace(/\D/g, '') : String(raw).trim().toUpperCase();
       const { data } = mode === 'totp' ? await authApi.mfaVerify(clean) : await authApi.mfaRecovery(clean);
       completeMfa(data.csrfToken);
-    } catch (e2) { setErr(toApiError(e2).message); setBusy(false); }
-  }
+    } catch (e2) {
+      setErr(toApiError(e2).message); setBusy(false); submitting.current = false;
+      if (mode === 'totp') setCode(''); // clear the boxes so the next attempt starts fresh
+    }
+  }, [mode, completeMfa]);
+
+  function onSubmit(e) { e.preventDefault(); submit(code); }
 
   const ready = mode === 'totp' ? code.length === 6 : code.replace(/[\s-]/g, '').length >= 10;
 
@@ -42,15 +50,27 @@ export default function MfaChallenge() {
         {err && <div className="lf-alert" role="alert"><span className="lf-alert-ic">!</span><span>{err}</span></div>}
 
         <form className="lc-fields" onSubmit={onSubmit} noValidate>
-          <div className="field">
-            {mode === 'totp' ? (
-              <input className="input mfa-code-input" inputMode="numeric" autoComplete="one-time-code" maxLength={6}
-                value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))} placeholder="000000" autoFocus />
-            ) : (
-              <input className="input mfa-code-input recovery" autoComplete="off" maxLength={11}
+          {mode === 'totp' ? (
+            <div className={`otp-field${err ? ' has-error' : ''}`}>
+              <label className="otp-label" htmlFor="mfa-otp">Authentication code</label>
+              <OtpInput
+                value={code}
+                onChange={(v) => { setCode(v); if (err) setErr(null); }}
+                onComplete={(v) => submit(v)}
+                autoFocus
+                disabled={busy}
+                invalid={!!err}
+                ariaLabel="6-digit authentication code"
+              />
+              <span className="otp-hint">6-digit code · refreshes every 30 seconds</span>
+            </div>
+          ) : (
+            <div className="field">
+              <label className="otp-label" htmlFor="mfa-recovery">Recovery code</label>
+              <input id="mfa-recovery" className="input mfa-code-input recovery" autoComplete="off" maxLength={11}
                 value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} placeholder="XXXXX-XXXXX" autoFocus />
-            )}
-          </div>
+            </div>
+          )}
           <button className="btn lg block" type="submit" disabled={!ready || busy}>
             {busy ? <span className="spinner" /> : <><span>Verify</span><span className="cta-arrow">→</span></>}
           </button>

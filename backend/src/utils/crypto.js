@@ -14,7 +14,6 @@ import { config } from '../config/env.js';
  * back the encryption.
  */
 
-const VERSION = 0x01;
 const IV_LEN = 12;
 const TAG_LEN = 16;
 
@@ -26,7 +25,23 @@ function decodeKey(b64, label) {
   return key;
 }
 
-const PHI_KEY = decodeKey(config.crypto.phiKey, 'PHI_ENC_KEY');
+// Versioned PHI key registry (enables key rotation WITHOUT a flag-day re-encrypt). The version byte in
+// each ciphertext selects the decryption key; new writes always use CURRENT_VERSION / the current key.
+// To rotate: set PHI_ENC_KEY=<new>, PHI_ENC_KEY_VERSION=<n+1>, and add the previous key to
+// PHI_ENC_KEY_OLD as "<oldVersion>:<oldBase64>" — old rows stay readable, new rows use the new key, and
+// data re-encrypts lazily as it is rewritten.
+const CURRENT_VERSION = Number(config.crypto.phiKeyVersion || 1);
+if (!Number.isInteger(CURRENT_VERSION) || CURRENT_VERSION < 1 || CURRENT_VERSION > 255) {
+  throw new Error('[crypto] PHI_ENC_KEY_VERSION must be an integer 1..255');
+}
+const KEY_REGISTRY = new Map();
+KEY_REGISTRY.set(CURRENT_VERSION, decodeKey(config.crypto.phiKey, 'PHI_ENC_KEY'));
+for (const [ver, b64] of Object.entries(config.crypto.phiKeysOld || {})) {
+  const v = Number(ver);
+  if (!Number.isInteger(v) || v < 1 || v > 255) throw new Error(`[crypto] invalid PHI_ENC_KEY_OLD version "${ver}"`);
+  if (!KEY_REGISTRY.has(v)) KEY_REGISTRY.set(v, decodeKey(b64, `PHI_ENC_KEY(v${v})`));
+}
+const CURRENT_KEY = KEY_REGISTRY.get(CURRENT_VERSION);
 const BIDX_KEY = decodeKey(config.crypto.blindIndexKey, 'BLIND_INDEX_KEY');
 
 /**
@@ -36,10 +51,10 @@ const BIDX_KEY = decodeKey(config.crypto.blindIndexKey, 'BLIND_INDEX_KEY');
 export function encrypt(plaintext) {
   if (plaintext === null || plaintext === undefined) return null;
   const iv = crypto.randomBytes(IV_LEN);
-  const cipher = crypto.createCipheriv('aes-256-gcm', PHI_KEY, iv);
+  const cipher = crypto.createCipheriv('aes-256-gcm', CURRENT_KEY, iv);
   const ciphertext = Buffer.concat([cipher.update(String(plaintext), 'utf8'), cipher.final()]);
   const tag = cipher.getAuthTag();
-  return Buffer.concat([Buffer.from([VERSION]), iv, tag, ciphertext]);
+  return Buffer.concat([Buffer.from([CURRENT_VERSION]), iv, tag, ciphertext]);
 }
 
 /**
@@ -51,11 +66,12 @@ export function decrypt(payload) {
   const buf = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
   if (buf.length < 1 + IV_LEN + TAG_LEN) throw new Error('[crypto] ciphertext too short');
   const version = buf[0];
-  if (version !== VERSION) throw new Error(`[crypto] unsupported ciphertext version ${version}`);
+  const key = KEY_REGISTRY.get(version);
+  if (!key) throw new Error(`[crypto] unsupported ciphertext version ${version}`);
   const iv = buf.subarray(1, 1 + IV_LEN);
   const tag = buf.subarray(1 + IV_LEN, 1 + IV_LEN + TAG_LEN);
   const ciphertext = buf.subarray(1 + IV_LEN + TAG_LEN);
-  const decipher = crypto.createDecipheriv('aes-256-gcm', PHI_KEY, iv);
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
 }

@@ -24,6 +24,17 @@ export async function authenticate(req, res, next) {
       return res.status(401).json({ error: 'Session no longer valid.', code: 'USER_INVALID' });
     }
 
+    // Credential-cut check: any access token issued BEFORE the user's tokens_valid_after is dead.
+    // This is what makes a password change / admin force-logout / role or status change actually
+    // invalidate live, stateless access tokens (not just refresh tokens) — closing the window where a
+    // stolen access token keeps working after a revoke. `iat` is in seconds; compare at that resolution.
+    if (row.tokens_valid_after) {
+      const cutSec = Math.floor(new Date(row.tokens_valid_after).getTime() / 1000);
+      if (typeof claims.iat === 'number' && claims.iat < cutSec) {
+        return res.status(401).json({ error: 'Session no longer valid.', code: 'TOKEN_REVOKED' });
+      }
+    }
+
     req.authUserId = row.id;
     req.authUserRow = row;
     req.user = toPublicUser(row);

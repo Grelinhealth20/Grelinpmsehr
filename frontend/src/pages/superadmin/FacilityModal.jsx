@@ -3,7 +3,7 @@ import Modal from '../../components/Modal.jsx';
 import { useToast } from '../../components/Toast.jsx';
 import { facilitiesApi, usersApi, toApiError } from '../../lib/api.js';
 
-const BLANK = { npi: '', name: '', address: '', city: '', state: '', zip: '', phone: '', taxonomy: '', taxId: '', logo: '' };
+const BLANK = { npi: '', name: '', address: '', city: '', state: '', zip: '', phone: '', fax: '', taxonomy: '', taxonomyCode: '', taxId: '', authorizedOfficial: '', enumerationDate: '', mailingAddress: '', nppesStatus: '', logo: '' };
 const initials = (n = '') => n.split(' ').filter(Boolean).slice(0, 2).map((w) => w[0]?.toUpperCase()).join('') || '·';
 
 /**
@@ -88,7 +88,7 @@ export default function FacilityModal({ facility = null, onClose, onSaved }) {
 
   function choose(r) {
     // Tax ID (EIN) is not in NPPES — preserve any manually entered value.
-    setForm((f) => ({ npi: r.npi || '', name: r.name || '', address: r.address || '', city: r.city || '', state: r.state || '', zip: r.zip || '', phone: r.phone || '', taxonomy: r.taxonomy || '', taxId: f.taxId || '' }));
+    setForm((f) => ({ ...f, npi: r.npi || '', name: r.name || '', address: r.address || '', city: r.city || '', state: r.state || '', zip: r.zip || '', phone: r.phone || '', fax: r.fax || '', taxonomy: r.taxonomy || '', taxonomyCode: r.taxonomyCode || '', authorizedOfficial: r.authorizedOfficial || '', enumerationDate: r.enumerationDate || '', mailingAddress: r.mailingAddress || '', nppesStatus: r.nppesStatus || r.status || '' }));
     setResults([]);
     setVerified(true);
   }
@@ -226,6 +226,12 @@ export default function FacilityModal({ facility = null, onClose, onSaved }) {
               <Fld label="State" v={form.state} on={(v) => setF('state', v)} />
               <Fld label="ZIP" v={form.zip} on={(v) => setF('zip', v)} />
               <Fld label="Phone" v={form.phone} on={(v) => setF('phone', v)} />
+              <Fld label="Fax" v={form.fax} on={(v) => setF('fax', v)} />
+              <Fld label="Taxonomy code" v={form.taxonomyCode} on={(v) => setF('taxonomyCode', v)} />
+              <Fld label="NPPES status" v={form.nppesStatus} on={(v) => setF('nppesStatus', v)} />
+              <Fld label="Enumeration date" v={form.enumerationDate} on={(v) => setF('enumerationDate', v)} />
+              <Fld label="Authorized official" v={form.authorizedOfficial} on={(v) => setF('authorizedOfficial', v)} wide />
+              <Fld label="Mailing address" v={form.mailingAddress} on={(v) => setF('mailingAddress', v)} wide />
             </div>
           </div>
         )}

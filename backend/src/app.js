@@ -56,6 +56,9 @@ export function createApp() {
   // rejected by validation (clear 400) rather than the parser (413). Authenticated +
   // gateway-rate-limited, so the larger cap is not a meaningful DoS surface.
   app.use(express.json({ limit: '6mb' }));
+  // Form-urlencoded parsing (bounded) — required by the OAuth 2.0 / SMART token endpoint, which per spec
+  // receives application/x-www-form-urlencoded. Small cap: these are short token/credential payloads.
+  app.use(express.urlencoded({ extended: false, limit: '64kb' }));
   app.use(cookieParser());
 
   // Loopback bootstrap: the gateway pulls the current (rotating) internal key from

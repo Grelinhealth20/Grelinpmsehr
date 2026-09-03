@@ -14,6 +14,18 @@ import { buildNotePdf, buildFaceSheetPdf, buildBenefitsPdf } from './pdfService.
  */
 
 const safeParse = (buf) => { try { return JSON.parse(decrypt(buf)); } catch { return null; } };
+// Patient IDENTITY for a downloadable record: a null column is legitimately empty ({}); a
+// present-but-undecryptable blob is corruption and is raised loudly — a medical/billing PDF must
+// never be produced with a blank patient name instead of surfacing the problem.
+const requireIdentity = (buf) => {
+  if (!buf) return {};
+  try { return JSON.parse(decrypt(buf)); }
+  catch {
+    const err = new Error('Patient demographics could not be decrypted (possible data corruption) — this record cannot be downloaded.');
+    err.status = 422; err.code = 'PATIENT_IDENTITY_UNREADABLE';
+    throw err;
+  }
+};
 const slug = (s) => String(s || 'patient').trim().replace(/[^\w]+/g, '_').replace(/^_+|_+$/g, '').toLowerCase() || 'patient';
 
 // Brief in-memory cache of facility logo bytes, keyed by the S3 object key.
@@ -82,7 +94,7 @@ export async function notePdf(noteUuid, providerId) {
     { u: noteUuid },
   );
   const m = meta[0] || {};
-  const demo = m.demographics_enc ? (safeParse(m.demographics_enc) || {}) : {};
+  const demo = requireIdentity(m.demographics_enc);
   const patient = {
     name: `${demo.firstName || ''} ${demo.lastName || ''}`.trim() || 'Patient',
     mrn: m.mrn, dob: demo.dob, encounterNo: m.encounter_no, encounterDate: m.dos,
@@ -96,6 +108,7 @@ export async function notePdf(noteUuid, providerId) {
 
 /** Patient Face Sheet PDF. `row` is the access-checked patient row. */
 export async function faceSheetPdf(row) {
+  requireIdentity(row?.demographics_enc); // never emit a blank-identity face sheet on decrypt corruption
   const patient = toPublicPatient(row);
   const brand = await facilityBrand(row.id);
   const name = `${patient.demographics?.firstName || ''} ${patient.demographics?.lastName || ''}`.trim() || 'patient';
@@ -108,6 +121,7 @@ export async function benefitsPdf(row, policyIndex = 0) {
   const checks = await listChecks(row.id);
   const check = checks.find((c) => c.policyIndex === Number(policyIndex)) || checks[0];
   if (!check || !check.summary) return null;
+  requireIdentity(row?.demographics_enc); // never emit a blank-identity benefits record on decrypt corruption
   const patient = toPublicPatient(row);
   const brand = await facilityBrand(row.id);
   const name = `${patient.demographics?.firstName || ''} ${patient.demographics?.lastName || ''}`.trim() || 'patient';

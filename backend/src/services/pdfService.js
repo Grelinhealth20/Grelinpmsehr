@@ -1,5 +1,5 @@
 import PDFDocument from 'pdfkit';
-import { NOTE_TITLES, SECTION_LABELS, NOTE_LABEL_OVERRIDES } from './noteDocumentService.js';
+import { SECTION_LABELS, NOTE_LABEL_OVERRIDES, noteTitle } from './noteDocumentService.js';
 
 /**
  * Enterprise PDF generator for downloadable EHR documents — clinical notes (medical
@@ -173,11 +173,23 @@ function footers(doc, facilityName) {
   doc.flushPages();
 }
 
-const signature = (doc, signerName, signedAt) => {
+const signature = (doc, signerName, signedAt, attestation) => {
   doc.moveDown(0.6);
   const x = ML(doc); const w = CW(doc);
+  if (doc.y > doc.page.height - 150) doc.addPage();
   const y = doc.y; doc.moveTo(x, y).lineTo(x + w, y).lineWidth(1).strokeColor(LINE).stroke();
   doc.moveDown(0.4);
+  // System-composed compliance attestation (the CMS statement for this note type + any rendering NPP).
+  if (attestation?.statement) {
+    doc.font('Helvetica-Bold').fontSize(8).fillColor(MUTED).text('ATTESTATION', x, doc.y, { width: w });
+    doc.font('Helvetica').fontSize(9.5).fillColor(INK).text(attestation.statement, x, doc.y + 2, { width: w, align: 'left' });
+    if (attestation.rendering?.name) {
+      const rc = attestation.rendering.creds?.length ? `, ${attestation.rendering.creds.join(', ')}` : '';
+      const rn = attestation.rendering.npi ? ` · NPI ${attestation.rendering.npi}` : '';
+      doc.font('Helvetica').fontSize(9).fillColor(MUTED).text(`Rendering practitioner: ${attestation.rendering.name}${rc}${rn}`, x, doc.y + 3, { width: w });
+    }
+    doc.moveDown(0.5);
+  }
   doc.font('Helvetica-Bold').fontSize(10).fillColor(NAVY).text(`Electronically signed by ${signerName || 'Provider'}`, x, doc.y, { width: w });
   doc.font('Helvetica').fontSize(8.5).fillColor(MUTED).text(`Signed ${usDate(signedAt) || signedAt || ''} · Finalized and part of the billing record.`, x, doc.y + 1, { width: w });
 };
@@ -189,11 +201,12 @@ const VITALS = [['temp', 'Temp °F'], ['hr', 'HR'], ['bp', 'BP'], ['rr', 'RR'], 
 export function buildNotePdf({ facility = {}, logoBuffer = null, patient = {}, note = {}, codes = { diagnoses: [], procedures: [] }, signerName, signedAt }) {
   const { doc, done } = createDoc({ title: `Medical Record — ${patient.name || 'Patient'}`, author: facility.name });
   brandHeader(doc, facility, logoBuffer);
-  docTitle(doc, NOTE_TITLES[note.noteType] || 'Clinical Note', note.status === 'signed' ? null : 'DRAFT — not finalized');
+  docTitle(doc, noteTitle(note), note.status === 'signed' ? null : 'DRAFT — not finalized');
 
   kvGrid(doc, [
     ['Patient', patient.name], ['MRN', patient.mrn], ['Encounter ID', patient.encounterNo],
     ['Date of Service', usDate(patient.encounterDate)], ['Date of Birth', usDate(patient.dob)],
+    ...(note.content?.encounterType?.display ? [['Encounter Type', `${note.content.encounterType.display} (SNOMED CT ${note.content.encounterType.code})`]] : []),
   ], 3);
 
   const content = note.content || {};
@@ -202,18 +215,28 @@ export function buildNotePdf({ facility = {}, logoBuffer = null, patient = {}, n
   if (vitLine.length) { sectionBar(doc, 'Vital Signs'); doc.font('Helvetica').fontSize(10).fillColor(INK).text(vitLine.join('     '), ML(doc), doc.y, { width: CW(doc) }); doc.moveDown(0.5); }
 
   const sections = content.sections || {};
-  // Render in the note's own template order (provider perspective) when present;
-  // fall back to whatever key order the object carries.
+  const checks = content.checks || {};
+  // A custom-template note carries its OWN heading labels — prefer those so the PDF shows exactly what
+  // the provider wrote. Then note-type overrides, then the dictionary, then the raw key (never dropped).
+  const customLabels = {};
+  for (const s of (content.customSections || [])) if (s && s.key) customLabels[s.key] = s.label || s.key;
+  const overrides = NOTE_LABEL_OVERRIDES[note.noteType] || {};
+  const labelFor = (k) => customLabels[k] || overrides[k] || SECTION_LABELS[k] || k;
+  const ticked = (k) => (Array.isArray(checks[k]) ? checks[k].filter((x) => x && S(x).trim()) : []);
+  // Render in the note's own template order (provider perspective) when present; include EVERY key that
+  // has text OR ticked checkboxes so nothing is dropped from the record.
   const order = Array.isArray(content.sectionOrder) && content.sectionOrder.length
-    ? [...content.sectionOrder, ...Object.keys(sections).filter((k) => !content.sectionOrder.includes(k))]
-    : Object.keys(sections);
-  const keys = order.filter((k) => S(sections[k]).trim());
+    ? [...content.sectionOrder, ...Object.keys(sections).filter((k) => !content.sectionOrder.includes(k)),
+      ...Object.keys(checks).filter((k) => !content.sectionOrder.includes(k) && !(k in sections))]
+    : [...new Set([...Object.keys(sections), ...Object.keys(checks)])];
+  const keys = order.filter((k) => S(sections[k]).trim() || ticked(k).length);
   if (keys.length) {
-    // Use the note-type's own header overrides so the PDF headers read exactly like
-    // the editor and the Word document (e.g. "Reason for Admission", not "Chief Complaint").
-    const overrides = NOTE_LABEL_OVERRIDES[note.noteType] || {};
     sectionBar(doc, 'Clinical Note');
-    for (const k of keys) paragraph(doc, overrides[k] || SECTION_LABELS[k] || k, sections[k]);
+    for (const k of keys) {
+      const tk = ticked(k); // "[x]" — an ASCII marker (PDFKit's Helvetica can't render a checkbox glyph)
+      const body = [tk.length ? tk.map((t) => `[x] ${t}`).join('    ') : '', S(sections[k]).trim()].filter(Boolean).join('\n');
+      paragraph(doc, labelFor(k), body);
+    }
   }
 
   const rx = (content.prescriptions || []).filter((p) => p.drug);
@@ -248,7 +271,7 @@ export function buildNotePdf({ facility = {}, logoBuffer = null, patient = {}, n
     }
   }
 
-  if (note.status === 'signed') signature(doc, signerName, signedAt);
+  if (note.status === 'signed') signature(doc, signerName, signedAt, content.signedAttestation);
 
   footers(doc, facility.name);
   doc.end();

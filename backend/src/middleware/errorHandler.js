@@ -33,8 +33,14 @@ export function errorHandler(err, req, res, next) {
   if (status >= 500) {
     logger.error({ err, path: req.path, method: req.method }, 'Unhandled error');
   }
-  const body = { error: status >= 500 ? 'An unexpected error occurred.' : err.message };
+  // Only surface a raw message for errors we explicitly trust: our operational errors always carry a
+  // `code` (AuthError, etc.), or may set `expose: true`. Any other 4xx — including a library/DB error
+  // that happens to carry a sub-500 status — returns a generic message, so an internal detail (SQL
+  // text, a PHI fragment, a stack hint) can never leak through the 4xx path. Details only pass through
+  // when they are a plain validation array on a trusted error.
+  const trusted = status < 500 && (err.expose === true || typeof err.code === 'string');
+  const body = { error: trusted ? err.message : (status >= 500 ? 'An unexpected error occurred.' : 'Invalid request.') };
   if (err.code) body.code = err.code;
-  if (err.details) body.details = err.details;
+  if (trusted && Array.isArray(err.details)) body.details = err.details;
   res.status(status).json(body);
 }

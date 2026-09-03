@@ -13,7 +13,16 @@ import {
 import {
   listNoteTypeTemplates, providerCanUseNoteType,
 } from '../services/noteTemplateService.js';
+import {
+  listCustomTemplates as listCustomTpl, createCustomTemplate as createCustomTpl,
+  updateCustomTemplate as updateCustomTpl, deleteCustomTemplate as deleteCustomTpl,
+} from '../services/customTemplateService.js';
 import { codingEnabledForNote } from '../services/facilityService.js';
+import { generateTemplateDraft, aiEnabled } from '../services/aiTemplateService.js';
+import { logAiUsage } from '../services/aiUsageService.js';
+import {
+  addEncounterDocument, getEncounterDocuments, encounterDocumentUrl, removeEncounterDocument,
+} from '../services/encounterDocumentService.js';
 
 const CODING_DISABLED = { error: 'The coding engine is turned off for this facility.', code: 'CODING_DISABLED' };
 import { recordAudit } from '../services/auditService.js';
@@ -26,7 +35,102 @@ import { notePdf } from '../services/pdfExport.js';
  */
 export async function noteTemplates(req, res, next) {
   try {
-    res.json({ noteTypes: listNoteTypeTemplates() });
+    res.json({ noteTypes: listNoteTypeTemplates(), aiTemplates: aiEnabled() });
+  } catch (err) { next(err); }
+}
+
+/**
+ * AI-assisted custom-template DRAFT from a provider's description. Returns a validated draft only
+ * (headings + guidance + checkboxes); the provider reviews and saves it through the normal create
+ * endpoint, which persists it (owner-scoped) for future use. AI errors surface as clean client messages.
+ */
+export async function generateCustomTemplate(req, res, next) {
+  const started = Date.now();
+  const preview = String(req.body?.prompt || '').slice(0, 200);
+  try {
+    const draft = await generateTemplateDraft(req.body?.prompt);
+    // Real-time AI usage log — actual OpenAI token spend, per request.
+    await logAiUsage({ userId: req.authUserId, action: 'template.generate', model: draft.model, status: 'ok',
+      usage: draft.usage, sections: draft.sections.length, latencyMs: Date.now() - started, promptPreview: preview });
+    await recordAudit({ actorUserId: req.authUserId, action: 'encounter.customTemplate.aiDraft', entityType: 'custom_note_template', ...ctx(req), metadata: { sections: draft.sections.length, totalTokens: draft.usage?.total || 0 } });
+    const { usage, model, ...clean } = draft;
+    res.json({ draft: clean });
+  } catch (err) {
+    // Log failures too (0 tokens unless the upstream billed) so the Super-Admin log is complete.
+    await logAiUsage({ userId: req.authUserId, action: 'template.generate', status: 'error',
+      errorCode: err.code || 'AI_ERROR', latencyMs: Date.now() - started, promptPreview: preview });
+    if (err.code && String(err.code).startsWith('AI_')) return res.status(err.status || 502).json({ error: err.message, code: err.code });
+    next(err);
+  }
+}
+
+// ---- Custom (provider-authored) note templates — owner-scoped -----------------------------------
+export async function listCustomTemplates(req, res, next) {
+  try { res.json({ templates: await listCustomTpl(req.authUserId) }); } catch (err) { next(err); }
+}
+export async function createCustomTemplate(req, res, next) {
+  try {
+    const template = await createCustomTpl(req.authUserId, req.body || {});
+    await recordAudit({ actorUserId: req.authUserId, action: 'encounter.customTemplate.create', entityType: 'custom_note_template', entityId: template.uuid, ...ctx(req), metadata: { name: template.label } });
+    res.status(201).json({ template });
+  } catch (err) {
+    if (/heading|name|template/i.test(err.message) && !/database|sql/i.test(err.message)) return res.status(400).json({ error: err.message, code: 'INVALID_TEMPLATE' });
+    next(err);
+  }
+}
+export async function updateCustomTemplate(req, res, next) {
+  try {
+    const template = await updateCustomTpl(req.authUserId, req.params.uuid, req.body || {});
+    if (!template) return res.status(404).json({ error: 'Template not found.', code: 'NOT_FOUND' });
+    await recordAudit({ actorUserId: req.authUserId, action: 'encounter.customTemplate.update', entityType: 'custom_note_template', entityId: template.uuid, ...ctx(req) });
+    res.json({ template });
+  } catch (err) {
+    if (/heading|name|template/i.test(err.message) && !/database|sql/i.test(err.message)) return res.status(400).json({ error: err.message, code: 'INVALID_TEMPLATE' });
+    next(err);
+  }
+}
+// ---- Encounter lab / imaging document attachments (S3-backed, per-encounter folders) ------------
+export async function listEncounterDocs(req, res, next) {
+  try {
+    const r = await getEncounterDocuments({ encounterUuid: req.params.encounterUuid, userId: req.authUserId, kind: req.query.kind });
+    if (r.forbidden) return res.status(404).json({ error: 'Encounter not found.', code: 'NOT_FOUND' });
+    if (r.error) return res.status(r.status || 400).json({ error: r.error, code: r.code });
+    res.json({ documents: r.documents });
+  } catch (err) { next(err); }
+}
+export async function uploadEncounterDoc(req, res, next) {
+  try {
+    const r = await addEncounterDocument({ encounterUuid: req.params.encounterUuid, userId: req.authUserId, kind: req.query.kind || req.body.kind, file: req.file });
+    if (r.forbidden) return res.status(404).json({ error: 'Encounter not found.', code: 'NOT_FOUND' });
+    if (r.error) return res.status(r.status || 400).json({ error: r.error, code: r.code });
+    await recordAudit({ actorUserId: req.authUserId, action: 'encounter.document.upload', entityType: 'encounter', entityId: req.params.encounterUuid, ...ctx(req), metadata: { kind: req.query.kind || req.body.kind } });
+    res.status(201).json({ document: r.document });
+  } catch (err) { next(err); }
+}
+export async function encounterDocUrl(req, res, next) {
+  try {
+    const r = await encounterDocumentUrl({ docUuid: req.params.docUuid, userId: req.authUserId });
+    if (r.notFound) return res.status(404).json({ error: 'Document not found.', code: 'NOT_FOUND' });
+    if (r.forbidden) return res.status(404).json({ error: 'Document not found.', code: 'NOT_FOUND' });
+    await recordAudit({ actorUserId: req.authUserId, action: 'encounter.document.view', entityType: 'encounter_document', entityId: req.params.docUuid, ...ctx(req) });
+    res.json({ url: r.url });
+  } catch (err) { next(err); }
+}
+export async function deleteEncounterDoc(req, res, next) {
+  try {
+    const r = await removeEncounterDocument({ docUuid: req.params.docUuid, userId: req.authUserId });
+    if (r.notFound || r.forbidden) return res.status(404).json({ error: 'Document not found.', code: 'NOT_FOUND' });
+    await recordAudit({ actorUserId: req.authUserId, action: 'encounter.document.delete', entityType: 'encounter_document', entityId: req.params.docUuid, ...ctx(req) });
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+}
+
+export async function deleteCustomTemplate(req, res, next) {
+  try {
+    const ok = await deleteCustomTpl(req.authUserId, req.params.uuid);
+    if (!ok) return res.status(404).json({ error: 'Template not found.', code: 'NOT_FOUND' });
+    await recordAudit({ actorUserId: req.authUserId, action: 'encounter.customTemplate.delete', entityType: 'custom_note_template', entityId: req.params.uuid, ...ctx(req) });
+    res.json({ ok: true });
   } catch (err) { next(err); }
 }
 

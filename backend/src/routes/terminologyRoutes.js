@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { authenticate, requirePasswordSettled } from '../middleware/authenticate.js';
 import { searchTerminology, cachedCount, TERM_SOURCES, umlsEnabled,
   lookupCpt, searchCpt, listCptModifiers, searchSnomed, searchRxnorm, snomedToIcd10cm } from '../services/terminologyService.js';
+import { checkRxSafety } from '../services/medSafetyService.js';
 
 const router = Router();
 router.use(authenticate, requirePasswordSettled);
@@ -19,6 +20,18 @@ router.get('/rxnorm', async (req, res, next) => {
   try {
     const { q = '', pageSize } = req.query;
     return res.json({ query: String(q), results: await searchRxnorm(q, { pageSize: pageSize ? Number(pageSize) : 20 }) });
+  } catch (err) { return next(err); }
+});
+
+// Prescribing safety check — deterministic, fully-local: class-based allergy cross-check + duplicate/
+// therapeutic-duplication, from the UMLS drug-class data (no external API). All params string-coerced.
+// GET /terminology/rx-safety?name=lisinopril 10 MG Oral Tablet&rxcui=...&allergies=penicillin, sulfa&current=aspirin 81 MG|metformin 500 MG
+router.get('/rx-safety', async (req, res, next) => {
+  try {
+    const { name = '', rxcui = '', allergies = '', current = '' } = req.query;
+    if (!String(name).trim()) return res.status(400).json({ error: 'name is required' });
+    const currentDrugs = String(current).split('|').map((s) => s.trim()).filter(Boolean);
+    return res.json(await checkRxSafety({ name: String(name), rxcui: String(rxcui), allergies: String(allergies), currentDrugs }));
   } catch (err) { return next(err); }
 });
 

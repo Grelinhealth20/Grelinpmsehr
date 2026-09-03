@@ -74,9 +74,16 @@ function ctxOf(req) {
   return { ip: req.ip, userAgent: req.get('user-agent') };
 }
 
-/** Guard: only the master admin may act on another master-admin record. */
+/**
+ * Privilege-tier guard: only the master admin may act on a master admin OR on a fellow super admin.
+ * A super admin can therefore manage only accounts strictly below their own tier (billing/provider) —
+ * no peer-on-peer privilege changes (demote/disable/reset/delete) between super admins. Self-service is
+ * always allowed here (dedicated guards still block self-status-change and self-delete elsewhere).
+ */
 function assertCanManageTarget(actor, targetRow) {
-  if (targetRow.role === ROLES.MASTER_ADMIN && actor.role !== ROLES.MASTER_ADMIN) {
+  if (actor.uuid && targetRow.uuid && actor.uuid === targetRow.uuid) return; // acting on own record
+  if ((targetRow.role === ROLES.MASTER_ADMIN || targetRow.role === ROLES.SUPER_ADMIN)
+      && actor.role !== ROLES.MASTER_ADMIN) {
     const e = new Error('Only the master administrator can manage this account.');
     e.status = 403;
     e.code = 'FORBIDDEN';
@@ -113,8 +120,15 @@ export async function list(req, res, next) {
 
 export async function create(req, res, next) {
   try {
-    const { email, fullName, role, accessLevel, credentials, specialtyUuid, specialtyUuids, npi, taxonomy, taxonomyCode, temporaryPassword } = req.body;
+    const { email, fullName, role, accessLevel, credentials, specialtyUuid, specialtyUuids, npi, taxonomy, taxonomyCode,
+      licenseNumber, licenseState, providerGender, soleProprietor, enumerationDate, nppesStatus, temporaryPassword } = req.body;
     const isProvider = role === ROLES.PROVIDER;
+
+    // Only the master admin may mint another administrator (super/master) — a super admin cannot create
+    // a same-or-higher-privilege peer (privilege-escalation guard, complements assertCanManageTarget).
+    if ((role === ROLES.SUPER_ADMIN || role === ROLES.MASTER_ADMIN) && req.user.role !== ROLES.MASTER_ADMIN) {
+      return res.status(403).json({ error: 'Only the master administrator can create an administrator account.', code: 'FORBIDDEN' });
+    }
 
     const policyErrors = validatePasswordPolicy(temporaryPassword);
     if (policyErrors.length) {
@@ -142,6 +156,13 @@ export async function create(req, res, next) {
       npi: isProvider ? (npi || null) : null,
       taxonomy: isProvider ? (taxonomy || null) : null,
       taxonomyCode: isProvider ? (taxonomyCode || null) : null,
+      // Full NPPES (NPI-1) registry details — only for providers, nothing dropped.
+      licenseNumber: isProvider ? (licenseNumber || null) : null,
+      licenseState: isProvider ? (licenseState || null) : null,
+      providerGender: isProvider ? (providerGender || null) : null,
+      soleProprietor: isProvider ? (soleProprietor || null) : null,
+      enumerationDate: isProvider ? (enumerationDate || null) : null,
+      nppesStatus: isProvider ? (nppesStatus || null) : null,
       passwordHash,
       mustResetPassword: true, // new users must set their own password on first login
       createdBy: req.authUserId,
@@ -182,6 +203,11 @@ export async function update(req, res, next) {
     // The master administrator can never be demoted to another role.
     if (isMasterAccount(row) && req.body.role && req.body.role !== ROLES.MASTER_ADMIN) {
       return res.status(400).json({ error: 'The master administrator role cannot be changed.', code: 'MASTER_PROTECTED' });
+    }
+    // Only the master admin may PROMOTE anyone into an administrator (super/master) tier.
+    if (req.body.role && (req.body.role === ROLES.SUPER_ADMIN || req.body.role === ROLES.MASTER_ADMIN)
+        && req.user.role !== ROLES.MASTER_ADMIN) {
+      return res.status(403).json({ error: 'Only the master administrator can grant an administrator role.', code: 'FORBIDDEN' });
     }
 
     const { specialtyUuid, specialtyUuids, ...rest } = req.body;

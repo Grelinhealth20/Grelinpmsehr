@@ -1,7 +1,10 @@
 import { pool, assertDbConnection } from './pool.js';
 import { SCHEMA_STATEMENTS } from './schema.js';
 import { seedNoteTemplates } from '../services/noteTemplateService.js';
+import { backfillAuditChain } from '../services/auditService.js';
 import { logger } from '../config/logger.js';
+
+const GENESIS_HASH = '0'.repeat(64);
 
 /**
  * Apply the schema. Idempotent (CREATE TABLE IF NOT EXISTS) so it runs safely on
@@ -70,6 +73,21 @@ export async function runMigrations() {
   );
   // SNF facility information on the patient face sheet (encrypted PHI blob).
   await ensureColumn('patients', 'facility_enc', '`facility_enc` VARBINARY(3072) NULL AFTER `insurance_enc`');
+  // Encounter-scoped lab / imaging documents: link a patient_document to a specific encounter and
+  // widen doc_type to include 'lab' and 'imaging'. Encounter-scoped so lab/imaging records live under
+  // the patient's encounter folder in S3 and are listed per encounter.
+  await ensureColumn(
+    'patient_documents',
+    'encounter_id',
+    '`encounter_id` BIGINT UNSIGNED NULL AFTER `patient_id`',
+    'CONSTRAINT `fk_pdoc_encounter` FOREIGN KEY (`encounter_id`) REFERENCES `encounters`(`id`) ON DELETE CASCADE',
+  );
+  await ensureIndex('patient_documents', 'idx_pdoc_encounter', '`encounter_id`, `doc_type`');
+  try {
+    await pool.query("ALTER TABLE patient_documents MODIFY doc_type ENUM('license_front','license_back','insurance_front','insurance_back','other','lab','imaging') NOT NULL");
+  } catch (err) {
+    logger.warn({ err: err.message }, 'patient_documents doc_type widen skipped');
+  }
   // Optional link from an appointment to an existing patient record.
   await ensureColumn(
     'appointments',
@@ -104,6 +122,14 @@ export async function runMigrations() {
   await ensureColumn('users', 'npi', '`npi` VARCHAR(10) NULL AFTER `credentials`');
   await ensureColumn('users', 'taxonomy', '`taxonomy` VARCHAR(160) NULL AFTER `npi`');
   await ensureColumn('users', 'taxonomy_code', '`taxonomy_code` VARCHAR(16) NULL AFTER `taxonomy`');
+  // Full NPPES (NPI-1) identity for an individual provider — captured from the registry so nothing
+  // is dropped: license #, license state, gender, sole-proprietor flag, enumeration date, status.
+  await ensureColumn('users', 'license_number', '`license_number` VARCHAR(32) NULL AFTER `taxonomy_code`');
+  await ensureColumn('users', 'license_state', '`license_state` VARCHAR(2) NULL AFTER `license_number`');
+  await ensureColumn('users', 'provider_gender', '`provider_gender` VARCHAR(16) NULL AFTER `license_state`');
+  await ensureColumn('users', 'sole_proprietor', '`sole_proprietor` VARCHAR(8) NULL AFTER `provider_gender`');
+  await ensureColumn('users', 'enumeration_date', '`enumeration_date` VARCHAR(20) NULL AFTER `sole_proprietor`');
+  await ensureColumn('users', 'nppes_status', '`nppes_status` VARCHAR(16) NULL AFTER `enumeration_date`');
   // Facility logo — a data URI (base64 image), not PHI; shown across the app.
   await ensureColumn('facilities', 'logo', '`logo` MEDIUMTEXT NULL AFTER `taxonomy`');
   // Facility Tax ID (EIN) — organizational billing identifier, entered by an admin
@@ -112,6 +138,14 @@ export async function runMigrations() {
   // Per-facility feature switches (Super Admin controlled). Default ON so existing facilities keep working.
   await ensureColumn('facilities', 'coding_enabled', '`coding_enabled` TINYINT(1) NOT NULL DEFAULT 1 AFTER `status`');
   await ensureColumn('facilities', 'eligibility_enabled', '`eligibility_enabled` TINYINT(1) NOT NULL DEFAULT 1 AFTER `coding_enabled`');
+  // Full NPPES (NPI-2) identity for a group/organization — captured so nothing is dropped:
+  // taxonomy code, fax, authorized official, enumeration date, mailing address, registry status.
+  await ensureColumn('facilities', 'taxonomy_code', '`taxonomy_code` VARCHAR(16) NULL AFTER `taxonomy`');
+  await ensureColumn('facilities', 'fax', '`fax` VARCHAR(24) NULL AFTER `phone`');
+  await ensureColumn('facilities', 'authorized_official', '`authorized_official` VARCHAR(200) NULL AFTER `taxonomy_code`');
+  await ensureColumn('facilities', 'enumeration_date', '`enumeration_date` VARCHAR(20) NULL AFTER `authorized_official`');
+  await ensureColumn('facilities', 'mailing_address', '`mailing_address` VARCHAR(300) NULL AFTER `enumeration_date`');
+  await ensureColumn('facilities', 'nppes_status', '`nppes_status` VARCHAR(16) NULL AFTER `mailing_address`');
   // Rendering provider selected for an appointment (may differ from the owner).
   await ensureColumn(
     'appointments',
@@ -248,6 +282,18 @@ export async function runMigrations() {
   // Seed/refresh the note-template registry (SNF + Pain service lines).
   try { const n = await seedNoteTemplates(); logger.info({ templates: n }, 'Note-template registry seeded'); }
   catch (err) { logger.warn({ err: err.message }, 'Note-template registry seed skipped'); }
+
+  // Audit hash-chain (ONC (d)(2)): ensure the single-row chain head exists, and establish the integrity
+  // baseline exactly ONCE — only while the head is still genesis (never re-baseline afterwards, which
+  // would mask tampering). After adoption, every append chains itself via recordAudit().
+  try {
+    await pool.query('INSERT IGNORE INTO audit_chain (id, last_hash) VALUES (1, ?)', [GENESIS_HASH]);
+    const [[head]] = [await pool.query('SELECT last_hash FROM audit_chain WHERE id = 1')].map((x) => x[0]);
+    if (!head || head.last_hash === GENESIS_HASH) {
+      const [[c]] = [await pool.query('SELECT COUNT(*) n FROM audit_logs')].map((x) => x[0]);
+      if (c.n > 0) { const bf = await backfillAuditChain(); logger.info({ rows: bf.updated }, 'Audit hash-chain baseline established'); }
+    }
+  } catch (err) { logger.warn({ err: err.message }, 'Audit hash-chain baseline skipped'); }
 
   logger.info(`Schema ensured (${SCHEMA_STATEMENTS.length} tables)`);
 }

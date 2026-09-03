@@ -6,6 +6,7 @@ import { runMigrations } from './db/migrate.js';
 import { seedMasterAdmin } from './db/seed.js';
 import { seedSpecialties } from './services/specialtyService.js';
 import { initKeyRotation } from './services/keyRotationService.js';
+import { warmTerminologyCache } from './services/terminologyCache.js';
 
 async function bootstrap() {
   await assertDbConnection();
@@ -15,6 +16,10 @@ async function bootstrap() {
   await initKeyRotation(); // load/seed the rotating key ring; start the 40-min timer
 
   const app = createApp();
+
+  // Warm the local terminology cache (complete billable ICD-10-CM set) so the first coding prediction
+  // pays no load cost. Non-blocking: the API comes up immediately; a lazy load covers any early call.
+  warmTerminologyCache();
 
   // Bind to loopback ONLY — the API is never publicly reachable; the gateway is.
   const server = app.listen(config.api.port, config.api.host, () => {

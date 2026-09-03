@@ -15,11 +15,21 @@ export function toPublicDoc(row) {
   };
 }
 
-const SELECT = `SELECT id, uuid, patient_id, doc_type, s3_key, file_name_enc, content_type, size_bytes, created_at
+const SELECT = `SELECT id, uuid, patient_id, encounter_id, doc_type, s3_key, file_name_enc, content_type, size_bytes, created_at
   FROM patient_documents`;
 
 export async function listDocuments(patientId) {
-  const [rows] = await execute(`${SELECT} WHERE patient_id = :pid ORDER BY created_at DESC`, { pid: patientId });
+  // Face-sheet documents only (license / insurance / other) — NOT encounter lab/imaging attachments.
+  const [rows] = await execute(
+    `${SELECT} WHERE patient_id = :pid AND encounter_id IS NULL ORDER BY created_at DESC`, { pid: patientId });
+  return rows.map(toPublicDoc);
+}
+
+/** Lab or imaging documents attached to ONE encounter (newest first). */
+export async function listEncounterDocuments(encounterId, docType) {
+  const [rows] = await execute(
+    `${SELECT} WHERE encounter_id = :eid AND doc_type = :t ORDER BY created_at DESC`,
+    { eid: encounterId, t: docType });
   return rows.map(toPublicDoc);
 }
 
@@ -39,14 +49,15 @@ export async function findDocByType(patientId, docType) {
   return rows[0] || null;
 }
 
-export async function createDocumentRecord({ patientId, docType, s3Key, fileName, contentType, size, uploadedBy }) {
+export async function createDocumentRecord({ patientId, encounterId = null, docType, s3Key, fileName, contentType, size, uploadedBy }) {
   const uuid = uuidv4();
   await execute(
-    `INSERT INTO patient_documents (uuid, patient_id, doc_type, s3_key, file_name_enc, content_type, size_bytes, uploaded_by)
-     VALUES (:uuid, :pid, :type, :key, :nameEnc, :ct, :size, :uploadedBy)`,
+    `INSERT INTO patient_documents (uuid, patient_id, encounter_id, doc_type, s3_key, file_name_enc, content_type, size_bytes, uploaded_by)
+     VALUES (:uuid, :pid, :eid, :type, :key, :nameEnc, :ct, :size, :uploadedBy)`,
     {
       uuid,
       pid: patientId,
+      eid: encounterId,
       type: docType,
       key: s3Key,
       nameEnc: fileName ? encrypt(fileName) : null,

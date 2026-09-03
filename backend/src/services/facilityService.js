@@ -43,8 +43,9 @@ async function inlineLogo(facility, rawKey) {
  * scoped through them to strictly prevent cross-facility data sharing.
  */
 
-const FAC_COLS = `f.uuid, f.npi, f.name, f.address, f.city, f.state, f.zip, f.phone,
-  f.taxonomy, f.tax_id, f.logo, f.status, f.coding_enabled, f.eligibility_enabled, f.source,
+const FAC_COLS = `f.uuid, f.npi, f.name, f.address, f.city, f.state, f.zip, f.phone, f.fax,
+  f.taxonomy, f.taxonomy_code, f.tax_id, f.authorized_official, f.enumeration_date, f.mailing_address,
+  f.nppes_status, f.logo, f.status, f.coding_enabled, f.eligibility_enabled, f.source,
   DATE_FORMAT(f.created_at, '%Y-%m-%dT%H:%i:%sZ') AS created_at`;
 const boolFlag = (v) => v == null ? true : !!Number(v); // per-facility flags default ON
 
@@ -54,8 +55,14 @@ function toFacility(r) {
   return {
     uuid: r.uuid, npi: r.npi || null, name: r.name,
     address: r.address || null, city: r.city || null, state: r.state || null,
-    zip: r.zip || null, phone: r.phone || null, taxonomy: r.taxonomy || null,
+    zip: r.zip || null, phone: r.phone || null, fax: r.fax || null,
+    taxonomy: r.taxonomy || null, taxonomyCode: r.taxonomy_code || null,
     taxId: r.tax_id || null,
+    // Full NPPES (NPI-2) registry details — captured so nothing is dropped.
+    authorizedOfficial: r.authorized_official || null,
+    enumerationDate: r.enumeration_date || null,
+    mailingAddress: r.mailing_address || null,
+    nppesStatus: r.nppes_status || null,
     logo: null, hasLogo: !!r.logo,
     status: r.status, source: r.source,
     codingEnabled: boolFlag(r.coding_enabled),
@@ -124,13 +131,18 @@ export async function createFacility(data, { adminId } = {}) {
     try { logoKey = await uploadFacilityLogo({ facilityUuid: uuid, facilityName: data.name }, parsed.buffer, parsed.contentType, parsed.ext); } catch { logoKey = null; }
   }
   await execute(
-    `INSERT INTO facilities (uuid, npi, name, address, city, state, zip, phone, taxonomy, tax_id, logo, status, source, verified_by, created_by)
-     VALUES (:uuid, :npi, :name, :address, :city, :state, :zip, :phone, :taxonomy, :taxId, :logo, 'active', :source, :adminId, :adminId)`,
+    `INSERT INTO facilities (uuid, npi, name, address, city, state, zip, phone, fax, taxonomy, taxonomy_code,
+        tax_id, authorized_official, enumeration_date, mailing_address, nppes_status, logo, status, source, verified_by, created_by)
+     VALUES (:uuid, :npi, :name, :address, :city, :state, :zip, :phone, :fax, :taxonomy, :taxonomyCode,
+        :taxId, :authorizedOfficial, :enumerationDate, :mailingAddress, :nppesStatus, :logo, 'active', :source, :adminId, :adminId)`,
     {
       uuid, npi: data.npi || null, name: data.name, address: data.address || null,
       city: data.city || null, state: data.state || null, zip: data.zip || null,
-      phone: data.phone || null, taxonomy: data.taxonomy || null, taxId: data.taxId || null, logo: logoKey,
-      source: data.source || 'nppes', adminId: adminId || null,
+      phone: data.phone || null, fax: data.fax || null,
+      taxonomy: data.taxonomy || null, taxonomyCode: data.taxonomyCode || null, taxId: data.taxId || null,
+      authorizedOfficial: data.authorizedOfficial || null, enumerationDate: data.enumerationDate || null,
+      mailingAddress: data.mailingAddress || null, nppesStatus: data.nppesStatus || data.status || null,
+      logo: logoKey, source: data.source || 'nppes', adminId: adminId || null,
     },
   );
   return { facility: await getFacility(uuid), duplicate: false };
@@ -141,11 +153,17 @@ export async function updateFacility(uuid, data) {
   if (!row) return null;
   const sets = [];
   const params = { uuid };
-  for (const k of ['npi', 'name', 'address', 'city', 'state', 'zip', 'phone', 'taxonomy']) {
+  for (const k of ['npi', 'name', 'address', 'city', 'state', 'zip', 'phone', 'fax', 'taxonomy']) {
     if (data[k] !== undefined) { sets.push(`${k} = :${k}`); params[k] = data[k] || null; }
   }
   // Tax ID (EIN): the DTO key `taxId` maps to the `tax_id` column.
   if (data.taxId !== undefined) { sets.push('tax_id = :taxId'); params.taxId = data.taxId || null; }
+  // Full NPPES (NPI-2) details — DTO camelCase → snake_case columns.
+  if (data.taxonomyCode !== undefined) { sets.push('taxonomy_code = :taxonomyCode'); params.taxonomyCode = data.taxonomyCode || null; }
+  if (data.authorizedOfficial !== undefined) { sets.push('authorized_official = :authorizedOfficial'); params.authorizedOfficial = data.authorizedOfficial || null; }
+  if (data.enumerationDate !== undefined) { sets.push('enumeration_date = :enumerationDate'); params.enumerationDate = data.enumerationDate || null; }
+  if (data.mailingAddress !== undefined) { sets.push('mailing_address = :mailingAddress'); params.mailingAddress = data.mailingAddress || null; }
+  if (data.nppesStatus !== undefined) { sets.push('nppes_status = :nppesStatus'); params.nppesStatus = data.nppesStatus || null; }
   // Logo: a new data URI uploads to the facility's S3 folder (replacing the old
   // object); an empty string clears it. `row.logo` holds the current S3 key.
   if (data.logo !== undefined) {
