@@ -2,7 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { execute } from '../db/pool.js';
 import { encrypt, decrypt, blindIndex } from '../utils/crypto.js';
 import { config } from '../config/env.js';
-import { invalidateServiceLines } from './accessScope.js';
+import { invalidateServiceLines, invalidateCredentials } from './accessScope.js';
 
 /** Map a raw DB row to a safe, decrypted DTO (never leaks the password hash). */
 export function toPublicUser(row) {
@@ -266,6 +266,9 @@ export async function updateUserProfile(uuid, { fullName, role, accessLevel, cre
   if (!sets.length) return findRawByUuid(uuid);
   await execute(`UPDATE users SET ${sets.join(', ')} WHERE uuid = :uuid`, params);
   invalidateUserCache(uuid);
+  // Credentials drive the viewer's MD/read-scope flag (cached) — refresh it immediately when changed
+  // so an access-scope change never lags behind an admin edit.
+  if (credentials !== undefined) { const uid = await userIdByUuid(uuid); if (uid != null) invalidateCredentials(uid); }
   return findRawByUuid(uuid);
 }
 

@@ -43,7 +43,10 @@ export function normalizeSections(input) {
       key = `${key}-${n}`;
     }
     seen.set(key, label);
-    const rows = Number(s.rows);
+    const rowsNum = Number(s.rows);
+    // Textarea-height hint (display only). A numeric value is CLAMPED into the valid 2–8 range
+    // (so 99 -> 8, 1 -> 2) rather than reset; a non-numeric/absent value defaults to 3.
+    const rows = Number.isFinite(rowsNum) ? Math.min(8, Math.max(2, Math.round(rowsNum))) : 3;
     const checks = Array.isArray(s.checks)
       ? [...new Set(s.checks.map((c) => String(c).trim()).filter(Boolean))].slice(0, 20)
       : null;
@@ -51,7 +54,7 @@ export function normalizeSections(input) {
       key,
       label,
       prompt: String(s.prompt || '').trim().slice(0, 400),
-      rows: Number.isFinite(rows) && rows >= 2 && rows <= 8 ? Math.round(rows) : 3,
+      rows,
       ...(checks && checks.length ? { checks } : {}),
     });
   }

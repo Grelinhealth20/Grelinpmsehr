@@ -26,11 +26,21 @@ const RecordsIcon = (
     <path d="M12 11.5v4M10 13.5h4" />
   </svg>
 );
+// Node handed off to another node — the symbol for the Referrals system.
+const ReferralIcon = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="6" cy="6" r="2.5" />
+    <circle cx="6" cy="18" r="2.5" />
+    <circle cx="18" cy="12" r="2.5" />
+    <path d="M8.2 7.4 15.6 11M8.2 16.6 15.6 13" />
+  </svg>
+);
 
 const NAV = [
   { key: 'appointment', label: 'Appointment', icon: CalendarIcon },
   { key: 'encounter', label: 'Patients & Encounters', icon: EncounterIcon },
   { key: 'clinical', label: 'Clinical Records', icon: RecordsIcon },
+  { key: 'referral', label: 'Referrals', icon: ReferralIcon },
 ];
 
 /**
@@ -105,6 +115,8 @@ export default function EhrSystem({ systems = [], active = null, onSwitch = null
         {view === 'appointment' && <AppointmentScheduler />}
         {view === 'encounter' && <Encounter />}
         {view === 'clinical' && <ClinicalRecords />}
+        {/* Referrals — reserved access system; blank canvas until built out. */}
+        {view === 'referral' && <div className="ehr-blank" role="region" aria-label="Referrals" />}
       </main>
     </div>
   );

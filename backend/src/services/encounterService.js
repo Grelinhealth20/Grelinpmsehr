@@ -193,7 +193,8 @@ export async function listProviderPatients(providerId, { page = 1, pageSize = 25
   // Safe integers (validated/clamped by the controller) — inlined because MySQL
   // prepared statements reject placeholders in LIMIT/OFFSET.
   const lim = Math.max(1, Math.min(100, Math.floor(Number(pageSize)) || 25));
-  const off = Math.max(0, (Math.max(1, Math.floor(Number(page)) || 1) - 1) * lim);
+  const pg = Math.max(1, Math.floor(Number(page)) || 1);
+  const off = (pg - 1) * lim;
   // Scope: MD → facility-wide (all providers at their facilities); others → own.
   const scope = await viewerScope(providerId);
   const sc = patientScopeWhere(scope, providerId, 'p');
@@ -247,8 +248,9 @@ export async function listProviderPatients(providerId, { page = 1, pageSize = 25
       };
     }),
     total: Number(cnt[0].total),
-    page: Number(page),
-    pageSize: Number(pageSize),
+    // Effective (clamped) pagination — correct client pager math even on malformed input.
+    page: pg,
+    pageSize: lim,
   };
 }
 
@@ -276,7 +278,8 @@ export async function listPatientEncounters(providerId, patientUuid, { page = 1,
   if (!pr[0]) return null; // not visible to this viewer → 404
   const pidInt = pr[0].id;
   const lim = Math.max(1, Math.min(50, Math.floor(Number(pageSize)) || 25));
-  const off = Math.max(0, (Math.max(1, Math.floor(Number(page)) || 1) - 1) * lim);
+  const pg = Math.max(1, Math.floor(Number(page)) || 1);
+  const off = (pg - 1) * lim;
   // A facility-wide MD sees every encounter for the patient; others see only theirs.
   const encWhere = isFacilityWide(scope) ? 'e.patient_id = :pid' : 'e.patient_id = :pid AND e.provider_id = :prov';
   const encParams = isFacilityWide(scope) ? { pid: pidInt } : { pid: pidInt, prov: providerId };
@@ -310,8 +313,9 @@ export async function listPatientEncounters(providerId, patientUuid, { page = 1,
       signedOffProvider: r.signers || null,
     })),
     total: Number(cnt[0].total),
-    page: Number(page),
-    pageSize: Number(pageSize),
+    // Effective (clamped) pagination — correct client pager math even on malformed input.
+    page: pg,
+    pageSize: lim,
   };
 }
 
@@ -470,7 +474,8 @@ const NOTE_STATUS = "n.status"; // 'draft' | 'signed'
 export async function listClinicalRecords(userId, { page = 1, pageSize = 25, q = '', status = '' } = {}) {
   const scope = await viewerScope(userId);
   const lim = Math.max(1, Math.min(100, Math.floor(Number(pageSize)) || 25));
-  const off = Math.max(0, (Math.max(1, Math.floor(Number(page)) || 1) - 1) * lim);
+  const pg = Math.max(1, Math.floor(Number(page)) || 1);
+  const off = (pg - 1) * lim;
   const params = {};
   let where;
   if (isFacilityWide(scope)) {
@@ -537,8 +542,9 @@ export async function listClinicalRecords(userId, { page = 1, pageSize = 25, q =
       };
     }),
     total: Number(cnt[0].total),
-    page: Number(page),
-    pageSize: Number(pageSize),
+    // Effective (clamped) pagination — correct client pager math even on malformed input.
+    page: pg,
+    pageSize: lim,
   };
 }
 

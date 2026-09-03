@@ -106,11 +106,10 @@ function PatientRow({ p, onView, onEncounters }) {
       <td className="enc-strong"><span className="enc-group-name">{p.patientName || '—'}</span></td>
       <td>{p.facilityName || '—'}</td>
       <td>{p.renderingProvider || '—'}</td>
-      <td />
+      <td className="pf-muted">—</td>
       <td><span className="enc-count-badge">{p.encounterCount}</span></td>
       <td className="enc-action">
         <button className="act" onClick={(e) => { e.stopPropagation(); onView(p.patientUuid); }} title="View face sheet">View</button>
-        <button className="act accent" onClick={(e) => { e.stopPropagation(); onEncounters(p.patientUuid); }} title="View & add encounters for this patient">Encounters</button>
       </td>
     </tr>
   );

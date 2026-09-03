@@ -84,11 +84,41 @@ export async function providerServiceLines(userId) {
  *   records; a multi-specialty SNF+Pain MD sees both), so isolation never widens beyond the
  *   admin-granted specialties.
  */
-export async function viewerScope(userId) {
+/**
+ * Short-TTL cache for the viewer's MD flag (derived from the `credentials` column). viewerScope runs
+ * on nearly every clinical read (patient list, clinical records, every notes op) and the remote DB has
+ * a ~260-520ms round-trip, so an uncached credentials fetch added a full round-trip to every request.
+ * Credentials change only when an admin edits a provider's profile, which invalidates the entry; a 20s
+ * TTL bounds staleness even if an invalidation is ever missed. SIGNING authority is NOT read from here
+ * (signNote/amend re-query credentials fresh), so this only affects read-scope — same window the
+ * facility-id and service-line caches already accept. */
+const CRED_TTL_MS = 20_000;
+const credCache = new Map(); // userId -> { isMD:boolean, exp:number }
+export function invalidateCredentials(userId) {
+  if (userId != null) credCache.delete(Number(userId));
+  else credCache.clear();
+}
+async function isMdCached(userId) {
+  const key = Number(userId);
+  const now = Date.now();
+  const hit = credCache.get(key);
+  if (hit && hit.exp > now) return hit.isMD;
   const [rows] = await execute(`SELECT credentials FROM users WHERE id = :id LIMIT 1`, { id: userId });
   const isMD = isMdCredentials(rows[0]?.credentials);
+  credCache.set(key, { isMD, exp: now + CRED_TTL_MS });
+  if (credCache.size > 5000) credCache.delete(credCache.keys().next().value);
+  return isMD;
+}
+
+export async function viewerScope(userId) {
+  // The MD flag and the service-line set are INDEPENDENT — resolve them concurrently instead of
+  // serially (each is itself short-TTL cached, so a warm hot path pays ZERO remote round-trips).
+  // facilityIds depends on isMD (MD-only) and is likewise cached, so on a warm scope it is free.
+  const [isMD, serviceLines] = await Promise.all([
+    isMdCached(userId),
+    providerServiceLines(userId),
+  ]);
   const facilityIds = isMD ? await providerFacilityIds(userId) : [];
-  const serviceLines = await providerServiceLines(userId);
   return { isMD, facilityIds, serviceLines };
 }
 

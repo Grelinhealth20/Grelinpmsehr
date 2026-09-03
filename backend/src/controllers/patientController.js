@@ -147,8 +147,13 @@ export async function getOne(req, res, next) {
   try {
     const row = await ownedPatientOr404(req);
     const documents = await listFacesheetDocs(row.id); // BOUNDED (slots + recent) — fast even at 1000s of docs
-    await recordAudit({ actorUserId: req.authUserId, action: 'patient.view', entityType: 'patient', entityId: row.uuid, ...ctx(req) });
     res.json({ patient: toPublicPatient(row), documents });
+    // Access audit is a compliance SIDE-EFFECT, not part of the response. The hash-chained write is
+    // globally serialized (SELECT ... FOR UPDATE on the chain head) and adds ~1-2 remote round-trips;
+    // awaiting it made every chart-open wait on it. Run it AFTER responding — still guaranteed-attempted
+    // and any failure is logged LOUDLY (never silently dropped), so the tamper-evident log stays complete.
+    recordAudit({ actorUserId: req.authUserId, action: 'patient.view', entityType: 'patient', entityId: row.uuid, ...ctx(req) })
+      .catch((e) => logger.error({ err: e?.message, patient: row.uuid, actor: req.authUserId }, 'patient.view audit write FAILED'));
   } catch (err) { next(err); }
 }
 

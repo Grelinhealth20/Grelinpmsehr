@@ -88,17 +88,19 @@ button, input, textarea, select { font-family: inherit; }
 
 /* ---- Buttons ---- */
 .btn {
-  --bg: var(--c-accent); --fg: var(--c-dark-blue); --bd: transparent;
-  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  --bg: var(--c-accent); --fg: var(--c-dark-blue); --bd: rgba(9, 17, 33, 0.16);
+  position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
   height: 42px; padding: 0 18px; border-radius: var(--r-md);
-  background: var(--bg); color: var(--fg); border: 1px solid var(--bd);
-  font-weight: 500; font-size: 14px; cursor: pointer; letter-spacing: -0.01em;
-  transition: transform 0.15s var(--ease), box-shadow 0.2s var(--ease), background 0.2s var(--ease), filter 0.2s;
-  box-shadow: var(--shadow-sm);
+  background: var(--bg); color: var(--fg); border: 1.5px solid var(--bd);
+  font-weight: 600; font-size: 14px; cursor: pointer; letter-spacing: -0.01em;
+  transition: transform 0.15s var(--ease), box-shadow 0.22s var(--ease), background 0.2s var(--ease), border-color 0.18s var(--ease), filter 0.2s;
+  /* crisp edge + subtle top highlight → reads as a real, tactile control */
+  box-shadow: var(--shadow-sm), inset 0 1px 0 rgba(255, 255, 255, 0.28);
 }
-.btn:hover { filter: brightness(1.02); transform: translateY(-1px); box-shadow: 0 12px 28px rgba(207, 148, 85, 0.4); }
-.btn:active { transform: translateY(1px); }
-.btn:focus-visible { outline: none; box-shadow: var(--ring); }
+/* Futuristic, interactive: lifts and gains an accent glow + brighter edge on hover. */
+.btn:hover { filter: brightness(1.04); transform: translateY(-1.5px); border-color: rgba(9, 17, 33, 0.28); box-shadow: 0 14px 30px rgba(207, 148, 85, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.34); }
+.btn:active { transform: translateY(0.5px) scale(0.985); box-shadow: var(--shadow-sm), inset 0 2px 4px rgba(9, 17, 33, 0.14); }
+.btn:focus-visible { outline: none; box-shadow: var(--ring), inset 0 1px 0 rgba(255, 255, 255, 0.28); border-color: var(--c-blue); }
 .btn:disabled { opacity: 0.55; cursor: not-allowed; box-shadow: none; filter: none; }
 .btn.block { width: 100%; }
 .btn.lg { height: 48px; font-size: 15px; }
