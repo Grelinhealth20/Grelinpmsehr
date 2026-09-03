@@ -181,10 +181,13 @@ export const patientsApi = {
   create: (payload) => api.post('/patients', payload),
   update: (uuid, payload) => api.patch(`/patients/${uuid}`, payload),
   remove: (uuid) => api.delete(`/patients/${uuid}`),
-  listDocuments: (uuid) => api.get(`/patients/${uuid}/documents`),
-  uploadDocument: (uuid, docType, file, onProgress) => {
+  // No params → full list (face-sheet slots). With { page, pageSize, q, category } → paginated,
+  // searchable, category-filtered response { documents, total, page, pageSize, counts, categories }.
+  listDocuments: (uuid, params) => api.get(`/patients/${uuid}/documents`, params ? { params } : undefined),
+  uploadDocument: (uuid, docType, file, onProgress, serviceDate) => {
     const fd = new FormData();
     fd.append('docType', docType);
+    if (serviceDate) fd.append('serviceDate', serviceDate);
     fd.append('file', file);
     // Let the browser set multipart/form-data WITH its boundary — never set it
     // manually (a boundary-less header makes the server fail to parse the file).
@@ -193,7 +196,7 @@ export const patientsApi = {
       onUploadProgress: onProgress,
     });
   },
-  documentUrl: (uuid, docUuid) => api.get(`/patients/${uuid}/documents/${docUuid}/url`),
+  documentUrl: (uuid, docUuid, download) => api.get(`/patients/${uuid}/documents/${docUuid}/url`, download ? { params: { download: 1 } } : undefined),
   extractDocument: (uuid, docUuid) => api.post(`/patients/${uuid}/documents/${docUuid}/extract`),
   // Stateless auto-fill (no patient yet): OCR a face sheet, persist nothing.
   extractUpload: (file) => {

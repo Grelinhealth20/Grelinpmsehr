@@ -17,6 +17,14 @@ const upload = multer({
   limits: { fileSize: 10 * 1024 * 1024, files: 1, fields: 20, fieldSize: 100 * 1000, parts: 30 },
 });
 
+// Stored patient RECORDS (medical / labs / imaging / insurance) — images, PDF, Word, NO OCR — accept
+// large files up to 250 MB each. OCR paths keep the small 10 MB cap above (OCR of a huge image is a
+// DoS vector); these are stored as-is and never OCR-processed, so a higher ceiling is safe.
+const recordUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 250 * 1024 * 1024, files: 1, fields: 20, fieldSize: 100 * 1000, parts: 30 },
+});
+
 const router = Router();
 
 // Any authenticated user with a settled password manages their OWN patients.
@@ -49,7 +57,7 @@ router.post('/:uuid/eligibility', csrfProtection, validate(uuidParam, 'params'),
 
 // Documents (license / insurance images) — strictly scoped to the owned patient.
 router.get('/:uuid/documents', validate(uuidParam, 'params'), ctrl.listDocs);
-router.post('/:uuid/documents', csrfProtection, validate(uuidParam, 'params'), upload.single('file'), ctrl.uploadDoc);
+router.post('/:uuid/documents', csrfProtection, validate(uuidParam, 'params'), recordUpload.single('file'), ctrl.uploadDoc);
 router.get('/:uuid/documents/:docUuid/url', validate(uuidParam, 'params'), ctrl.getDocUrl);
 router.post('/:uuid/documents/:docUuid/extract', csrfProtection, ocrLimiter, validate(uuidParam, 'params'), ctrl.extractDoc);
 router.delete('/:uuid/documents/:docUuid', csrfProtection, validate(uuidParam, 'params'), ctrl.deleteDoc);

@@ -3,7 +3,7 @@ import {
   listPatients, createPatient, updatePatient, applyPatientUpdateLocked, deletePatient, getRawByUuid, toPublicPatient, getPatientS3Ctx,
 } from '../services/patientService.js';
 import {
-  listDocuments, getRawDocByUuid, findDocByType,
+  listFacesheetDocs, listPatientDocumentsPaged, documentCategoryCounts, DOC_CATEGORIES, getRawDocByUuid, findDocByType,
   createDocumentRecord, deleteDocumentRecord,
 } from '../services/patientDocumentService.js';
 import {
@@ -27,7 +27,13 @@ function sendPdf(res, out) {
   res.send(out.buffer);
 }
 
-const DOC_TYPES = new Set(['license_front', 'license_back', 'insurance_front', 'insurance_back', 'other']);
+const DOC_TYPES = new Set(['license_front', 'license_back', 'insurance_front', 'insurance_back', 'insurance_card', 'medical_record', 'lab_result', 'imaging', 'other']);
+// SINGLE-slot legacy types replace on re-upload (one license front, etc.). The category types are
+// MULTI-document (a patient has many medical records / labs / imaging / insurance cards) and are NEVER
+// replaced — each upload adds a new document.
+const SLOT_TYPES = new Set(['license_front', 'license_back', 'insurance_front', 'insurance_back']);
+// Record-style categories accept image/PDF/Word; insurance cards + ID slots accept image/PDF only.
+const RECORDS_TYPES = new Set(['medical_record', 'lab_result', 'imaging', 'other']);
 const ALLOWED_MIME = {
   'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'application/pdf': '.pdf',
   'application/msword': '.doc',
@@ -40,8 +46,9 @@ const RECORDS_MIME = new Set([
   'image/jpeg', 'image/png', 'image/webp', 'application/pdf',
   'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
 ]);
-const allowedMimes = (docType) => (docType === 'other' ? RECORDS_MIME : IMG_PDF);
-const MAX_BYTES = 10 * 1024 * 1024;
+const allowedMimes = (docType) => (RECORDS_TYPES.has(docType) ? RECORDS_MIME : IMG_PDF);
+const MAX_BYTES = 10 * 1024 * 1024;          // OCR paths (DoS-sensitive) — small cap
+const MAX_UPLOAD_BYTES = 250 * 1024 * 1024;  // stored records (images/PDF/Word, no OCR) — up to 250 MB
 
 /**
  * Content sniffing (defense in depth): the browser-declared Content-Type is
@@ -139,7 +146,7 @@ export async function emergencyAccess(req, res, next) {
 export async function getOne(req, res, next) {
   try {
     const row = await ownedPatientOr404(req);
-    const documents = await listDocuments(row.id);
+    const documents = await listFacesheetDocs(row.id); // BOUNDED (slots + recent) — fast even at 1000s of docs
     await recordAudit({ actorUserId: req.authUserId, action: 'patient.view', entityType: 'patient', entityId: row.uuid, ...ctx(req) });
     res.json({ patient: toPublicPatient(row), documents });
   } catch (err) { next(err); }
@@ -179,7 +186,20 @@ export async function remove(req, res, next) {
 export async function listDocs(req, res, next) {
   try {
     const row = await ownedPatientOr404(req);
-    res.json({ documents: await listDocuments(row.id) });
+    // Paginated + searchable + category-filtered when any of page/pageSize/q/category is present (the
+    // Documents tab at scale — thousands of docs per patient). With no params, return the full list
+    // (used by the face-sheet slot lookups, which need every slot doc).
+    if (req.query.page || req.query.pageSize || req.query.q || req.query.category || req.query.counts) {
+      const result = await listPatientDocumentsPaged(row.id, {
+        page: req.query.page, pageSize: req.query.pageSize, q: req.query.q, category: req.query.category,
+      });
+      // Category counts are computed only when asked (?counts=1) — the client fetches them ONCE on load
+      // and after a mutation, not on every page navigation, so paging stays a single fast query.
+      if (req.query.counts) result.counts = await documentCategoryCounts(row.id);
+      return res.json({ ...result, categories: DOC_CATEGORIES });
+    }
+    // No pagination params → the BOUNDED face-sheet set (slots + recent), never the whole library.
+    res.json({ documents: await listFacesheetDocs(row.id) });
   } catch (err) { next(err); }
 }
 
@@ -192,7 +212,7 @@ export async function uploadDoc(req, res, next) {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded.', code: 'NO_FILE' });
     const ext = ALLOWED_MIME[req.file.mimetype];
     if (!ext || !allowedMimes(docType).has(req.file.mimetype)) {
-      const msg = docType === 'other' ? 'Records accept images, PDF or Word documents.' : 'Use JPG, PNG, WEBP or PDF.';
+      const msg = RECORDS_TYPES.has(docType) ? 'Records accept images, PDF or Word documents.' : 'Use JPG, PNG, WEBP or PDF.';
       return res.status(400).json({ error: `Unsupported file type. ${msg}`, code: 'BAD_MIME' });
     }
     // Verify the actual bytes match the declared, allowed type (the client can lie about MIME).
@@ -200,10 +220,12 @@ export async function uploadDoc(req, res, next) {
     if (!sniffed || !allowedMimes(docType).has(sniffed) || sniffed !== req.file.mimetype) {
       return res.status(400).json({ error: 'File contents do not match the declared type.', code: 'BAD_CONTENT' });
     }
-    if (req.file.size > MAX_BYTES) return res.status(400).json({ error: 'File exceeds the 10 MB limit.', code: 'TOO_LARGE' });
+    // Per-record cap only (250 MB); there is NO limit on the number of documents or total storage per patient.
+    if (req.file.size > MAX_UPLOAD_BYTES) return res.status(400).json({ error: 'File exceeds the 250 MB per-record limit.', code: 'TOO_LARGE' });
 
-    // Replace an existing slot (e.g. re-upload license front) — delete the old object.
-    if (docType !== 'other') {
+    // Replace an existing SINGLE-slot doc (e.g. re-upload license front) — delete the old object. Category
+    // (record) types are multi-document and are never replaced: every upload adds a new document.
+    if (SLOT_TYPES.has(docType)) {
       const existing = await findDocByType(row.id, docType);
       if (existing) { try { await deleteObject(existing.s3_key); } catch { /* ignore */ } await deleteDocumentRecord(existing.uuid); }
     }
@@ -215,8 +237,9 @@ export async function uploadDoc(req, res, next) {
     const doc = await createDocumentRecord({
       patientId: row.id, docType, s3Key, fileName: req.file.originalname,
       contentType: req.file.mimetype, size: req.file.size, uploadedBy: req.authUserId,
+      serviceDate: req.body.serviceDate, // Date of Service (documents are arranged by this); defaults to today
     });
-    await recordAudit({ actorUserId: req.authUserId, action: 'patient.document.upload', entityType: 'patient', entityId: row.uuid, ...ctx(req), metadata: { docType } });
+    await recordAudit({ actorUserId: req.authUserId, action: 'patient.document.upload', entityType: 'patient', entityId: row.uuid, ...ctx(req), metadata: { docType, dos: doc.dos } });
     res.status(201).json({ document: doc });
   } catch (err) { next(err); }
 }
@@ -225,9 +248,11 @@ export async function getDocUrl(req, res, next) {
   try {
     const row = await ownedPatientOr404(req);
     const doc = await getRawDocByUuid(req.params.docUuid);
+    // Double patient-scope: the doc must belong to THIS resolved patient — never another patient's doc.
     if (!doc || Number(doc.patient_id) !== Number(row.id)) return res.status(404).json({ error: 'Document not found.', code: 'NOT_FOUND' });
-    const url = await signedGetUrl(doc.s3_key, 300);
-    await recordAudit({ actorUserId: req.authUserId, action: 'patient.document.view', entityType: 'patient', entityId: row.uuid, ...ctx(req), metadata: { docType: doc.doc_type } });
+    const download = req.query.download === '1' || req.query.download === 'true';
+    const url = await signedGetUrl(doc.s3_key, 300, download ? { downloadName: doc.file_name || 'document' } : {});
+    await recordAudit({ actorUserId: req.authUserId, action: download ? 'patient.document.download' : 'patient.document.view', entityType: 'patient', entityId: row.uuid, ...ctx(req), metadata: { docType: doc.doc_type } });
     res.json({ url, expiresIn: 300 });
   } catch (err) { next(err); }
 }

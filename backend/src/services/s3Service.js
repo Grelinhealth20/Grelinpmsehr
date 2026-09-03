@@ -158,10 +158,17 @@ export async function uploadFacilityLogo(facilityCtx, buffer, contentType, ext) 
   return key;
 }
 
-/** Short-lived, read-only URL to view/download a single object. */
-export async function signedGetUrl(s3Key, expiresIn = 300) {
+/** Short-lived, read-only URL to view a single object. When `downloadName` is given, the URL forces a
+ *  browser DOWNLOAD (Content-Disposition: attachment) with a sanitized filename instead of inline view.
+ *  The disposition is part of the SIGNED request, so it can't be tampered with after signing. */
+export async function signedGetUrl(s3Key, expiresIn = 300, { downloadName = null } = {}) {
   if (!client) throw new Error('S3 is not configured.');
-  return getSignedUrl(client, new GetObjectCommand({ Bucket: config.s3.bucket, Key: s3Key }), { expiresIn });
+  const params = { Bucket: config.s3.bucket, Key: s3Key };
+  if (downloadName) {
+    const safe = String(downloadName).replace(/[^\w.\-() ]+/g, '_').slice(0, 200) || 'document';
+    params.ResponseContentDisposition = `attachment; filename="${safe}"`;
+  }
+  return getSignedUrl(client, new GetObjectCommand(params), { expiresIn });
 }
 
 /** Fetch an object's raw bytes (server-side; e.g. to run OCR/extraction). */

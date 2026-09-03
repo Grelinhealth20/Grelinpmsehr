@@ -115,20 +115,30 @@ export async function verifyRecovery(row, code) {
   const lock = lockState(row);
   if (lock.locked) return { error: 'locked', minutesLeft: lock.minutesLeft };
   if (!row.mfa_recovery_enc) return { error: 'no_recovery' };
-  let list; try { list = JSON.parse(decrypt(row.mfa_recovery_enc)); } catch { return { error: 'no_recovery' }; }
   const norm = String(code || '').replace(/[\s-]/g, '').toUpperCase();
   if (!/^[A-Z2-7]{10}$/.test(norm)) { await bumpFailure(row); return { error: 'invalid_code' }; }
-  for (const entry of list) {
-    if (entry.used) continue;
-    if (await verifyPassword(entry.hash, norm)) { // eslint-disable-line no-await-in-loop
-      entry.used = true;
-      await execute('UPDATE users SET mfa_recovery_enc = :r, mfa_failed_attempts = 0, mfa_locked_until = NULL WHERE id = :id', { r: encrypt(JSON.stringify(list)), id: row.id });
-      invalidateUserCache(row.uuid);
-      return { ok: true, remaining: list.filter((e) => !e.used).length };
+  // Consume the code inside a transaction that locks THIS user's row (SELECT ... FOR UPDATE), re-reading
+  // the recovery set under the lock. This makes a one-time code truly one-time under concurrency: two
+  // simultaneous logins presenting the same code serialize — the second waits for the first to commit,
+  // then re-reads and finds entry.used=true, so a single code can never authenticate twice.
+  const result = await withTransaction(async (exec) => {
+    const [[fresh]] = await exec('SELECT mfa_recovery_enc FROM users WHERE id = :id FOR UPDATE', { id: row.id });
+    if (!fresh || !fresh.mfa_recovery_enc) return { error: 'no_recovery' };
+    let list; try { list = JSON.parse(decrypt(fresh.mfa_recovery_enc)); } catch { return { error: 'no_recovery' }; }
+    for (const entry of list) {
+      if (entry.used) continue;
+      if (await verifyPassword(entry.hash, norm)) { // eslint-disable-line no-await-in-loop
+        entry.used = true;
+        await exec('UPDATE users SET mfa_recovery_enc = :r, mfa_failed_attempts = 0, mfa_locked_until = NULL WHERE id = :id',
+          { r: encrypt(JSON.stringify(list)), id: row.id });
+        return { ok: true, remaining: list.filter((e) => !e.used).length };
+      }
     }
-  }
-  await bumpFailure(row);
-  return { error: 'invalid_code' };
+    return { error: 'invalid_code' };
+  });
+  if (result.ok) { invalidateUserCache(row.uuid); return result; }
+  if (result.error === 'invalid_code') await bumpFailure(row); // wrong code → count toward lockout
+  return result;
 }
 
 /** SUPER-ADMIN: require/allow MFA for a user. Does NOT delete an existing enrollment. */

@@ -283,6 +283,18 @@ export async function runMigrations() {
   try { const n = await seedNoteTemplates(); logger.info({ templates: n }, 'Note-template registry seeded'); }
   catch (err) { logger.warn({ err: err.message }, 'Note-template registry seed skipped'); }
 
+  // Documents: category taxonomy (widen doc_type ENUM to Medical/Labs/Imaging/Insurance/Other), a
+  // Date-of-Service column so documents can be arranged by DOS, and a composite index so the paginated
+  // Documents tab stays fast at scale (thousands of documents per patient). Idempotent.
+  try {
+    await pool.query("ALTER TABLE patient_documents MODIFY doc_type ENUM('license_front','license_back','insurance_front','insurance_back','insurance_card','medical_record','lab_result','lab','imaging','other') NOT NULL");
+  } catch (err) { logger.warn({ err: err.message }, 'patient_documents doc_type ENUM widen skipped'); }
+  try {
+    const added = await ensureColumn('patient_documents', 'service_date', '`service_date` DATE NULL AFTER `content_type`');
+    if (added) await pool.query('UPDATE patient_documents SET service_date = DATE(created_at) WHERE service_date IS NULL');
+  } catch (err) { logger.warn({ err: err.message }, 'patient_documents service_date add skipped'); }
+  await ensureIndex('patient_documents', 'idx_pdoc_patient_dos', 'patient_id, service_date, id');
+
   // Audit hash-chain (ONC (d)(2)): ensure the single-row chain head exists, and establish the integrity
   // baseline exactly ONCE — only while the head is still genesis (never re-baseline afterwards, which
   // would mask tampering). After adoption, every append chains itself via recordAudit().

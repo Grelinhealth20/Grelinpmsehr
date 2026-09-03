@@ -30,8 +30,8 @@ const decName = (buf) => { try { return buf ? decrypt(buf) : null; } catch { ret
 
 /** Paginated AI usage logs (newest first) for the Super-Admin panel, plus aggregate token totals. */
 export async function listAiUsage({ page = 1, pageSize = 25 } = {}) {
-  const lim = Math.max(1, Math.min(100, Number(pageSize) || 25));
-  const off = Math.max(0, (Number(page) - 1) * lim);
+  const lim = Math.max(1, Math.min(100, Math.floor(Number(pageSize)) || 25));
+  const off = Math.max(0, (Math.max(1, Math.floor(Number(page)) || 1) - 1) * lim);
   const [[rows], [cnt], [tot]] = await Promise.all([
     execute(
       `SELECT l.uuid, l.action, l.model, l.status, l.error_code, l.prompt_tokens, l.completion_tokens,

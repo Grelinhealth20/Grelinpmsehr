@@ -167,7 +167,14 @@ export const ENCOUNTER_TYPES = [
   { code: '448337001', display: 'Telehealth Visit' },              // Telemedicine consultation with patient
   { code: '11429006', display: 'Consultation' },                   // Consultation
 ];
-const encTypeByCode = Object.fromEntries(ENCOUNTER_TYPES.map((t) => [t.code, t]));
+export const encTypeByCode = Object.fromEntries(ENCOUNTER_TYPES.map((t) => [t.code, t]));
+/** Display label (Service Type) for a stored encounter-type value — accepts a bare SNOMED code or a
+ *  { code, display } object; returns '—' when unset/unknown so the table never shows a blank cell. */
+export const encTypeLabel = (v) => {
+  if (!v) return '—';
+  if (typeof v === 'object') return v.display || encTypeByCode[v.code]?.display || '—';
+  return encTypeByCode[v]?.display || '—';
+};
 
 function PFDetails({ encounter, noteLabel, ageStr, seenBy, statusStr, encType, onEncType, readOnly }) {
   const et = encType && encType.display ? encType : ENCOUNTER_TYPES[0];

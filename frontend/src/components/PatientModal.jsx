@@ -3,7 +3,7 @@ import Modal from './Modal.jsx';
 import { useToast } from './Toast.jsx';
 import { patientsApi, encountersApi, toApiError } from '../lib/api.js';
 import BenefitsVerification from './BenefitsVerification.jsx';
-import { EncounterNotesModal, usDate, encNo, loadNoteDefs, loadCustomTemplates, CustomTemplateBuilder } from './EncounterNotes.jsx';
+import { EncounterNotesModal, usDate, encNo, loadNoteDefs, loadCustomTemplates, CustomTemplateBuilder, encTypeLabel } from './EncounterNotes.jsx';
 import { NOTE_TYPES, SECTION_LABELS } from '../lib/noteTemplates.js';
 
 const ENC_PER_PAGE = 25;
@@ -290,6 +290,197 @@ function RecordsUpload({ patientUuid, docs, onChanged, onExtract, disabled }) {
         </div>
       )}
     </>
+  );
+}
+
+/** Documents tab — EVERY document received for this patient (uploaded records + slot documents),
+ *  each viewable and downloadable. Strictly patient-scoped on the backend (owner + patient_id match),
+ *  so it can never show another patient's documents (no cross-leakage). */
+const DOC_PER_PAGE = 20;
+const DOC_CATEGORIES = [
+  { key: 'medical_record', label: 'Medical Records' },
+  { key: 'lab_result', label: 'Lab Results' },
+  { key: 'imaging', label: 'Imaging' },
+  { key: 'insurance_card', label: 'Insurance Cards' },
+  { key: 'other', label: 'Other Records' },
+];
+const DOC_CAT_LABEL = Object.fromEntries(DOC_CATEGORIES.map((c) => [c.key, c.label]));
+
+/** Documents tab — every document received for this patient, categorized (Medical Records / Labs /
+ *  Imaging / Insurance Cards / Other), arranged by Date of Service, view + download. SERVER-paginated,
+ *  server-searched and server-category-filtered, so it stays instant even with thousands of documents
+ *  per patient. Strictly patient-scoped on the backend (owner + patient_id) — no cross-leakage. */
+const DocFileIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M13 3H7a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V8z" /><path d="M13 3v5h5" />
+  </svg>
+);
+
+function DocumentsLibrary({ patientUuid, onChanged }) {
+  const toast = useToast();
+  const [category, setCategory] = useState('all');
+  const [q, setQ] = useState('');
+  const [debouncedQ, setDebouncedQ] = useState('');
+  const [page, setPage] = useState(1);
+  const [data, setData] = useState(null);
+  const [counts, setCounts] = useState({});
+  const [loading, setLoading] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [busyId, setBusyId] = useState(null);
+  // Integrated upload panel
+  const today = new Date().toISOString().slice(0, 10);
+  const [showUpload, setShowUpload] = useState(false);
+  const [upCategory, setUpCategory] = useState('medical_record');
+  const [upDos, setUpDos] = useState(today);
+  const [upBusy, setUpBusy] = useState(false);
+  const [over, setOver] = useState(false);
+  const upRef = useRef(null);
+
+  useEffect(() => { const t = setTimeout(() => { setDebouncedQ(q); setPage(1); }, 300); return () => clearTimeout(t); }, [q]);
+  useEffect(() => { setPage(1); }, [category]);
+  // Category counts: fetched ONCE per patient / after a mutation (NOT on every page nav) so paging is a single query.
+  useEffect(() => {
+    let active = true;
+    patientsApi.listDocuments(patientUuid, { page: 1, pageSize: 1, counts: 1 })
+      .then(({ data: d }) => { if (active && d.counts) setCounts(d.counts); })
+      .catch(() => { /* chip tallies are cosmetic — never block the list */ });
+    return () => { active = false; };
+  }, [patientUuid, refreshKey]);
+  // The document PAGE — one query per page/search/category change.
+  useEffect(() => {
+    let active = true; setLoading(true);
+    patientsApi.listDocuments(patientUuid, { page, pageSize: DOC_PER_PAGE, q: debouncedQ, category: category === 'all' ? '' : category })
+      .then(({ data: d }) => { if (active) setData(d); })
+      .catch((e) => { if (active) { setData({ documents: [], total: 0 }); toast.error(toApiError(e).message); } })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [patientUuid, page, debouncedQ, category, refreshKey, toast]);
+
+  const reload = () => setRefreshKey((k) => k + 1);
+  const total = data?.total || 0;
+  const docs = data?.documents || [];
+  const pages = Math.max(1, Math.ceil(total / DOC_PER_PAGE));
+  const chips = [{ key: 'all', label: 'All' }, ...DOC_CATEGORIES];
+  const cnt = (k) => (k === 'all' ? counts.all : counts[k]);
+
+  async function view(d) { try { const { data: r } = await patientsApi.documentUrl(patientUuid, d.uuid); window.open(r.url, '_blank', 'noopener'); } catch (e) { toast.error(toApiError(e).message); } }
+  async function download(d) {
+    setBusyId(d.uuid);
+    try { const { data: r } = await patientsApi.documentUrl(patientUuid, d.uuid, true); const a = document.createElement('a'); a.href = r.url; a.download = d.fileName || 'document'; a.rel = 'noopener'; document.body.appendChild(a); a.click(); a.remove(); }
+    catch (e) { toast.error(toApiError(e).message); } finally { setBusyId(null); }
+  }
+  async function remove(d) {
+    if (!window.confirm(`Remove “${d.fileName || 'this document'}”? This cannot be undone.`)) return;
+    try { await patientsApi.removeDocument(patientUuid, d.uuid); toast.success('Document removed.'); reload(); onChanged?.(); }
+    catch (e) { toast.error(toApiError(e).message); }
+  }
+  async function uploadMany(files) {
+    const list = Array.from(files || []);
+    if (!list.length) return;
+    setUpBusy(true); let done = 0;
+    try {
+      for (const f of list) {
+        if (!RECORDS_OK.test(f.name)) { toast.error(`${f.name}: only image, PDF or Word files are allowed.`); continue; }
+        if (f.size > 250 * 1024 * 1024) { toast.error(`${f.name} exceeds the 250 MB limit.`); continue; }
+        await patientsApi.uploadDocument(patientUuid, upCategory, f, undefined, upDos); // real upload → S3 + DB (no OCR)
+        done += 1;
+      }
+      if (done) { toast.success(`${done} document${done === 1 ? '' : 's'} uploaded to ${DOC_CAT_LABEL[upCategory]}.`); setCategory(upCategory); setPage(1); reload(); onChanged?.(); }
+    } catch (e) { toast.error(toApiError(e).message); } finally { setUpBusy(false); }
+  }
+
+  return (
+    <div className="docmgr">
+      <div className="docmgr-toolbar">
+        <div className="docmgr-chips">
+          {chips.map((c) => (
+            <button key={c.key} type="button" className={`docmgr-chip ${category === c.key ? 'is-on' : ''}`} onClick={() => setCategory(c.key)}>
+              {c.label}{cnt(c.key) != null ? <span className="docmgr-chip-n">{cnt(c.key)}</span> : null}
+            </button>
+          ))}
+        </div>
+        <div className="docmgr-search">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></svg>
+          <input type="search" placeholder="Search documents…" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search this patient's documents" />
+        </div>
+        <button type="button" className={`docmgr-upbtn ${showUpload ? 'is-open' : ''}`} onClick={() => setShowUpload((s) => !s)}>
+          {showUpload
+            ? <><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M18 6 6 18M6 6l12 12" /></svg> Close</>
+            : <><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg> Upload</>}
+        </button>
+      </div>
+
+      {showUpload && (
+        <div className="docmgr-uploader">
+          <div className="docmgr-upfields">
+            <label className="docmgr-upfield"><span className="docmgr-uplabel">Category</span>
+              <select value={upCategory} onChange={(e) => setUpCategory(e.target.value)}>{DOC_CATEGORIES.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}</select>
+            </label>
+            <label className="docmgr-upfield"><span className="docmgr-uplabel">Date of Service</span>
+              <input type="date" value={upDos} max={today} onChange={(e) => setUpDos(e.target.value)} />
+            </label>
+          </div>
+          <div className={`fs-drop fs-records ${over ? 'is-over' : ''}`}
+            onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={() => setOver(false)}
+            onDrop={(e) => { e.preventDefault(); setOver(false); uploadMany(e.dataTransfer.files); }}>
+            {upBusy ? <ExtractionProgress phase="upload" /> : (
+              <button type="button" className="fs-drop-empty" onClick={() => upRef.current?.click()}>
+                <span className="fs-drop-plus" aria-hidden="true" />
+                <span>Drop files into “{DOC_CAT_LABEL[upCategory]}”, or click to browse</span>
+                <span className="fs-drop-hint">Images, PDF or Word · one or many · up to 250 MB each · dated {upDos}</span>
+              </button>
+            )}
+            <input ref={upRef} type="file" accept={RECORDS_ACCEPT} multiple hidden onChange={(e) => { uploadMany(e.target.files); e.target.value = ''; }} />
+          </div>
+          <p className="docmgr-uphint">One place for every record — pick a category (incl. Insurance Cards) and drop one or many files, or click to browse. Accepts images, PDF and Word.</p>
+        </div>
+      )}
+
+      <div className="docmgr-toolbar" style={{ marginBottom: 10, justifyContent: 'flex-end' }}>
+        <span className="docmgr-count">{loading ? 'Loading…' : `${total} document${total === 1 ? '' : 's'}${category !== 'all' ? ` · ${DOC_CAT_LABEL[category] || ''}` : ''}`}</span>
+      </div>
+
+      {loading && !data ? (
+        <div className="docmgr-empty"><span className="spinner dark" /> Loading…</div>
+      ) : docs.length === 0 ? (
+        <div className="docmgr-empty">{(debouncedQ || category !== 'all')
+          ? 'No documents match this filter.'
+          : <>No documents received for this patient yet. Click <strong>Upload</strong> to add medical records, labs, imaging or insurance cards.</>}</div>
+      ) : (
+        <div className="docmgr-tablewrap">
+          <div className="docmgr-scroll">
+            <table className="docmgr-table">
+              <thead><tr><th>Date of Service</th><th>Document</th><th>Category</th><th className="ta-right">Actions</th></tr></thead>
+              <tbody>
+                {docs.map((d) => (
+                  <tr key={d.uuid}>
+                    <td className="docmgr-dos">{d.dos ? usDate(d.dos) : '—'}</td>
+                    <td><div className="docmgr-doc"><span className="docmgr-doc-ic"><DocFileIcon /></span><span className="docmgr-doc-name" title={d.fileName || ''}>{d.fileName || 'Document'}</span></div></td>
+                    <td><span className="docmgr-badge">{DOC_CAT_LABEL[d.category] || 'Other Records'}</span></td>
+                    <td><div className="docmgr-actions">
+                      <button type="button" className="act" onClick={() => view(d)}>View</button>
+                      <button type="button" className="act accent" disabled={busyId === d.uuid} onClick={() => download(d)}>{busyId === d.uuid ? <span className="spinner dark" /> : 'Download'}</button>
+                      <button type="button" className="act danger" onClick={() => remove(d)}>Remove</button>
+                    </div></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {pages > 1 && (
+            <div className="pager pager-c">
+              <span className="pager-label">Showing {(page - 1) * DOC_PER_PAGE + 1}–{Math.min(page * DOC_PER_PAGE, total)} of {total}</span>
+              <span className="spacer" />
+              <button className="pager-btn" disabled={page <= 1 || loading} onClick={() => setPage((p) => Math.max(1, p - 1))}>‹ Prev</button>
+              {pageWindow(page, pages).map((x, i) => (x === '…'
+                ? <span key={`d${i}`} className="pager-ellipsis">…</span>
+                : <button key={x} className={`pager-num ${x === page ? 'is-on' : ''}`} disabled={loading} onClick={() => setPage(x)}>{x}</button>))}
+              <button className="pager-btn" disabled={page >= pages || loading} onClick={() => setPage((p) => Math.min(pages, p + 1))}>Next ›</button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -601,6 +792,14 @@ export default function PatientModal({ uuid = null, docMode = 'license', initial
                 Encounters
               </button>
             )}
+            {pUuid && (
+              <button type="button" role="tab" aria-selected={viewTab === 'documents'} className={`fs-vtab ${viewTab === 'documents' ? 'is-on' : ''}`} onClick={() => setViewTab('documents')}>
+                <svg className="fs-vtab-ic" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M7 3h7l4 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z" /><path d="M14 3v4h4M9 12h6M9 15.5h6M9 8.5h2" />
+                </svg>
+                Documents
+              </button>
+            )}
           </div>
 
           {viewTab === 'facesheet' && (
@@ -788,6 +987,16 @@ export default function PatientModal({ uuid = null, docMode = 'license', initial
               patient={{ patientUuid: pUuid, patientName: patientDisplayName({ demographics: form.demographics }), mrn, facilityName: form.facility.facilityName, dob: form.demographics.dob, gender: form.demographics.gender }}
             />
           )}
+
+          {viewTab === 'documents' && pUuid && (
+          <div className="fs-sheet">
+            <div className="fs-section" style={{ marginBottom: 0 }}>
+              <SecHead icon="file" title="Documents" note="All documents received for this patient — by category, arranged by Date of Service. View or download." />
+              <DocumentsLibrary patientUuid={pUuid} onChanged={reloadDocs} />
+            </div>
+          </div>
+          )}
+
         </div>
       )}
       {builderOpen && (
@@ -867,12 +1076,16 @@ function EncountersTab({ patientUuid, patient, openNew = false, startNoteType = 
       <div className="enc-sub-toolbar">
         <span className="enc-sub-toolbar-lbl">{encTotal} encounter{encTotal === 1 ? '' : 's'} for {patient.patientName || 'this patient'}</span>
       </div>
+      {/* 7-column table can exceed the modal width — scroll it horizontally within the panel so the
+          Main Panel never overflows/breaks. */}
+      <div className="enc-subtable-wrap" style={{ overflowX: 'auto', width: '100%' }}>
       <table className="enc-subtable">
         <thead>
           <tr>
             <th>Encounter ID</th>
             <th>Date of Service</th>
-            <th>Notes</th>
+            <th>Note Type</th>
+            <th>Service Type</th>
             <th>Rendering Provider</th>
             <th>Signed off Provider</th>
             <th className="enc-sub-act">Action</th>
@@ -880,14 +1093,15 @@ function EncountersTab({ patientUuid, patient, openNew = false, startNoteType = 
         </thead>
         <tbody>
           {eLoading && !encs ? (
-            <tr><td colSpan={6} className="table-empty"><span className="spinner dark" /> Loading…</td></tr>
+            <tr><td colSpan={7} className="table-empty"><span className="spinner dark" /> Loading…</td></tr>
           ) : (encs && encs.length === 0) ? (
-            <tr><td colSpan={6} className="table-empty">No encounters for this patient yet.</td></tr>
+            <tr><td colSpan={7} className="table-empty">No encounters for this patient yet.</td></tr>
           ) : (encs || []).map((r) => (
             <tr key={r.encounterUuid}>
               <td className="mono">{encNo(r.encounterNo)}</td>
               <td>{usDate(r.date)}</td>
               <td>{procedureLabel(r)}</td>
+              <td>{encTypeLabel(r.encounterType)}</td>
               <td>{r.renderingProvider || '—'}</td>
               <td>{r.signedOffProvider || <span className="enc-unsigned">Not signed</span>}</td>
               <td className="enc-sub-act">
@@ -897,6 +1111,7 @@ function EncountersTab({ patientUuid, patient, openNew = false, startNoteType = 
           ))}
         </tbody>
       </table>
+      </div>
       {ePages > 1 && (
         <div className="pager pager-c">
           <span className="pager-label">Showing {(ePage - 1) * ENC_PER_PAGE + 1}–{Math.min(ePage * ENC_PER_PAGE, encTotal)} of {encTotal}</span>

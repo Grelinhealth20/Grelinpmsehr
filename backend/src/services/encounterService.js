@@ -192,8 +192,8 @@ export async function listEncounters(providerId) {
 export async function listProviderPatients(providerId, { page = 1, pageSize = 25, q = '' } = {}) {
   // Safe integers (validated/clamped by the controller) — inlined because MySQL
   // prepared statements reject placeholders in LIMIT/OFFSET.
-  const lim = Math.max(1, Math.min(100, Number(pageSize) || 25));
-  const off = Math.max(0, (Number(page) - 1) * lim);
+  const lim = Math.max(1, Math.min(100, Math.floor(Number(pageSize)) || 25));
+  const off = Math.max(0, (Math.max(1, Math.floor(Number(page)) || 1) - 1) * lim);
   // Scope: MD → facility-wide (all providers at their facilities); others → own.
   const scope = await viewerScope(providerId);
   const sc = patientScopeWhere(scope, providerId, 'p');
@@ -252,6 +252,20 @@ export async function listProviderPatients(providerId, { page = 1, pageSize = 25
   };
 }
 
+/** Extract the SNOMED encounter-type CODE (Service Type) from a note's encrypted content. Fail-safe:
+ *  returns null on a missing/undecryptable/unparseable body (never throws, never fabricates). The note
+ *  stores content.encounterType as { code, display }; older rows may hold a bare code string — we return
+ *  the code and let the client render its display label from the canonical ENCOUNTER_TYPES map. */
+export function encTypeCodeFrom(contentEnc) {
+  if (!contentEnc) return null;
+  try {
+    const c = JSON.parse(decrypt(contentEnc));
+    const et = c && c.encounterType;
+    if (!et) return null;
+    return typeof et === 'string' ? et : (et.code || null);
+  } catch { return null; }
+}
+
 /** Paginated encounters for one patient (10/page). Scope: MD → all encounters at
  *  their facility for this patient; other providers → their own encounters only. */
 export async function listPatientEncounters(providerId, patientUuid, { page = 1, pageSize = 25 } = {}) {
@@ -261,8 +275,8 @@ export async function listPatientEncounters(providerId, patientUuid, { page = 1,
   const [pr] = await execute(`SELECT p.id FROM patients p WHERE p.uuid = :u AND ${sc.sql} LIMIT 1`, { u: patientUuid, ...sc.params });
   if (!pr[0]) return null; // not visible to this viewer → 404
   const pidInt = pr[0].id;
-  const lim = Math.max(1, Math.min(50, Number(pageSize) || 25));
-  const off = Math.max(0, (Number(page) - 1) * lim);
+  const lim = Math.max(1, Math.min(50, Math.floor(Number(pageSize)) || 25));
+  const off = Math.max(0, (Math.max(1, Math.floor(Number(page)) || 1) - 1) * lim);
   // A facility-wide MD sees every encounter for the patient; others see only theirs.
   const encWhere = isFacilityWide(scope) ? 'e.patient_id = :pid' : 'e.patient_id = :pid AND e.provider_id = :prov';
   const encParams = isFacilityWide(scope) ? { pid: pidInt } : { pid: pidInt, prov: providerId };
@@ -271,7 +285,9 @@ export async function listPatientEncounters(providerId, patientUuid, { page = 1,
       `SELECT e.uuid, e.encounter_no,
           DATE_FORMAT(COALESCE(e.encounter_date, a.appt_date), '%Y-%m-%d') AS dos,
           COALESCE(rp.full_name_enc, u.full_name_enc) AS rendering_enc,
-          ${NOTE_TYPES_SQL} AS note_types, ${NOTE_SIGNERS_SQL} AS signers
+          ${NOTE_TYPES_SQL} AS note_types, ${NOTE_SIGNERS_SQL} AS signers,
+          (SELECT n3.content_enc FROM encounter_notes n3 WHERE n3.encounter_id = e.id
+             ORDER BY n3.id DESC LIMIT 1) AS latest_note_enc
         FROM encounters e
         LEFT JOIN appointments a ON a.id = e.appointment_id
         LEFT JOIN users rp ON rp.id = a.rendering_provider_id
@@ -290,6 +306,7 @@ export async function listPatientEncounters(providerId, patientUuid, { page = 1,
       date: r.dos,
       renderingProvider: r.rendering_enc ? decrypt(r.rendering_enc) : null,
       noteTypes: r.note_types || '',
+      encounterType: encTypeCodeFrom(r.latest_note_enc), // SNOMED code of the visit type (Service Type)
       signedOffProvider: r.signers || null,
     })),
     total: Number(cnt[0].total),
@@ -452,8 +469,8 @@ const NOTE_STATUS = "n.status"; // 'draft' | 'signed'
  */
 export async function listClinicalRecords(userId, { page = 1, pageSize = 25, q = '', status = '' } = {}) {
   const scope = await viewerScope(userId);
-  const lim = Math.max(1, Math.min(100, Number(pageSize) || 25));
-  const off = Math.max(0, (Number(page) - 1) * lim);
+  const lim = Math.max(1, Math.min(100, Math.floor(Number(pageSize)) || 25));
+  const off = Math.max(0, (Math.max(1, Math.floor(Number(page)) || 1) - 1) * lim);
   const params = {};
   let where;
   if (isFacilityWide(scope)) {

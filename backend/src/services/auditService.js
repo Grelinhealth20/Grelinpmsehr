@@ -95,7 +95,7 @@ export async function recordAudit({
 export async function verifyAuditChain({ limit = 1_000_000 } = {}) {
   // LIMIT is inlined as a clamped integer — MySQL prepared statements reject a LIMIT placeholder
   // (established safe pattern in this codebase; the value is never attacker-controlled).
-  const lim = Math.min(Math.max(1, Number(limit) || 1_000_000), 100_000_000);
+  const lim = Math.min(Math.max(1, Math.floor(Number(limit)) || 1_000_000), 100_000_000);
   const [rows] = await execute(
     `SELECT id, uuid, actor_user_id, actor_email_bidx, action, entity_type, entity_id, outcome, ip,
             user_agent, CAST(metadata AS CHAR) AS metadata_str,
@@ -183,8 +183,10 @@ export async function listAudit({
   limit = 100, offset = 0, action = null, role = null, actorUuid = null,
   facilityUuid = null, dateFrom = null, dateTo = null, q = null,
 } = {}) {
-  const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 2000);
-  const safeOffset = Math.max(Number(offset) || 0, 0);
+  // Floor to integers — LIMIT/OFFSET are inlined into SQL and reject floats (a malformed ?limit=10.5
+  // would otherwise become `LIMIT 10.5` → SQL parse error / 500). Same guard as patientDocumentService.
+  const safeLimit = Math.min(Math.max(Math.floor(Number(limit)) || 100, 1), 2000);
+  const safeOffset = Math.max(Math.floor(Number(offset)) || 0, 0);
   const where = [];
   const params = {};
   if (action) { where.push('al.action = :action'); params.action = action; }
