@@ -454,7 +454,11 @@ export async function signNote(noteUuid, providerId, { content, reason } = {}) {
   const [res] = await execute(`UPDATE encounter_notes SET ${sets.join(', ')} WHERE id = :id AND status = 'draft'`, params);
   if (res.affectedRows === 0) return { locked: true }; // already signed by a concurrent request
   const signed = await getNote(noteUuid, providerId);
-  await generateSignedDoc(r.id, signed, signerName);
+  // Document generation is BEST-EFFORT: the note is already committed as signed, so a transient failure
+  // here (e.g. a DB hiccup in the metadata/code fetch, or S3) must NOT 500 the sign request or skip the
+  // caller's sign audit. Log loudly; the doc can be regenerated (amend re-runs this, and it is idempotent).
+  try { await generateSignedDoc(r.id, signed, signerName); }
+  catch (e) { logger.error({ err: e.message, noteId: r.id }, 'signed-note document generation failed (note IS signed; will regenerate)'); }
   return signed;
 }
 
@@ -544,6 +548,9 @@ export async function amendSignedNote(noteUuid, providerId, { content, reason } 
   const [res] = await execute(`UPDATE encounter_notes SET ${sets.join(', ')} WHERE id = :id AND status = 'signed'`, params);
   if (res.affectedRows === 0) return null;
   const amended = await getNote(noteUuid, providerId);
-  await generateSignedDoc(r.id, amended, signerName);
+  // Best-effort (see signNote): the amendment is already committed; a doc-gen failure must not 500 the
+  // request or skip the amend audit.
+  try { await generateSignedDoc(r.id, amended, signerName); }
+  catch (e) { logger.error({ err: e.message, noteId: r.id }, 'amended-note document generation failed (amend IS saved; will regenerate)'); }
   return amended;
 }

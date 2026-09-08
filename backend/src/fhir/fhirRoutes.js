@@ -248,7 +248,11 @@ async function bulkExport(req, res, next) {
     const sp = scopedPatient(req, res); if (sp.blocked) return;
     const opts = { patientUuid: sp.patientUuid };
     const want = new Set(String(req.query._type || '').split(',').map((s) => s.trim()).filter(Boolean));
-    const include = (t) => want.size === 0 || want.has(t);
+    // Per-resource SMART-scope enforcement: the path-based scope middleware does NOT cover $export (its
+    // path segment isn't a resource type), so a token must still only export the resource types its scope
+    // grants. Cookie sessions (no smartToken) keep full app authority. This turns $export from a scope
+    // bypass into a scope-honoring export.
+    const include = (t) => (want.size === 0 || want.has(t)) && (!req.smartToken || scopeAllowsRead(req.smartScope, t));
     const lines = [];
     if (include('Patient')) {
       const pts = await fhirPatients(req.authUserId);

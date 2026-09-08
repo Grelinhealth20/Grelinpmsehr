@@ -8,7 +8,7 @@ import { referralPdf } from './pdfExport.js';
 import { s3Enabled, uploadReferralObject, ensureReferralFolder, getObjectBytes, deleteObject } from './s3Service.js';
 import { getPatientS3Ctx } from './patientService.js';
 import { resolveFacilityFax, facilityByIncomingFaxNumber } from './facilityFaxService.js';
-import { providerPrimaryFacilityId } from './facilityService.js';
+import { providerPrimaryFacilityId, providerFacilityIds } from './facilityService.js';
 
 /**
  * READ scope for referrals — identical to the rest of the EHR (patients / encounters): a non-MD provider
@@ -16,10 +16,23 @@ import { providerPrimaryFacilityId } from './facilityService.js';
  * by service line (via the owning provider's specialties). Referrals carry both `facility_id` and
  * `provider_id`, so patientScopeWhere applies verbatim on the `r` alias — guaranteeing FACILITY-SPECIFIC
  * access with NO cross-facility / cross-provider leakage. WRITES stay strictly owner-scoped (provider_id).
+ *
+ * INBOUND-FAX TRIAGE: an incoming fax is routed by DID to a facility and OWNED by the intake account, so
+ * the owner/service-line scope above would hide it from everyone but SNF MDs. To let the receiving
+ * facility actually work its inbox, ANY provider ASSIGNED to that facility may READ its incoming referrals
+ * — strictly bounded to their own assigned facilities (provider_facilities), so there is still no
+ * cross-facility leakage. This applies to `direction='incoming'` only; outgoing/own referrals are
+ * unchanged, and WRITES remain owner-scoped.
  */
 async function readScope(providerId, alias = 'r') {
   const scope = await viewerScope(providerId);
-  return patientScopeWhere(scope, providerId, alias); // { sql, params }
+  const base = patientScopeWhere(scope, providerId, alias); // { sql, params }
+  const facIds = await providerFacilityIds(providerId);     // facilities this provider is assigned to
+  if (facIds.length) {
+    const ph = facIds.map((id, i) => { base.params[`rif${i}`] = id; return `:rif${i}`; }).join(',');
+    base.sql = `((${base.sql}) OR (${alias}.direction = 'incoming' AND ${alias}.facility_id IN (${ph})))`;
+  }
+  return base;
 }
 
 /**
@@ -227,9 +240,25 @@ export async function createReferral(providerId, body = {}) {
   return getReferral(providerId, uuid);
 }
 
+/** Resolve a referral this provider may WRITE: one they OWN, OR an INCOMING referral at a facility they
+ *  are assigned to (inbound-fax triage). Returns the row id, or null (no cross-facility write access). */
+async function writableReferralId(providerId, uuid) {
+  const [rows] = await execute('SELECT id, direction, facility_id, provider_id FROM referrals WHERE uuid = :u LIMIT 1', { u: uuid });
+  const r = rows[0];
+  if (!r) return null;
+  if (Number(r.provider_id) === Number(providerId)) return r.id; // owner
+  if (r.direction === 'incoming' && r.facility_id != null) {
+    const facIds = (await providerFacilityIds(providerId)).map(Number);
+    if (facIds.includes(Number(r.facility_id))) return r.id; // assigned-facility triage of an inbound fax
+  }
+  return null;
+}
+
 export async function updateReferral(providerId, uuid, body = {}) {
-  const [ex] = await execute('SELECT id FROM referrals WHERE uuid = :u AND provider_id = :pid LIMIT 1', { u: uuid, pid: providerId });
-  if (!ex[0]) return null;
+  // Owner OR (assigned-facility provider triaging an incoming fax). Bounded — never cross-facility.
+  const writableId = await writableReferralId(providerId, uuid);
+  if (!writableId) return null;
+  const ex = [{ id: writableId }];
   const sets = []; const params = { id: ex[0].id };
   const set = (col, key, val) => { sets.push(`${col} = :${key}`); params[key] = val; };
   if (body.specialty !== undefined) { if (!clip(body.specialty, 100)) { const e = new Error('Specialty required.'); e.status = 400; e.code = 'REFERRAL_INVALID'; throw e; } set('specialty', 'spec', clip(body.specialty, 100)); }

@@ -83,10 +83,15 @@ export async function beginSetup(row) {
  * generate ONE-TIME recovery codes (returned once, stored hashed), and seed the replay step.
  */
 export async function confirmEnrollment(row, code) {
+  // Per-account lockout, consistent with verifyCode/verifyRecovery — so enrollment-confirm can't be used
+  // as an unthrottled TOTP-guessing oracle (it is already behind auth + IP rate-limiting; this adds the
+  // per-account brute-force ceiling the other verify paths have).
+  const lock = lockState(row);
+  if (lock.locked) return { error: 'locked', minutesLeft: lock.minutesLeft };
   if (!row.mfa_secret_enc) return { error: 'no_pending_secret' };
   const secret = decrypt(row.mfa_secret_enc);
   const res = verifyTotp(secret, code);
-  if (!res.valid) return { error: 'invalid_code' };
+  if (!res.valid) { const locked = await bumpFailure(row); return { error: 'invalid_code', locked }; }
   const codes = Array.from({ length: RECOVERY_COUNT }, newRecoveryCode);
   const hashed = await Promise.all(codes.map(async (c) => ({ hash: await hashPassword(c.replace('-', '')), used: false })));
   await execute(

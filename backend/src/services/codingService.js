@@ -21,9 +21,11 @@ const norm = (c) => String(c || '').trim().toUpperCase();
 
 /** PDPM clinical category for an ICD-10 primary/active diagnosis (per fiscal year). */
 export async function lookupPdpm(icd, fy = CURRENT_FY) {
+  const variants = icdVariants(icd);
+  if (!variants.length) return null; // blank/invalid code → no lookup (avoid empty SQL IN())
   const [rows] = await pool.query(
     'SELECT code, description, default_clinical_category, major_procedure_category, clinical_category_pt_ot, clinical_category_slp FROM pdpm_icd_codes WHERE fiscal_year = ? AND code IN (?) LIMIT 1',
-    [fy, icdVariants(icd)]);
+    [fy, variants]);
   const r = rows[0];
   if (!r) return null;
   return {
@@ -40,9 +42,11 @@ export async function lookupPdpm(icd, fy = CURRENT_FY) {
 
 /** CMS-HCC categories a diagnosis maps to (risk-adjustment identification). */
 export async function lookupHcc(icd, model = null) {
+  const variants = icdVariants(icd);
+  if (!variants.length) return []; // blank/invalid code → no lookup (avoid empty SQL IN())
   const [rows] = await pool.query(
     `SELECT icd_code, model, hcc_category FROM icd_hcc_map WHERE icd_code IN (?) ${model ? 'AND model = ?' : ''}`,
-    model ? [icdVariants(icd), model] : [icdVariants(icd)]);
+    model ? [variants, model] : [variants]);
   return rows.map((r) => ({ icd: r.icd_code, model: r.model, hcc: r.hcc_category }));
 }
 
@@ -266,8 +270,10 @@ async function ageSexFindings(dxList, patient) {
   const findings = [];
   if (!patient || (patient.age == null && !patient.sex)) return findings;
   for (const dx of dxList) {
+    const variants = icdVariants(dx);
+    if (!variants.length) continue; // blank/whitespace dx → no code variants → skip (avoid empty SQL IN())
     const [rows] = await pool.query(
-      'SELECT code, allowed_sex, min_age, max_age FROM icd_age_sex_edits WHERE code IN (?) LIMIT 1', [icdVariants(dx)]);
+      'SELECT code, allowed_sex, min_age, max_age FROM icd_age_sex_edits WHERE code IN (?) LIMIT 1', [variants]);
     const r = rows[0]; if (!r) continue;
     if (r.allowed_sex && patient.sex && norm(patient.sex)[0] !== norm(r.allowed_sex)[0]) {
       findings.push({ type: 'ICD_SEX_EDIT', severity: 'error', code: r.code, allowedSex: r.allowed_sex,
@@ -309,8 +315,10 @@ async function icdBillableFindings(dxList) {
 async function specificityFindings(dxList) {
   const findings = [];
   for (const dx of dxList) {
+    const variants = icdVariants(dx);
+    if (!variants.length) continue; // blank/whitespace dx → skip (avoid empty SQL IN())
     const [rows] = await pool.query(
-      'SELECT unspec_code, description, specific_examples FROM icd_specificity_map WHERE unspec_code IN (?) LIMIT 1', [icdVariants(dx)]);
+      'SELECT unspec_code, description, specific_examples FROM icd_specificity_map WHERE unspec_code IN (?) LIMIT 1', [variants]);
     const r = rows[0]; if (!r) continue;
     findings.push({ type: 'ICD_UNSPECIFIED', severity: 'info', code: r.unspec_code, description: r.description,
       moreSpecific: r.specific_examples, message: `${r.unspec_code} is unspecified; a more specific code may be available${r.specific_examples ? ` (e.g. ${r.specific_examples})` : ''}.`,
@@ -479,7 +487,8 @@ async function pdpmPrimaryFinding(primaryDx, fy) {
 export async function scrubClaim(claim = {}) {
   const lines = Array.isArray(claim.lines) ? claim.lines.filter((l) => l && l.cpt) : [];
   const codes = [...new Set(lines.map((l) => norm(l.cpt)).filter(Boolean))];
-  const diagnoses = Array.isArray(claim.diagnoses) ? claim.diagnoses.filter(Boolean) : [];
+  // Drop blank / whitespace-only diagnoses so a stray "" or " " can never produce an empty SQL IN().
+  const diagnoses = Array.isArray(claim.diagnoses) ? claim.diagnoses.filter((d) => norm(d)) : [];
   const fy = Number(claim.fiscalYear) || CURRENT_FY;
 
   const jurisdiction = claim.jurisdiction || 'FL'; // Medicare Part B, Central FL (First Coast)

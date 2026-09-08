@@ -60,7 +60,8 @@ router.get('/notes/:noteUuid/pdf', ctrl.downloadNote);
 router.get('/notes/:noteUuid/codes', ctrl.getNoteCodes);
 // Deterministic auto-coding suggestions from the note content (diagnoses + visit charge).
 router.get('/notes/:noteUuid/predict', ctrl.predictNoteCodes);
-router.put('/notes/:noteUuid/codes', csrfProtection, ctrl.saveNoteCodes);
+// Saving billable codes IS a note edit → require the editNotes grant (consistent with PATCH/sign/amend).
+router.put('/notes/:noteUuid/codes', csrfProtection, requireEditNotes, ctrl.saveNoteCodes);
 router.post('/notes/:noteUuid/scrub', csrfProtection, ctrl.scrubNote);
 router.patch('/notes/:noteUuid', csrfProtection, requireEditNotes, validate(updateNoteSchema), ctrl.updateNote);
 router.post('/notes/:noteUuid/sign', csrfProtection, requireEditNotes, validate(signNoteSchema), ctrl.signNote);

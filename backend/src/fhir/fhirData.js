@@ -42,9 +42,13 @@ async function ownedPatientIds(providerId) {
   return rows.map((r) => r.id);
 }
 
-/** Practitioners (provider directory — name/NPI, not PHI). Read by uuid or list active providers. */
+/** Practitioners (provider directory — name/NPI, not PHI). Read by uuid or list active providers.
+ *  A by-id read is restricted to the SAME set as the list — active PROVIDERS only — so the FHIR
+ *  Practitioner directory can never disclose billing / super-admin / disabled user accounts. */
 export async function fhirPractitioners({ uuid = null } = {}) {
-  const where = uuid ? 'WHERE u.uuid = :u' : "WHERE u.role = 'provider' AND u.status = 'active'";
+  const where = uuid
+    ? "WHERE u.uuid = :u AND u.role = 'provider' AND u.status = 'active'"
+    : "WHERE u.role = 'provider' AND u.status = 'active'";
   const [rows] = await execute(
     `SELECT u.uuid, u.full_name_enc, u.npi, u.taxonomy, u.taxonomy_code, u.credentials, u.role, u.status, u.updated_at
        FROM users u ${where} ORDER BY u.id LIMIT 500`,
