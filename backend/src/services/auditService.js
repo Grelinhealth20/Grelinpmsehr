@@ -179,31 +179,99 @@ export async function backfillAuditChain() {
  * and decrypted via join). Orphaned entries (actor since deleted) fall back to a
  * safe label so the trail is never misattributed.
  */
+// Plain-language activity CATEGORY derived from the action code (server-side, so pagination + counts are
+// authoritative). Mirrors the UI's tab grouping: eligibility, sign-ins, clinical notes, else records.
+const CATEGORY_SQL = `CASE
+    WHEN al.action LIKE '%eligibility%' THEN 'eligibility'
+    WHEN al.action LIKE 'auth.%' OR al.action = 'user.password.admin_reset' THEN 'signins'
+    WHEN al.action LIKE 'encounter%' THEN 'notes'
+    ELSE 'records' END`;
+
+const toEntry = (r) => ({
+  uuid: r.uuid,
+  action: r.action,
+  actorUuid: r.actor_uuid || null,
+  actorEmail: r.actor_email_enc ? decrypt(r.actor_email_enc) : (r.actor_user_id ? 'Deleted user' : 'System'),
+  actorName: r.actor_name_enc ? decrypt(r.actor_name_enc) : null,
+  actorRole: r.actor_role || (r.actor_user_id ? null : 'system'),
+  actorFacilities: r.actor_facilities || null,
+  entityType: r.entity_type,
+  entityId: r.entity_id,
+  outcome: r.outcome,
+  ip: r.ip,
+  metadata: r.metadata ? (typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata) : null,
+  createdAt: r.created_at,
+});
+
+/**
+ * Paginated audit query for the Super Admin activity log. Returns the page of entries PLUS the accurate
+ * total for the current filter (so the pager is exact at any scale) PLUS summary/tab aggregates computed
+ * over the SCOPE filters (dates / actor / facility / search) — independent of the tab & outcome filters,
+ * so the summary cards and tab badges stay stable while the user pages or switches tabs. Everything is
+ * real audit_logs data; nothing synthesized.
+ */
 export async function listAudit({
-  limit = 100, offset = 0, action = null, role = null, actorUuid = null,
-  facilityUuid = null, dateFrom = null, dateTo = null, q = null,
+  page = 1, pageSize = 25, category = null, role = null, outcome = null,
+  actorUuid = null, facilityUuid = null, dateFrom = null, dateTo = null, q = null,
 } = {}) {
-  // Floor to integers — LIMIT/OFFSET are inlined into SQL and reject floats (a malformed ?limit=10.5
-  // would otherwise become `LIMIT 10.5` → SQL parse error / 500). Same guard as patientDocumentService.
-  const safeLimit = Math.min(Math.max(Math.floor(Number(limit)) || 100, 1), 2000);
-  const safeOffset = Math.max(Math.floor(Number(offset)) || 0, 0);
-  const where = [];
-  const params = {};
-  if (action) { where.push('al.action = :action'); params.action = action; }
-  if (role) { where.push('u.role = :role'); params.role = role; }
-  if (actorUuid) { where.push('u.uuid = :actorUuid'); params.actorUuid = actorUuid; }
+  const lim = Math.min(Math.max(Math.floor(Number(pageSize)) || 25, 1), 200);
+  const pg = Math.max(Math.floor(Number(page)) || 1, 1);
+  const off = (pg - 1) * lim;
+
+  // SCOPE filters — shared by the summary aggregates AND the page query.
+  const base = []; const params = {};
+  if (actorUuid) { base.push('u.uuid = :actorUuid'); params.actorUuid = actorUuid; }
   if (facilityUuid) {
-    where.push(`EXISTS (SELECT 1 FROM provider_facilities pf JOIN facilities f ON f.id = pf.facility_id
+    base.push(`EXISTS (SELECT 1 FROM provider_facilities pf JOIN facilities f ON f.id = pf.facility_id
                  WHERE pf.provider_id = al.actor_user_id AND f.uuid = :facilityUuid)`);
     params.facilityUuid = facilityUuid;
   }
-  if (dateFrom) { where.push('al.created_at >= :dateFrom'); params.dateFrom = dateFrom; }
-  if (dateTo) { where.push('al.created_at <= :dateTo'); params.dateTo = dateTo; }
-  if (q) { where.push('(al.action LIKE :q OR al.entity_type LIKE :q OR al.entity_id LIKE :q)'); params.q = `%${q}%`; }
-  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  if (dateFrom) { base.push('al.created_at >= :dateFrom'); params.dateFrom = dateFrom; }
+  if (dateTo) { base.push('al.created_at <= :dateTo'); params.dateTo = dateTo; }
+  if (q) { base.push('(al.action LIKE :q OR al.entity_type LIKE :q OR al.entity_id LIKE :q)'); params.q = `%${q}%`; }
+  const baseSql = base.length ? `WHERE ${base.join(' AND ')}` : '';
 
-  // Each entry is resolved to the actor's current identity + role + assigned
-  // facilities, so the trail can be grouped by account / role / facility.
+  // Summary + tab counts over the scope (one round-trip, conditional aggregation).
+  const [[s]] = [await execute(
+    `SELECT COUNT(*) AS total,
+            SUM(al.outcome IN ('failure','error')) AS unsuccessful,
+            SUM(al.outcome = 'skipped') AS no_change,
+            COUNT(DISTINCT al.actor_user_id) AS people,
+            SUM((${CATEGORY_SQL}) = 'notes') AS c_notes,
+            SUM((${CATEGORY_SQL}) = 'signins') AS c_signins,
+            SUM((${CATEGORY_SQL}) = 'eligibility') AS c_eligibility,
+            SUM((${CATEGORY_SQL}) = 'records') AS c_records,
+            SUM(u.role = 'provider') AS c_providers,
+            SUM(u.role = 'billing') AS c_billing
+       FROM audit_logs al LEFT JOIN users u ON u.id = al.actor_user_id ${baseSql}`, params,
+  )].map((x) => x[0]);
+  const total0 = Number(s.total) || 0;
+  const unsuccessful = Number(s.unsuccessful) || 0;
+  const noChange = Number(s.no_change) || 0;
+  const summary = { total: total0, successful: Math.max(0, total0 - unsuccessful - noChange), unsuccessful, noChange, people: Number(s.people) || 0 };
+  const tabCounts = {
+    all: total0, notes: Number(s.c_notes) || 0, signins: Number(s.c_signins) || 0,
+    eligibility: Number(s.c_eligibility) || 0, records: Number(s.c_records) || 0,
+    providers: Number(s.c_providers) || 0, billing: Number(s.c_billing) || 0,
+  };
+
+  // Page query — scope + tab (category or role) + outcome, paginated. COUNT(*) OVER() gives the exact
+  // total for THIS filtered view so the pager is precise.
+  const listWhere = [...base];
+  if (category && category !== 'all') { listWhere.push(`(${CATEGORY_SQL}) = :category`); params.category = category; }
+  if (role) { listWhere.push('u.role = :role'); params.role = role; }
+  if (outcome === 'failure') listWhere.push(`al.outcome IN ('failure','error')`);
+  else if (outcome === 'skipped') listWhere.push(`al.outcome = 'skipped'`);
+  else if (outcome === 'success') listWhere.push(`(al.outcome IS NULL OR al.outcome NOT IN ('failure','error','skipped'))`);
+  const listSql = listWhere.length ? `WHERE ${listWhere.join(' AND ')}` : '';
+
+  // Exact total for THIS filtered view — a dedicated COUNT so it stays correct even when the requested
+  // page is past the end (COUNT(*) OVER() would return nothing there and misreport 0).
+  const [[cnt]] = [await execute(
+    `SELECT COUNT(*) AS total FROM audit_logs al LEFT JOIN users u ON u.id = al.actor_user_id ${listSql}`, params,
+  )].map((x) => x[0]);
+  const total = Number(cnt.total) || 0;
+
   const [rows] = await execute(
     `SELECT al.uuid, al.actor_user_id, al.action, al.entity_type, al.entity_id, al.outcome,
             al.ip, al.user_agent, al.metadata, al.created_at,
@@ -213,23 +281,9 @@ export async function listAudit({
               WHERE pf.provider_id = al.actor_user_id) AS actor_facilities
        FROM audit_logs al
        LEFT JOIN users u ON u.id = al.actor_user_id
-       ${whereSql}
-      ORDER BY al.id DESC LIMIT ${safeLimit} OFFSET ${safeOffset}`,
+       ${listSql}
+      ORDER BY al.id DESC LIMIT ${lim} OFFSET ${off}`,
     params,
   );
-  return rows.map((r) => ({
-    uuid: r.uuid,
-    action: r.action,
-    actorUuid: r.actor_uuid || null,
-    actorEmail: r.actor_email_enc ? decrypt(r.actor_email_enc) : (r.actor_user_id ? 'Deleted user' : 'System'),
-    actorName: r.actor_name_enc ? decrypt(r.actor_name_enc) : null,
-    actorRole: r.actor_role || (r.actor_user_id ? null : 'system'),
-    actorFacilities: r.actor_facilities || null,
-    entityType: r.entity_type,
-    entityId: r.entity_id,
-    outcome: r.outcome,
-    ip: r.ip,
-    metadata: r.metadata ? (typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata) : null,
-    createdAt: r.created_at,
-  }));
+  return { entries: rows.map(toEntry), total, page: pg, pageSize: lim, summary, tabCounts };
 }

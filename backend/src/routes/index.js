@@ -13,6 +13,8 @@ import settingsRoutes from './settingsRoutes.js';
 import terminologyRoutes from './terminologyRoutes.js';
 import codingRoutes from './codingRoutes.js';
 import aiLogsRoutes from './aiLogsRoutes.js';
+import referralRoutes from './referralRoutes.js';
+import faxRoutes from './faxRoutes.js';
 import fhirRoutes from '../fhir/fhirRoutes.js';
 
 const router = Router();
@@ -33,6 +35,8 @@ router.use('/settings', settingsRoutes);
 router.use('/terminology', terminologyRoutes);
 router.use('/coding', codingRoutes);
 router.use('/ai-logs', aiLogsRoutes);
+router.use('/referrals', referralRoutes);
+router.use('/fax', faxRoutes);
 // FHIR R4 / US Core API (ONC (g)(10) foundation). /metadata is public; resources are provider-scoped.
 router.use('/fhir/R4', fhirRoutes);
 

@@ -46,14 +46,19 @@ export default function FacilityModal({ facility = null, onClose, onSaved }) {
   const [providers, setProviders] = useState(facility?.providers || []);
   const [allProviders, setAllProviders] = useState([]);
   const [pickProvider, setPickProvider] = useState('');
+  const [provSearch, setProvSearch] = useState('');
   const debounce = useRef(null);
 
-  // Providers AND billing users can be assigned to a facility.
+  // Providers AND billing users can be assigned. SERVER-searched (paginated) so this scales to thousands
+  // of providers — type to narrow; we fetch a bounded page of active provider/billing matches.
   useEffect(() => {
-    usersApi.list().then(({ data }) => setAllProviders(
-      (data.users || []).filter((u) => ['provider', 'billing'].includes(u.role) && u.status === 'active'),
-    )).catch((e) => toast.error(toApiError(e).message));
-  }, []);
+    const t = setTimeout(() => {
+      usersApi.list({ roles: 'provider,billing', status: 'active', q: provSearch.trim(), page: 1, pageSize: 50 })
+        .then(({ data }) => setAllProviders(data.users || []))
+        .catch((e) => toast.error(toApiError(e).message));
+    }, provSearch ? 250 : 0);
+    return () => clearTimeout(t);
+  }, [provSearch, toast]);
 
   // Managing an existing facility: load its full record (assigned members).
   useEffect(() => {
@@ -244,9 +249,13 @@ export default function FacilityModal({ facility = null, onClose, onSaved }) {
                 ? "An assigned member's facility becomes their patients' billing facility. Isolation is enforced per facility."
                 : 'Save the facility first — then assign providers and billing users to it here.'}</span>
             </div>
+            {uuid && (
+              <input className="input" style={{ marginBottom: 8 }} placeholder="Search providers by name to assign…"
+                value={provSearch} onChange={(e) => setProvSearch(e.target.value)} autoComplete="off" spellCheck={false} />
+            )}
             <div className="fac-assign-row">
               <select className="select" value={pickProvider} onChange={(e) => setPickProvider(e.target.value)} disabled={!uuid}>
-                <option value="">{uuid ? 'Select a provider or billing user to assign…' : 'Save the facility to enable assignment…'}</option>
+                <option value="">{uuid ? (available.length ? 'Select a provider or billing user to assign…' : 'No matches — refine the search…') : 'Save the facility to enable assignment…'}</option>
                 {available.map((p) => (
                   <option key={p.uuid} value={p.uuid}>{p.fullName} · {p.role === 'billing' ? 'Billing' : 'Provider'}{p.credentials?.length ? ` (${p.credentials.join(', ')})` : ''}</option>
                 ))}

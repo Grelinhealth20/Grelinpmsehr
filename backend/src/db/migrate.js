@@ -2,6 +2,8 @@ import { pool, assertDbConnection } from './pool.js';
 import { SCHEMA_STATEMENTS } from './schema.js';
 import { seedNoteTemplates } from '../services/noteTemplateService.js';
 import { backfillAuditChain } from '../services/auditService.js';
+import { userNameTokens } from '../services/userService.js';
+import { decrypt } from '../utils/crypto.js';
 import { logger } from '../config/logger.js';
 
 const GENESIS_HASH = '0'.repeat(64);
@@ -108,9 +110,11 @@ export async function runMigrations() {
   // note-template seed inserts tcm rows) and reclassify the existing 'TCM' specialty, which
   // was previously mapped to 'snf'. Idempotent — MODIFY re-applies the same definition.
   try {
-    await pool.query("ALTER TABLE specialties MODIFY service_line ENUM('snf','pain','tcm') NOT NULL DEFAULT 'snf'");
-    await pool.query("ALTER TABLE note_templates MODIFY service_line ENUM('snf','pain','tcm') NOT NULL");
+    await pool.query("ALTER TABLE specialties MODIFY service_line ENUM('snf','pain','tcm','pi') NOT NULL DEFAULT 'snf'");
+    await pool.query("ALTER TABLE note_templates MODIFY service_line ENUM('snf','pain','tcm','pi') NOT NULL");
     await pool.query("UPDATE specialties SET service_line = 'tcm' WHERE (LOWER(name) = 'tcm' OR LOWER(name) LIKE '%transitional care%') AND service_line <> 'tcm'");
+    // Classify Personal Injury (PIP/BI) specialties onto the 'pi' service line (idempotent).
+    await pool.query("UPDATE specialties SET service_line = 'pi' WHERE (LOWER(name) LIKE '%personal injury%' OR LOWER(name) LIKE '%pip%' OR LOWER(name) LIKE '%bodily injury%' OR name REGEXP '(^|[^a-z])(pi|bi)([^a-z]|$)') AND service_line <> 'pi'");
   } catch (err) {
     logger.warn({ err: err.message }, 'TCM service-line migration skipped');
   }
@@ -138,6 +142,23 @@ export async function runMigrations() {
   // Per-facility feature switches (Super Admin controlled). Default ON so existing facilities keep working.
   await ensureColumn('facilities', 'coding_enabled', '`coding_enabled` TINYINT(1) NOT NULL DEFAULT 1 AFTER `status`');
   await ensureColumn('facilities', 'eligibility_enabled', '`eligibility_enabled` TINYINT(1) NOT NULL DEFAULT 1 AFTER `coding_enabled`');
+  // Per-facility REFERRAL FEATURE switch (Super Admin). Default ON so existing facilities keep Referrals.
+  // Distinct from fax_referrals_enabled (which gates only faxing) — this gates the whole Referrals feature
+  // for that facility's providers.
+  await ensureColumn('facilities', 'referrals_enabled', '`referrals_enabled` TINYINT(1) NOT NULL DEFAULT 1 AFTER `eligibility_enabled`');
+  // Per-facility referral FAX numbers (Super Admin controlled). Each facility can carry its OWN
+  // dedicated Fax.Plus DIDs — one number that RECEIVES inbound referrals and one that outbound
+  // referrals are sent FROM — distinct from the general NPPES `fax`. Inbound faxes are routed to a
+  // facility by the DID they arrive on (fax_incoming_number → must be unique per facility), and
+  // outbound referral faxes are sent FROM that facility's fax_outgoing_number (falling back to the
+  // global Fax.Plus number when unset). fax_referrals_enabled defaults ON so existing facilities keep
+  // working; a Super Admin can turn a facility's referral faxing off.
+  await ensureColumn('facilities', 'fax_incoming_number', "`fax_incoming_number` VARCHAR(24) NULL AFTER `fax`");
+  await ensureColumn('facilities', 'fax_outgoing_number', "`fax_outgoing_number` VARCHAR(24) NULL AFTER `fax_incoming_number`");
+  await ensureColumn('facilities', 'fax_referrals_enabled', "`fax_referrals_enabled` TINYINT(1) NOT NULL DEFAULT 1 AFTER `fax_outgoing_number`");
+  await ensureColumn('facilities', 'fax_updated_by', "`fax_updated_by` BIGINT UNSIGNED NULL AFTER `fax_referrals_enabled`");
+  await ensureColumn('facilities', 'fax_updated_at', "`fax_updated_at` DATETIME NULL AFTER `fax_updated_by`");
+  await ensureIndex('facilities', 'idx_fac_fax_in', '`fax_incoming_number`');
   // Full NPPES (NPI-2) identity for a group/organization — captured so nothing is dropped:
   // taxonomy code, fax, authorized official, enumeration date, mailing address, registry status.
   await ensureColumn('facilities', 'taxonomy_code', '`taxonomy_code` VARCHAR(16) NULL AFTER `taxonomy`');
@@ -295,6 +316,45 @@ export async function runMigrations() {
   } catch (err) { logger.warn({ err: err.message }, 'patient_documents service_date add skipped'); }
   await ensureIndex('patient_documents', 'idx_pdoc_patient_dos', 'patient_id, service_date, id');
 
+  // Referrals — fax (Fax.Plus) tracking columns. The referrals table is created by SCHEMA_STATEMENTS;
+  // these add the fax-integration fields to any already-existing table (idempotent).
+  try {
+    await ensureColumn('referrals', 'counterparty_fax', "`counterparty_fax` VARCHAR(32) NULL AFTER `counterparty_org`");
+    await ensureColumn('referrals', 'counterparty_npi', "`counterparty_npi` VARCHAR(10) NULL AFTER `counterparty_fax`");
+    await ensureColumn('referrals', 'fax_id', "`fax_id` VARCHAR(64) NULL AFTER `scheduled_date`");
+    await ensureColumn('referrals', 'fax_status', "`fax_status` VARCHAR(40) NULL AFTER `fax_id`");
+    await ensureColumn('referrals', 'fax_file_id', "`fax_file_id` VARCHAR(128) NULL AFTER `fax_status`");
+    await ensureColumn('referrals', 'fax_s3_key', "`fax_s3_key` VARCHAR(512) NULL AFTER `fax_file_id`");
+    await ensureColumn('referrals', 'fax_pages', "`fax_pages` INT NULL AFTER `fax_s3_key`");
+    await ensureColumn('referrals', 'fax_error', "`fax_error` VARCHAR(255) NULL AFTER `fax_pages`");
+    await ensureColumn('referrals', 'faxed_at', "`faxed_at` DATETIME NULL AFTER `fax_error`");
+    await ensureColumn('referrals', 'fax_events', "`fax_events` JSON NULL AFTER `faxed_at`"); // fax status timeline
+    // Fax.Plus AI triage result for an INCOMING fax — computed ONCE at ingest and cached here so it is
+    // never recomputed (efficient, no AI-credit overusage). Assists the intake provider (auto-extracted
+    // patient/specialty/summary) without a manual button.
+    await ensureColumn('referrals', 'fax_ai', "`fax_ai` JSON NULL AFTER `fax_events`");
+    await ensureColumn('referrals', 'fax_ai_at', "`fax_ai_at` DATETIME NULL AFTER `fax_ai`");
+    await ensureIndex('referrals', 'idx_ref_fax', 'fax_id');
+    // Idempotency HARD-GUARANTEE for inbound ingestion: dedupe any duplicate fax_id rows a pre-index
+    // concurrent ingest (webhook + poll racing) may have created — keep the earliest — then enforce a
+    // UNIQUE index so a duplicate can never be committed again (multiple NULLs are allowed by MySQL, so
+    // drafts / unsent referrals are unaffected).
+    try {
+      const [dd] = await pool.query(
+        `DELETE r FROM referrals r
+           JOIN (SELECT fax_id, MIN(id) AS keep_id FROM referrals WHERE fax_id IS NOT NULL GROUP BY fax_id HAVING COUNT(*) > 1) d
+             ON r.fax_id = d.fax_id AND r.id <> d.keep_id`);
+      if (dd?.affectedRows) logger.warn({ removed: dd.affectedRows }, 'removed duplicate inbound-fax referral rows before unique index');
+    } catch (e) { logger.warn({ err: e.message }, 'referral fax_id dedupe skipped'); }
+    await ensureUniqueIndex('referrals', 'uniq_ref_fax_id', '`fax_id`');
+    // Deep-page pagination at scale (100k+ referrals, 10/page): the list is owner-scoped and ordered by
+    // referral_date DESC, id DESC — this composite keeps that ORDER BY index-backed for the common path.
+    await ensureIndex('referrals', 'idx_ref_provider_date', 'provider_id, referral_date, id');
+    // Inbound faxes are ingested as incoming referrals with status 'received' — widen the status ENUM to
+    // include it (idempotent MODIFY). Without this the ingest INSERT truncates/fails under strict SQL mode.
+    await pool.query("ALTER TABLE referrals MODIFY status ENUM('draft','sent','accepted','scheduled','completed','declined','cancelled','received') NOT NULL DEFAULT 'draft'");
+  } catch (err) { logger.warn({ err: err.message }, 'referrals fax columns add skipped'); }
+
   // Audit hash-chain (ONC (d)(2)): ensure the single-row chain head exists, and establish the integrity
   // baseline exactly ONCE — only while the head is still genesis (never re-baseline afterwards, which
   // would mask tampering). After adoption, every append chains itself via recordAudit().
@@ -306,6 +366,29 @@ export async function runMigrations() {
       if (c.n > 0) { const bf = await backfillAuditChain(); logger.info({ rows: bf.updated }, 'Audit hash-chain baseline established'); }
     }
   } catch (err) { logger.warn({ err: err.message }, 'Audit hash-chain baseline skipped'); }
+
+  // One-time backfill of user name-search tokens (enables server-side paginated user search without
+  // decrypting names). Runs ONLY when the token table is empty but users exist. Batch-inserted so it stays
+  // fast even at thousands of users; best-effort per user (a name that can't be decrypted is skipped, logged).
+  try {
+    const [[tk]] = [await pool.query('SELECT COUNT(*) AS n FROM user_name_tokens')].map((x) => x[0]);
+    const [[uc]] = [await pool.query('SELECT COUNT(*) AS n FROM users')].map((x) => x[0]);
+    if (Number(tk.n) === 0 && Number(uc.n) > 0) {
+      const [users] = await pool.query('SELECT id, full_name_enc FROM users');
+      const rows = [];
+      let undecryptable = 0;
+      for (const u of users) {
+        let name = '';
+        try { name = u.full_name_enc ? decrypt(u.full_name_enc) : ''; } catch { undecryptable += 1; continue; }
+        for (const tok of userNameTokens(name)) rows.push([u.id, tok]);
+      }
+      for (let i = 0; i < rows.length; i += 2000) {
+        const chunk = rows.slice(i, i + 2000);
+        await pool.query(`INSERT IGNORE INTO user_name_tokens (user_id, token_bidx) VALUES ${chunk.map(() => '(?,?)').join(',')}`, chunk.flat());
+      }
+      logger.info({ users: users.length, tokens: rows.length, undecryptable }, 'Backfilled user name-search tokens');
+    }
+  } catch (err) { logger.warn({ err: err.message }, 'user name-token backfill skipped'); }
 
   logger.info(`Schema ensured (${SCHEMA_STATEMENTS.length} tables)`);
 }

@@ -143,6 +143,55 @@ export async function uploadPatientObject(ctx, key, buffer, contentType) {
   return fullKey;
 }
 
+/* ---- Referrals: a DEDICATED "Referrals/" root, mirroring facility → provider → patient ----------
+ * Referral fax documents (sent + received) live UNDER their own top-level namespace, separate from the
+ * clinical `facilities/` tree, but still organized facility → provider → patient so every document is
+ * scoped to exactly the right place — never a generic/flat location. An inbound fax whose patient is
+ * not yet identified lands in `Referrals/_incoming/` until a provider links it to a patient. */
+const REFERRAL_PREFIX = 'Referrals/';
+export function referralFacilityPrefix(ctx) {
+  const c = typeof ctx === 'string' ? { facilityUuid: ctx } : (ctx || {});
+  return `${REFERRAL_PREFIX}${nameSeg(c.facilityName, c.facilityUuid, 'unassigned')}/`;
+}
+export function referralProviderPrefix(ctx) {
+  const c = ctx || {};
+  return `${referralFacilityPrefix(c)}providers/${nameSeg(c.providerName, c.providerUuid, 'unknown')}/`;
+}
+export function referralPatientPrefix(ctx) {
+  const c = typeof ctx === 'string' ? { patientUuid: ctx } : (ctx || {});
+  return `${referralProviderPrefix(c)}patients/${nameSeg(c.patientName, c.patientUuid, 'unknown')}/`;
+}
+/** Create the Referrals → facility → provider → patient → {incoming,outgoing} marker chain. */
+export async function ensureReferralFolder(ctx) {
+  if (!client) return;
+  const base = referralPatientPrefix(ctx);
+  await Promise.all([
+    putMarker(`${REFERRAL_PREFIX}.keep`),
+    putMarker(`${referralFacilityPrefix(ctx)}.keep`),
+    putMarker(`${referralProviderPrefix(ctx)}.keep`),
+    putMarker(`${base}.keep`),
+    putMarker(`${base}outgoing/.keep`),
+    putMarker(`${base}incoming/.keep`),
+  ]);
+}
+/**
+ * Store a referral fax document under the Referrals tree. `direction` picks the incoming/outgoing
+ * subfolder. When the patient is known the path is facility/provider/patient specific; an unidentified
+ * inbound fax goes to `Referrals/_incoming/`. Server-side encrypted; the key is returned for the record.
+ */
+export async function uploadReferralObject(ctx, { direction = 'outgoing', fileName }, buffer, contentType) {
+  if (!client) throw new Error('S3 is not configured.');
+  const sub = direction === 'incoming' ? 'incoming' : 'outgoing';
+  const base = ctx && ctx.patientUuid ? `${referralPatientPrefix(ctx)}${sub}/`
+    : (ctx && ctx.facilityUuid ? `${referralFacilityPrefix(ctx)}${sub}/` : `${REFERRAL_PREFIX}_incoming/`);
+  const fullKey = `${base}${seg(fileName, 'referral')}`;
+  await client.send(new PutObjectCommand({
+    Bucket: config.s3.bucket, Key: fullKey, Body: buffer,
+    ContentType: contentType || 'application/pdf', ServerSideEncryption: 'AES256',
+  }));
+  return fullKey;
+}
+
 /** Upload a facility logo into that facility's named S3 folder → returns the object
  *  key. Accepts a uuid string OR a ctx { facilityUuid, facilityName }. */
 export async function uploadFacilityLogo(facilityCtx, buffer, contentType, ext) {

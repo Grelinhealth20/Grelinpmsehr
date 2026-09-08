@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { execute, withTransaction } from '../db/pool.js';
 import { encrypt, decrypt, blindIndex } from '../utils/crypto.js';
-import { providerFacilityIds } from './facilityService.js';
+import { providerFacilityIds, providerPrimaryFacilityId } from './facilityService.js';
 
 /**
  * Patient records for the EHR face sheet. ALL demographics and insurance data is
@@ -175,11 +175,13 @@ export async function createPatient({ providerId, demographics, insurance, facil
   const mrn = await generateMrn();
   const nameKey = `${demographics.lastName || ''} ${demographics.firstName || ''}`.trim().toLowerCase();
   const emg = emgValue(emergencyContacts, emergencyContact);
-  // Billing facility is derived automatically (background) from the rendering
-  // provider's assigned facility — never entered on the UI. This links the
-  // patient to a facility for billing and cross-facility isolation.
-  const facIds = await providerFacilityIds(providerId);
-  const facilityId = facIds.length ? facIds[0] : null;
+  // Billing facility is derived automatically (background) from the rendering provider's PRIMARY assigned
+  // facility (active, deterministic — same resolver referrals use) — never entered on the UI. This links
+  // the patient to a real facility for billing AND facility-scoped access, so a new patient is never
+  // stranded with a null facility (which would hide it from a facility-wide MD). Falls back to any assigned
+  // facility only if the provider somehow has assignments but none active.
+  let facilityId = await providerPrimaryFacilityId(providerId);
+  if (!facilityId) { const facIds = await providerFacilityIds(providerId); facilityId = facIds.length ? facIds[0] : null; }
   const [ins] = await execute(
     `INSERT INTO patients (uuid, provider_id, facility_id, mrn, name_bidx, demographics_enc, insurance_enc, facility_enc, emergency_enc, created_by)
      VALUES (:uuid, :pid, :facilityId, :mrn, :nameBidx, :demoEnc, :insEnc, :facEnc, :emgEnc, :createdBy)`,

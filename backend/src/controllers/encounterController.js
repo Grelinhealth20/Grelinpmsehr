@@ -8,10 +8,10 @@ import {
   listNotes as listNotesSvc, createNote as createNoteSvc, getNote as getNoteSvc,
   updateNote as updateNoteSvc, signNote as signNoteSvc, amendSignedNote as amendNoteSvc,
   getNoteCodes as getNoteCodesSvc, saveNoteCodes as saveNoteCodesSvc, scrubNoteCodes as scrubNoteCodesSvc,
-  predictCodes as predictCodesSvc,
+  predictCodes as predictCodesSvc, deleteNote as deleteNoteSvc,
 } from '../services/encounterNoteService.js';
 import {
-  listNoteTypeTemplates, providerCanUseNoteType,
+  listNoteTypeTemplates, providerCanUseNoteType, providerServiceLines,
 } from '../services/noteTemplateService.js';
 import {
   listCustomTemplates as listCustomTpl, createCustomTemplate as createCustomTpl,
@@ -31,11 +31,15 @@ import { notePdf } from '../services/pdfExport.js';
 /**
  * Backend-authoritative note-type templates (H&P / SOAP / Progress) — the SINGLE source
  * of truth for the note section structure. The editor fetches this to render; the same
- * section keys drive the signed document. Universal: every provider gets all three.
+ * section keys drive the signed document. The universal SNF set is returned to everyone;
+ * a specialty line's templates (PI / Pain / TCM) are returned ONLY to providers granted
+ * that line — the same isolation that governs read/write scope, so the picker can never
+ * offer a template the provider isn't permitted to use (no cross-service-line leakage).
  */
 export async function noteTemplates(req, res, next) {
   try {
-    res.json({ noteTypes: listNoteTypeTemplates(), aiTemplates: aiEnabled() });
+    const lines = await providerServiceLines(req.authUserId);
+    res.json({ noteTypes: listNoteTypeTemplates(lines), serviceLines: lines, aiTemplates: aiEnabled() });
   } catch (err) { next(err); }
 }
 
@@ -48,7 +52,11 @@ export async function generateCustomTemplate(req, res, next) {
   const started = Date.now();
   const preview = String(req.body?.prompt || '').slice(0, 200);
   try {
-    const draft = await generateTemplateDraft(req.body?.prompt);
+    // Draft in the provider's OWN service line so a Pain/PI/TCM provider gets a line-appropriate
+    // template (not a generic SNF one). The provider's granted line is authoritative — never a
+    // client-supplied value — so the draft context can't be spoofed. Multi-line → primary (first).
+    const lines = await providerServiceLines(req.authUserId);
+    const draft = await generateTemplateDraft(req.body?.prompt, lines[0] || 'snf');
     // Real-time AI usage log — actual OpenAI token spend, per request.
     await logAiUsage({ userId: req.authUserId, action: 'template.generate', model: draft.model, status: 'ok',
       usage: draft.usage, sections: draft.sections.length, latencyMs: Date.now() - started, promptPreview: preview });
@@ -350,4 +358,18 @@ export async function amendNote(req, res, next) {
     await recordAudit({ actorUserId: req.authUserId, action: 'encounter.note.amend', entityType: 'encounter_note', entityId: req.params.noteUuid, ...ctx(req), metadata: { reason } });
     res.json({ note: result });
   } catch (err) { next(err); }
+}
+
+/** Delete a DRAFT clinical note (Access Control "Delete Notes"; enforced by requireDeleteNotes on the
+ *  route). Signed/amended notes are refused — they can only be amended. The service audit-logs it. */
+export async function deleteNote(req, res, next) {
+  try {
+    const result = await deleteNoteSvc(req.params.noteUuid, req.authUserId);
+    if (result.notFound) return res.status(404).json({ error: 'Note not found.', code: 'NOT_FOUND' });
+    await recordAudit({ actorUserId: req.authUserId, action: 'encounter.note.delete', entityType: 'encounter_note', entityId: req.params.noteUuid, ...ctx(req), metadata: { noteType: result.noteType } });
+    res.json({ ok: true });
+  } catch (err) {
+    if (err.code === 'NOTE_SIGNED') return res.status(err.status || 409).json({ error: err.message, code: err.code });
+    next(err);
+  }
 }

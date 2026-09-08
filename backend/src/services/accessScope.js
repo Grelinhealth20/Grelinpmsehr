@@ -71,7 +71,7 @@ export async function providerServiceLines(userId) {
   // clinical records (deny-by-default), rather than silently defaulting to a service line.
   const distinct = [...new Set(lines)];
   slCache.set(key, { lines: distinct, exp: now + SL_TTL_MS });
-  if (slCache.size > 5000) slCache.delete(slCache.keys().next().value);
+  if (slCache.size > 50000) slCache.delete(slCache.keys().next().value); // headroom well beyond 5000 providers — no thrash at scale
   return distinct.slice();
 }
 
@@ -106,7 +106,7 @@ async function isMdCached(userId) {
   const [rows] = await execute(`SELECT credentials FROM users WHERE id = :id LIMIT 1`, { id: userId });
   const isMD = isMdCredentials(rows[0]?.credentials);
   credCache.set(key, { isMD, exp: now + CRED_TTL_MS });
-  if (credCache.size > 5000) credCache.delete(credCache.keys().next().value);
+  if (credCache.size > 50000) credCache.delete(credCache.keys().next().value); // headroom well beyond 5000 providers — no thrash at scale
   return isMD;
 }
 
@@ -132,14 +132,19 @@ export function isFacilityWide(scope) {
  * used together with facility-wide access. Pain note types are prefixed `pain_` and TCM types
  * `tcm_`; SNF types carry no prefix (the residual) — a clean, index-friendly prefix split.
  */
-const SERVICE_LINES = ['snf', 'pain', 'tcm'];
+const SERVICE_LINES = ['snf', 'pain', 'tcm', 'pi'];
 
-/** Per-line note-type predicate. Pain and TCM note types carry their line prefix (`pain_`,
- *  `tcm_`); SNF is the RESIDUAL (no prefix), so a SNF viewer sees notes that are neither. */
+/** Per-line note-type predicate. Pain/TCM/PI note types carry their line prefix followed by an
+ *  underscore (`pain_`, `tcm_`, `pi_`); SNF is the RESIDUAL (none of those), so a SNF viewer sees
+ *  exactly the notes the other lines don't. The `_` boundary is REQUIRED (and escaped, so it matches
+ *  a literal underscore, not any char) so a note type like `paint_survey` or `tcmanager` can NEVER
+ *  bleed across lines — the SQL read-scope then matches the JS classifier (lineForNoteType) exactly,
+ *  keeping the create-gate and the read-scope in perfect agreement. Prefix+index-friendly, leak-proof. */
 function lineNotePredicate(line, alias) {
-  if (line === 'pain') return `${alias}.note_type LIKE 'pain%'`;
-  if (line === 'tcm') return `${alias}.note_type LIKE 'tcm%'`;
-  return `(${alias}.note_type NOT LIKE 'pain%' AND ${alias}.note_type NOT LIKE 'tcm%')`; // snf residual
+  if (line === 'pain') return `${alias}.note_type LIKE 'pain\\_%'`;
+  if (line === 'tcm') return `${alias}.note_type LIKE 'tcm\\_%'`;
+  if (line === 'pi') return `${alias}.note_type LIKE 'pi\\_%'`;
+  return `(${alias}.note_type NOT LIKE 'pain\\_%' AND ${alias}.note_type NOT LIKE 'tcm\\_%' AND ${alias}.note_type NOT LIKE 'pi\\_%')`; // snf residual
 }
 
 export function noteServiceLineWhere(scope, alias = 'n') {

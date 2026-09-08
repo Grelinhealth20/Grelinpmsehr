@@ -137,6 +137,28 @@ export async function assertDbConnection() {
   }
 }
 
+/**
+ * Pre-warm the connection pool: open the warm-idle set of connections concurrently (TLS handshake +
+ * auth) and ping each, so the FIRST real requests after a (re)start don't each pay ~1–2s of connection
+ * setup against the remote DB. Best-effort and non-fatal — if warming fails, connections are simply
+ * established lazily on demand (same as before); the failure is LOGGED, never swallowed silently.
+ */
+export async function warmPool() {
+  const target = Math.max(1, Math.floor(config.db.connectionLimit / 2)); // matches maxIdle
+  const t0 = Date.now();
+  const conns = [];
+  try {
+    for (let i = 0; i < target; i += 1) conns.push(pool.getConnection());
+    const settled = await Promise.allSettled(conns);
+    const opened = settled.filter((s) => s.status === 'fulfilled');
+    await Promise.allSettled(opened.map((s) => s.value.ping()));
+    opened.forEach((s) => s.value.release());
+    logger.info({ warmed: opened.length, target, ms: Date.now() - t0 }, 'DB pool pre-warmed');
+  } catch (err) {
+    logger.warn({ err: err?.message }, 'DB pool pre-warm failed (connections will open lazily)');
+  }
+}
+
 /** Convenience helper: run a query and return rows. */
 export async function query(sql, params = {}) {
   const [rows] = await pool.execute(sql, params);

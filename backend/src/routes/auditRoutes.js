@@ -18,9 +18,9 @@ router.get('/verify', async (req, res, next) => {
 
 router.get('/', async (req, res, next) => {
   try {
-    const { limit, offset, action, role, actorUuid, facilityUuid, dateFrom, dateTo, q } = req.query;
-    const entries = await listAudit({ limit, offset, action, role, actorUuid, facilityUuid, dateFrom, dateTo, q });
-    res.json({ entries });
+    const { page, pageSize, category, role, outcome, actorUuid, facilityUuid, dateFrom, dateTo, q } = req.query;
+    const result = await listAudit({ page, pageSize, category, role, outcome, actorUuid, facilityUuid, dateFrom, dateTo, q });
+    res.json(result); // { entries, total, page, pageSize, summary, tabCounts }
   } catch (err) {
     next(err);
   }

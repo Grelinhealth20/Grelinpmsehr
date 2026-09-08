@@ -1,5 +1,6 @@
 import PDFDocument from 'pdfkit';
 import { SECTION_LABELS, NOTE_LABEL_OVERRIDES, noteTitle } from './noteDocumentService.js';
+import { sectionLabelsForNoteType } from './noteTemplateService.js';
 
 /**
  * Enterprise PDF generator for downloadable EHR documents — clinical notes (medical
@@ -221,7 +222,10 @@ export function buildNotePdf({ facility = {}, logoBuffer = null, patient = {}, n
   const customLabels = {};
   for (const s of (content.customSections || [])) if (s && s.key) customLabels[s.key] = s.label || s.key;
   const overrides = NOTE_LABEL_OVERRIDES[note.noteType] || {};
-  const labelFor = (k) => customLabels[k] || overrides[k] || SECTION_LABELS[k] || k;
+  // The note type's own TEMPLATE labels (PI/Pain/SNF/TCM) so a key like `piEmcDeterminer` shows its
+  // real heading, never the raw key. Chain: custom > override > template > dictionary > raw key.
+  const typeLabels = sectionLabelsForNoteType(note.noteType);
+  const labelFor = (k) => customLabels[k] || overrides[k] || typeLabels[k] || SECTION_LABELS[k] || k;
   const ticked = (k) => (Array.isArray(checks[k]) ? checks[k].filter((x) => x && S(x).trim()) : []);
   // Render in the note's own template order (provider perspective) when present; include EVERY key that
   // has text OR ticked checkboxes so nothing is dropped from the record.
@@ -370,6 +374,107 @@ export function buildBenefitsPdf({ facility = {}, logoBuffer = null, patient = {
         [0.18, 0.14, 0.16, 0.2, 0.32]);
     }
   }
+
+  footers(doc, facility.name);
+  doc.end();
+  return done;
+}
+
+/**
+ * Enterprise referral / consultation PDF — a clean, faxable Letter-size document on the patient's
+ * ASSIGNED-facility letterhead (logo + name + address, embedded by brandHeader). Structured sections:
+ * referring provider, consultant, patient, clinical detail, enclosed records, and the Part B
+ * attestation. All values come from the caller (already scoped + decrypted) — nothing is inferred.
+ */
+/**
+ * Fax cover sheet (page 1 of the outbound referral package) — a standard facsimile transmittal on the
+ * SENDING facility's letterhead: To (consultant + destination fax), From (referring provider + facility +
+ * sending fax/phone), Re/priority, an enclosure manifest (cover + letter + each enclosed record), and the
+ * HIPAA confidentiality notice CMS/OCR expect on faxed PHI. Everything is composed from real record data.
+ */
+function referralCoverSheet(doc, { facility = {}, referral = {}, provider = {}, attachments = [] }) {
+  const r = referral; const pt = r.patient || {};
+  const w = CW(doc); const x = ML(doc);
+  docTitle(doc, 'FACSIMILE TRANSMITTAL', 'Confidential — Protected Health Information');
+
+  const fromFax = facility.faxOutgoing || '';
+  kvGrid(doc, [
+    ['Date', usDate(new Date().toISOString())],
+    ['Priority', String(r.priority || 'routine').toUpperCase()],
+    ['To', [r.counterpartyName, r.counterpartyOrg].filter(Boolean).join(' — ') || '(To be assigned)'],
+    ['To — Fax', r.counterpartyFax || '—'],
+    ['To — NPI', r.counterpartyNpi || ''],
+    ['From', [provider.name, provider.credentials].filter(Boolean).join(', ') || facility.name],
+    ['From — Facility', facility.name],
+    ['From — Fax', fromFax || '—'],
+    ['From — Phone', facility.phone || ''],
+    ['Re', `${r.referralNo || 'Referral'}${r.specialty ? ` · ${r.specialty}` : ''} — Medicare Part B E/M consult (POS 31/32)`],
+    ['Pages', `Cover + referral letter${attachments && attachments.length ? ` + ${attachments.length} enclosed record${attachments.length > 1 ? 's' : ''}` : ''} (including this cover)`],
+  ], 2);
+
+  if (attachments && attachments.length) {
+    sectionBar(doc, `Enclosures (${attachments.length})`);
+    table(doc, ['#', 'Document', 'Type'],
+      attachments.map((a, i) => [String(i + 1), a.fileName || '—', a.category || a.docType || 'Enclosed record']), [0.1, 0.6, 0.3]);
+  }
+
+  sectionBar(doc, 'Confidentiality Notice');
+  paragraph(doc, '', 'This facsimile contains PROTECTED HEALTH INFORMATION (PHI) intended only for the individual or entity named above. It is privileged and confidential under HIPAA (45 CFR Parts 160 & 164) and applicable law. If you are not the intended recipient, any disclosure, copying, distribution, or action taken in reliance on the contents is strictly prohibited. If you received this fax in error, please notify the sender immediately by telephone and securely destroy all copies.');
+}
+
+export function buildReferralPdf({ facility = {}, logoBuffer = null, referral = {}, provider = {}, attachments = [] }) {
+  const r = referral; const pt = r.patient || {};
+  const { doc, done } = createDoc({ title: `Referral ${r.referralNo || ''}`, author: facility.name || 'Grelin Health' });
+  // PAGE 1 — fax cover sheet (letterhead + transmittal + enclosure manifest + HIPAA notice).
+  brandHeader(doc, facility, logoBuffer);
+  referralCoverSheet(doc, { facility, referral, provider, attachments });
+  // PAGE 2+ — the referral / consultation letter itself, on the same letterhead.
+  doc.addPage();
+  brandHeader(doc, facility, logoBuffer);
+  docTitle(doc, 'Referral / Consultation Request', `${r.referralNo || ''}${r.priority ? `  ·  ${String(r.priority).toUpperCase()} PRIORITY` : ''}`);
+
+  kvGrid(doc, [
+    ['Referral #', r.referralNo], ['Date of Referral', usDate(r.referralDate)],
+    ['Service Type', r.specialty], ['Priority', String(r.priority || 'routine').toUpperCase()],
+    ['Coverage', 'Medicare Part B E/M · POS 31/32'], ['Requested / Scheduled Appt', usDate(r.scheduledDate)],
+  ], 2);
+
+  sectionBar(doc, 'Referring Provider');
+  kvGrid(doc, [
+    ['Provider', provider.name], ['Credentials', provider.credentials], ['NPI', provider.npi],
+    ['Facility', facility.name], ['Facility NPI', facility.npi], ['Phone', facility.phone],
+    ['Address', [facility.address, [facility.city, facility.state].filter(Boolean).join(', '), facility.zip].filter(Boolean).join(' ')],
+  ], 2);
+
+  sectionBar(doc, 'Consultant (Refer To)');
+  kvGrid(doc, [
+    ['Consultant / Provider', r.counterpartyName], ['Clinic / Facility', r.counterpartyOrg],
+    ['Consultant NPI', r.counterpartyNpi], ['Destination Fax', r.counterpartyFax],
+  ], 2);
+
+  sectionBar(doc, 'Patient');
+  kvGrid(doc, [
+    ['Name', pt.name], ['MRN', pt.mrn], ['Date of Birth', usDate(pt.dob)], ['Sex', pt.sex],
+    ['SNF Facility', pt.facilityName],
+  ], 2);
+
+  sectionBar(doc, 'Clinical');
+  paragraph(doc, 'Reason for Referral', r.reason || '—');
+  paragraph(doc, 'Working Diagnosis', r.diagnosis || '—');
+  if (r.notes) paragraph(doc, 'Clinical Notes', r.notes);
+
+  if (attachments && attachments.length) {
+    sectionBar(doc, `Enclosed Records (${attachments.length})`);
+    table(doc, ['Document', 'Type', 'Date of Service'],
+      attachments.map((a) => [a.fileName || '—', a.category || a.docType || '—', a.dos || '—']), [0.5, 0.28, 0.22]);
+  }
+
+  sectionBar(doc, 'Attestation');
+  paragraph(doc, '', 'This is a Medicare Part B evaluation & management referral for a skilled nursing facility resident (POS 31/32). Please evaluate and advise on management; return your consultation note to the referring provider for the resident’s chart.');
+  doc.moveDown(0.5);
+  doc.font('Helvetica-Bold').fontSize(10).fillColor(INK)
+    .text([provider.name, provider.credentials].filter(Boolean).join(', ') || 'Referring Provider', ML(doc), doc.y);
+  if (provider.npi) doc.font('Helvetica').fontSize(9).fillColor('#555').text(`NPI ${provider.npi}`);
 
   footers(doc, facility.name);
   doc.end();

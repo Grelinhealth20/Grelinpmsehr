@@ -4,6 +4,7 @@ import {
 } from 'docx';
 import { uploadPatientObject, s3Enabled, listPatientKeys, ensurePatientFolder } from './s3Service.js';
 import { logger } from '../config/logger.js';
+import { noteTypeTitle, sectionLabelsForNoteType } from './noteTemplateService.js';
 
 /**
  * Render a signed clinical note to a Word (.docx) document and store it in the
@@ -70,7 +71,11 @@ export const NOTE_TITLES = {
 /** Document title for a note — the custom-template NAME for a custom note, else the note-type title. */
 export function noteTitle(note = {}) {
   if (note.noteType === 'custom' && note.content?.templateName) return String(note.content.templateName);
-  return NOTE_TITLES[note.noteType] || 'Clinical Note';
+  // The CURRENT template is authoritative for its note type (so a reused note type — e.g. pain_scs,
+  // redefined by the redesign — titles the document by what it means NOW, never a stale legacy label).
+  // Fall back to the legacy title map for HISTORIC note types no longer in the template set, then a
+  // safe generic. Guarantees a real title for every note type — never a raw note_type or blank.
+  return noteTypeTitle(note.noteType) || NOTE_TITLES[note.noteType] || 'Clinical Note';
 }
 
 // Canonical section labels (must match the frontend note templates' section keys).
@@ -347,7 +352,11 @@ export async function buildNoteDocx({ patient, encounterDate, note, codes = { di
   // dictionary, then the raw key as a last resort (never dropped).
   const customLabels = {};
   for (const s of (note.content?.customSections || [])) if (s && s.key) customLabels[s.key] = s.label || s.key;
-  const labelFor = (key) => customLabels[key] || overrides[key] || SECTION_LABELS[key] || key;
+  // The note type's OWN template labels (PI/Pain/SNF/TCM) — so a section key like `piEmcDeterminer`
+  // renders its real heading, never the raw key. Chain: custom > note-type override > TEMPLATE label
+  // > canonical dictionary > raw key (never dropped).
+  const typeLabels = sectionLabelsForNoteType(note.noteType);
+  const labelFor = (key) => customLabels[key] || overrides[key] || typeLabels[key] || SECTION_LABELS[key] || key;
   const sections = note.content?.sections || {};
   // Render in the note's OWN template order (matches the editor + the PDF exactly);
   // fall back to the canonical clinical order for legacy notes without a stored order.

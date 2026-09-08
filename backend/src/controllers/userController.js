@@ -1,5 +1,6 @@
 import {
   listUsers,
+  userCounts,
   createUser,
   findRawByUuid,
   toPublicUser,
@@ -110,12 +111,19 @@ export async function setFacilities(req, res, next) {
 
 export async function list(req, res, next) {
   try {
-    const { role, status } = req.query;
-    const users = await listUsers({ role: role || null, status: status || null });
-    res.json({ users });
+    const { role, roles, status, q } = req.query;
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize, 10) || 25));
+    // Always server-paginated → { users, total, page, pageSize } (scales to thousands of users).
+    res.json(await listUsers({ role: role || null, roles: roles || null, status: status || null, q: q || '', page, pageSize }));
   } catch (err) {
     next(err);
   }
+}
+
+/** Aggregate user counts (by role + status) for the Super Admin tab badges / stat cards. */
+export async function counts(req, res, next) {
+  try { res.json(await userCounts()); } catch (err) { next(err); }
 }
 
 export async function create(req, res, next) {

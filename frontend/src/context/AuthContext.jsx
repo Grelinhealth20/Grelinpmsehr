@@ -11,6 +11,7 @@ export function AuthProvider({ children }) {
   const [mfaStage, setMfaStage] = useState('ok'); // 'ok' | 'setup' (scan QR) | 'pending' (enter code)
   const [loading, setLoading] = useState(true);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [features, setFeatures] = useState({ referrals: true }); // per-facility feature availability
 
   // Load system feature flags (eligibility on/off, …). Never blocks the app —
   // defaults keep everything enabled if the fetch fails.
@@ -35,6 +36,7 @@ export function AuthProvider({ children }) {
         setUser(data.user);
         setMustReset(!!data.mustResetPassword);
         setMfaStage(mfaStageFromMe(data.mfa));
+        if (data.features) setFeatures((f) => ({ ...f, ...data.features }));
         refreshSettings();
       } catch {
         if (active) setUser(null);
@@ -53,14 +55,17 @@ export function AuthProvider({ children }) {
     setUser(data.user);
     setMustReset(!!data.mustResetPassword);
     setMfaStage(data.mfaStage || 'ok');
+    if (data.features) setFeatures((f) => ({ ...f, ...data.features }));
     refreshSettings();
     return data;
   }, [refreshSettings]);
 
-  // Called by the MFA enroll/verify screens on success — a fresh full session was issued.
-  const completeMfa = useCallback((csrfToken) => {
+  // Called by the MFA enroll/verify screens on success — a fresh full session was issued. Re-fetch /me
+  // so per-facility features (e.g. Referrals availability) reflect the now-complete session.
+  const completeMfa = useCallback(async (csrfToken) => {
     if (csrfToken) setCsrfToken(csrfToken);
     setMfaStage('ok');
+    try { const { data } = await authApi.me(); if (data.user) setUser(data.user); if (data.features) setFeatures((f) => ({ ...f, ...data.features })); } catch { /* non-fatal */ }
   }, []);
 
   const logout = useCallback(async () => {
@@ -85,6 +90,7 @@ export function AuthProvider({ children }) {
   const value = {
     user, mustReset, mfaStage, loading, login, logout, completePasswordReset, completeMfa, toApiError,
     settings, eligibilityEnabled: settings.eligibilityEnabled !== false, refreshSettings, setSettings,
+    features, referralsEnabled: features.referrals !== false,
   };
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

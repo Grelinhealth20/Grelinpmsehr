@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { authenticate, requirePasswordSettled } from '../middleware/authenticate.js';
-import { scrubClaim, lookupPdpm, lookupHcc, estimatePayment } from '../services/codingService.js';
+import { scrubClaim, lookupPdpm, lookupHcc, estimatePayment, lookupNcd } from '../services/codingService.js';
 import { calcRaf, deriveSegment } from '../services/hccRafService.js';
 
 const router = Router();
@@ -51,6 +51,14 @@ router.get('/rvu/:hcpcs', async (req, res, next) => {
     if (!r) return res.status(404).json({ error: 'HCPCS not found in MPFS RVU' });
     return res.json(r);
   } catch (err) { return next(err); }
+});
+
+// NCD (National Coverage Determination) REFERENCE search: GET /coding/ncd?q=diabetes
+// The ncd_policies dataset is policy text without a HCPCS/ICD crosswalk, so this is a reference
+// lookup (not an automated per-line denial edit) — it surfaces the governing NCD for the coder.
+router.get('/ncd', async (req, res, next) => {
+  try { return res.json({ query: req.query.q || '', policies: await lookupNcd(req.query.q, Number(req.query.limit) || 10) }); }
+  catch (err) { return next(err); }
 });
 
 export default router;

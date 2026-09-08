@@ -17,6 +17,9 @@ router.use(authenticate, requirePasswordSettled, authorize(ROLES.SUPER_ADMIN));
 
 // Live NPPES lookup (by NPI or name) — declared before the :uuid routes.
 router.get('/nppes', ctrl.nppesSearch);
+// Per-facility referral FAX configuration (incoming/outgoing numbers) — before the :uuid routes so
+// 'fax-config' is never parsed as a facility uuid.
+router.get('/fax-config', ctrl.faxConfigList);
 
 router.get('/', ctrl.list);
 router.post('/', csrfProtection, validate(createFacilitySchema), ctrl.create);
@@ -26,6 +29,8 @@ router.patch('/:uuid', csrfProtection, validate(uuidParam, 'params'), validate(u
 router.post('/:uuid/status', csrfProtection, validate(uuidParam, 'params'), validate(facilityStatusSchema), ctrl.status);
 // Per-facility feature switches: coding engine (claims scrubbing) and eligibility verification.
 router.post('/:uuid/flags', csrfProtection, validate(uuidParam, 'params'), ctrl.flags);
+// Per-facility referral FAX numbers: { incomingNumber?, outgoingNumber?, enabled? }
+router.put('/:uuid/fax-config', csrfProtection, validate(uuidParam, 'params'), ctrl.faxConfigSet);
 router.delete('/:uuid', csrfProtection, validate(uuidParam, 'params'), ctrl.remove);
 
 // Provider ⇄ facility assignment.

@@ -27,6 +27,9 @@ const ageAtEncounter = (dob, dos) => {
   return a >= 0 && a < 140 ? `${a} yrs` : '';
 };
 // Note-type templates are BACKEND-AUTHORITATIVE — fetched once per session from
+// Human labels for the service lines (used in the custom-template builder's AI copy).
+const SERVICE_LINE_LABEL = { snf: 'SNF', pain: 'Pain Management', pi: 'Personal Injury', tcm: 'TCM' };
+
 // GET /encounters/note-templates — the SINGLE source of truth. No static/legacy fallback.
 let NOTE_DEFS_CACHE = null; // { byType, list } — populated once, reused for the session
 let NOTE_DEFS_PROMISE = null; // in-flight request, so concurrent callers share ONE fetch
@@ -38,7 +41,7 @@ export async function loadNoteDefs() {
       const list = data.noteTypes || [];
       const byType = {};
       for (const t of list) byType[t.noteType] = t;
-      NOTE_DEFS_CACHE = { byType, list, aiTemplates: !!data.aiTemplates };
+      NOTE_DEFS_CACHE = { byType, list, aiTemplates: !!data.aiTemplates, serviceLines: data.serviceLines || [] };
       NOTE_DEFS_PROMISE = null;
       return NOTE_DEFS_CACHE;
     })
@@ -535,6 +538,23 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
     } catch (e) { toast.error(toApiError(e).message); } finally { setBusy(false); }
   }
 
+  // Delete a DRAFT note — gated by the Access Control "Delete Notes" permission (server-enforced too).
+  // Signed notes are never deletable (only amendable), matching the backend rule.
+  async function deleteActive() {
+    if (!active || active.status === 'signed') return;
+    if (!window.confirm('Delete this draft note? This permanently removes the draft and cannot be undone.')) return;
+    setBusy(true);
+    skipSave.current = true; // never autosave a note we are deleting
+    try {
+      await encountersApi.deleteNote(active.uuid);
+      toast.success('Draft note deleted.');
+      await loadNotes();
+      onChanged?.();
+      onClose();
+    } catch (e) { toast.error(toApiError(e).message); skipSave.current = false; }
+    finally { setBusy(false); }
+  }
+
   // Non-MD: writing a note and SIGNING it are separate authorities. A non-MD provider saves
   // their completed note and routes it to signing — the saved draft appears in a same-line
   // facility MD's "Yet to Sign" queue for review and sign-off. No MD sign-off happens here.
@@ -594,6 +614,18 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   // fallback and no legacy types — the note structure always comes from the server defs.
   const defsByType = defs?.byType || null;
   const typeList = defs?.list || [];
+  // Group the note-type chooser by service line (SNF/general first, then the provider's specialty
+  // line[s]) so a Pain/PI provider sees a clean, labeled section instead of one long mixed list.
+  const lineOfType = (nt) => (/^pi_/.test(nt) ? 'pi' : nt.startsWith('pain_') ? 'pain' : nt.startsWith('tcm_') ? 'tcm' : 'snf');
+  const groupedTypes = useMemo(() => {
+    const groups = new Map(); // line -> [types]
+    for (const t of typeList) { const l = t.serviceLine || lineOfType(t.noteType); if (!groups.has(l)) groups.set(l, []); groups.get(l).push(t); }
+    const order = ['snf', 'pain', 'pi', 'tcm'];
+    return [...groups.entries()]
+      .sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0]))
+      .map(([line, items]) => ({ line, label: SERVICE_LINE_LABEL[line] || 'Clinical', items }));
+  }, [typeList]);
+  const multiLine = groupedTypes.length > 1;
   // Heading-suggestion vocabulary — built from the REAL note templates the backend serves (every section
   // key + label actually used in the system), merged with the shared clinical-heading reference. Single
   // source of truth, not a static frontend-only list. Deterministic (key → label), de-duplicated.
@@ -699,6 +731,11 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
       ) : (
         <>
           <button className="btn ghost" onClick={closeWithSave}>Close</button>
+          {active && !signed && active.isOwner !== false && user?.accessLevel?.permissions?.ehr?.deleteNotes && (
+            <button className="btn ghost danger" onClick={deleteActive} disabled={busy} title="Delete this draft note (permitted by your access controls)">
+              {busy ? <span className="spinner" /> : 'Delete note'}
+            </button>
+          )}
           {active && (signed || canSign) && (
             <button className="btn ghost" onClick={downloadPdf} disabled={busy} title="Download this record as a PDF">
               {busy ? <span className="spinner" /> : 'Download PDF'}
@@ -733,6 +770,31 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
                 <span className={`nt2-dot ${n.status === 'signed' ? 'signed' : 'draft'}`} title={n.status === 'signed' ? 'Signed' : 'Draft'} />
               </button>
             ))}
+            {/* Start another note type WITHOUT a button — a compact dropdown, grouped by service line.
+                Appears only once a note exists (the empty state uses the full chooser). */}
+            {notes.length > 0 && (
+              <select
+                className="nt2-addtype" value="" disabled={busy} aria-label="Start another note"
+                onChange={(e) => {
+                  const v = e.target.value; e.target.value = '';
+                  if (!v) return;
+                  if (v.startsWith('custom:')) { const t = customTpls.find((c) => `custom:${c.uuid}` === v); if (t) createNote('custom', t); }
+                  else createNote(v);
+                }}
+              >
+                <option value="">Start another note…</option>
+                {groupedTypes.map((g) => (
+                  <optgroup key={g.line} label={g.label}>
+                    {g.items.map((t) => <option key={t.noteType} value={t.noteType}>{t.label}</option>)}
+                  </optgroup>
+                ))}
+                {customTpls.length > 0 && (
+                  <optgroup label="My templates">
+                    {customTpls.map((t) => <option key={t.uuid} value={`custom:${t.uuid}`}>{t.label}</option>)}
+                  </optgroup>
+                )}
+              </select>
+            )}
           </div>
           <div className="nt2-ident">
             <span className="nt2-ident-nm">{enc.patientName || 'Patient'}</span>
@@ -760,17 +822,22 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
                 <section className="pf-card pf-start">
                   <div className="pf-card-h">Start a note</div>
                   <div className="pf-start-sub">Choose a note type to begin documenting this encounter — every section is free-form.</div>
-                  <div className="pf-start-choices">
-                    {typeList.map((t) => (
-                      <button key={t.noteType} type="button" className="pf-start-btn" disabled={busy} onClick={() => createNote(t.noteType)}>
-                        <span className="pf-start-btn-main">
-                          <span className="pf-start-btn-t">{t.label}</span>
-                          <span className="pf-start-btn-s">{t.category}</span>
-                        </span>
-                        <span className="pf-start-btn-go" aria-hidden="true">→</span>
-                      </button>
-                    ))}
-                  </div>
+                  {groupedTypes.map((g) => (
+                    <div key={g.line} className="pf-start-group">
+                      {multiLine && <div className="pf-start-group-h">{g.label}</div>}
+                      <div className="pf-start-choices">
+                        {g.items.map((t) => (
+                          <button key={t.noteType} type="button" className="pf-start-btn" disabled={busy} onClick={() => createNote(t.noteType)}>
+                            <span className="pf-start-btn-main">
+                              <span className="pf-start-btn-t">{t.label}</span>
+                              <span className="pf-start-btn-s">{t.category}</span>
+                            </span>
+                            <span className="pf-start-btn-go" aria-hidden="true">→</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
 
                   <div className="pf-start-custom-h">
                     <span>My templates</span>
@@ -1641,7 +1708,10 @@ export function CustomTemplateBuilder({ initial, headingDict, onSave, onClose })
   const [aiOn, setAiOn] = useState(false);
   const [aiPrompt, setAiPrompt] = useState('');
   const [aiBusy, setAiBusy] = useState(false);
-  useEffect(() => { let a = true; loadNoteDefs().then((d) => { if (a) setAiOn(!!d.aiTemplates); }).catch(() => {}); return () => { a = false; }; }, []);
+  // The provider's own service line drives the AI-drafting copy (and the draft the server generates,
+  // which uses the provider's granted line authoritatively). SNF is the safe default label.
+  const [lineLabel, setLineLabel] = useState('SNF');
+  useEffect(() => { let a = true; loadNoteDefs().then((d) => { if (!a) return; setAiOn(!!d.aiTemplates); setLineLabel(SERVICE_LINE_LABEL[(d.serviceLines || [])[0]] || 'SNF'); }).catch(() => {}); return () => { a = false; }; }, []);
   async function generateDraft() {
     const p = aiPrompt.trim();
     if (p.length < 3) { toast?.error('Describe the note you need (a sentence or two).'); return; }
@@ -1729,7 +1799,7 @@ export function CustomTemplateBuilder({ initial, headingDict, onSave, onClose })
             <div className="ctb2-ai">
               <div className="ctb2-ai-h">
                 <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15.5l-1.9-4.6L5.5 9l4.6-1.4L12 3z" /><path d="M19 14l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8.8-2z" /></svg>
-                <span>Describe your note — get a ready SNF template</span>
+                <span>Describe your note — get a ready {lineLabel} template</span>
               </div>
               <textarea className="input ctb2-ai-in" rows={2} value={aiPrompt} disabled={aiBusy}
                 placeholder="e.g. Weekly wound rounds with photo documentation and dressing orders — provider-focused, CMS compliant"

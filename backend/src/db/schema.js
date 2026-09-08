@@ -154,7 +154,7 @@ export const SCHEMA_STATEMENTS = [
     id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     uuid         CHAR(36)        NOT NULL,
     name         VARCHAR(120)    NOT NULL,
-    service_line ENUM('snf','pain','tcm') NOT NULL DEFAULT 'snf',
+    service_line ENUM('snf','pain','tcm','pi') NOT NULL DEFAULT 'snf',
     created_by   BIGINT UNSIGNED NULL,
     created_at   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
@@ -230,6 +230,16 @@ export const SCHEMA_STATEMENTS = [
     PRIMARY KEY (patient_id, token_bidx),
     KEY idx_pnt_token (token_bidx),
     CONSTRAINT fk_pnt_patient FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+  // --- User name-search tokens (prefix blind indexes) — enables SERVER-SIDE paginated search over the
+  //     users table without decrypting names (encrypted at rest). Mirrors patient_name_tokens. -----------
+  `CREATE TABLE IF NOT EXISTS user_name_tokens (
+    user_id     BIGINT UNSIGNED NOT NULL,
+    token_bidx  CHAR(64)        NOT NULL,
+    PRIMARY KEY (user_id, token_bidx),
+    KEY idx_unt_token (token_bidx),
+    CONSTRAINT fk_unt_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 
   // --- Patient documents (S3 object refs; scoped strictly per patient) -------
@@ -424,6 +434,7 @@ export const SCHEMA_STATEMENTS = [
     status        ENUM('active','inactive') NOT NULL DEFAULT 'active',
     coding_enabled      TINYINT(1) NOT NULL DEFAULT 1,
     eligibility_enabled TINYINT(1) NOT NULL DEFAULT 1,
+    referrals_enabled   TINYINT(1) NOT NULL DEFAULT 1,
     source        VARCHAR(16)     NOT NULL DEFAULT 'nppes',
     verified_by   BIGINT UNSIGNED NULL,
     created_by    BIGINT UNSIGNED NULL,
@@ -463,7 +474,7 @@ export const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS note_templates (
     id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     note_type     VARCHAR(60)     NOT NULL,
-    service_line  ENUM('snf','pain','tcm') NOT NULL,
+    service_line  ENUM('snf','pain','tcm','pi') NOT NULL,
     label         VARCHAR(160)    NOT NULL,
     category      VARCHAR(160)    NULL,
     cpt           VARCHAR(160)    NULL,
@@ -859,5 +870,57 @@ export const SCHEMA_STATEMENTS = [
     PRIMARY KEY (article_id),
     KEY idx_mcd_fc (is_first_coast),
     KEY idx_mcd_contractor (contractor_name)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+  // --- Referrals (incoming / outgoing specialist & care-transition referrals) --------------------
+  // Owner-scoped (provider_id). Clinical free-text (reason / diagnosis / notes) is PHI → AES-256-GCM
+  // *_enc columns. Operational metadata (direction, specialty, priority, status, counterparty, dates)
+  // is stored plaintext for filtering; the row is only ever readable by its owning provider.
+  `CREATE TABLE IF NOT EXISTS referrals (
+    id                 BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    uuid               CHAR(36)        NOT NULL,
+    referral_no        VARCHAR(24)     NOT NULL,
+    provider_id        BIGINT UNSIGNED NOT NULL,
+    patient_id         BIGINT UNSIGNED NULL,
+    facility_id        BIGINT UNSIGNED NULL,
+    direction          ENUM('outgoing','incoming') NOT NULL,
+    specialty          VARCHAR(100)    NOT NULL,
+    priority           ENUM('routine','urgent','stat') NOT NULL DEFAULT 'routine',
+    status             ENUM('draft','sent','accepted','scheduled','completed','declined','cancelled','received') NOT NULL DEFAULT 'draft',
+    counterparty_name  VARCHAR(160)    NULL,
+    counterparty_org   VARCHAR(160)    NULL,
+    reason_enc         VARBINARY(8192) NULL,
+    diagnosis_enc      VARBINARY(4096) NULL,
+    notes_enc          VARBINARY(16384) NULL,
+    referral_date      DATE            NULL,
+    scheduled_date     DATE            NULL,
+    created_by         BIGINT UNSIGNED NULL,
+    created_at         DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at         DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_referral_uuid (uuid),
+    UNIQUE KEY uq_referral_no (referral_no),
+    KEY idx_ref_provider_dir (provider_id, direction, id),
+    KEY idx_ref_patient (patient_id),
+    KEY idx_ref_status (provider_id, status)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+  // --- Referral attachments (uploaded PDF records enclosed in the faxed package) ------------------
+  // Each row is one uploaded document stored in the Referrals/ S3 tree. file_name is AES-256-GCM
+  // encrypted (may reveal clinical context). Scoped through its parent referral (owner/facility).
+  `CREATE TABLE IF NOT EXISTS referral_attachments (
+    id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    uuid            CHAR(36)        NOT NULL,
+    referral_id     BIGINT UNSIGNED NOT NULL,
+    file_name_enc   VARBINARY(1024) NULL,
+    s3_key          VARCHAR(768)    NOT NULL,
+    content_type    VARCHAR(120)    NULL,
+    size_bytes      BIGINT UNSIGNED NULL,
+    uploaded_by     BIGINT UNSIGNED NULL,
+    created_at      DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_refatt_uuid (uuid),
+    KEY idx_refatt_referral (referral_id),
+    CONSTRAINT fk_refatt_referral FOREIGN KEY (referral_id) REFERENCES referrals(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 ];

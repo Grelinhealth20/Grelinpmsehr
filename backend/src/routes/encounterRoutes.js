@@ -5,6 +5,7 @@ import { authenticate, requirePasswordSettled } from '../middleware/authenticate
 import { csrfProtection } from '../middleware/csrf.js';
 import { validate } from '../middleware/validate.js';
 import { aiLimiter, ocrLimiter } from '../middleware/rateLimiters.js';
+import { requireEhrAccess, requireEditNotes, requireDeleteNotes } from '../middleware/permissions.js';
 
 // In-memory upload for encounter lab/imaging attachments; capped at 25 MB (imaging can be large).
 // Field caps bound the non-file multipart parts (buffered in memory) too.
@@ -19,6 +20,9 @@ import {
 const router = Router();
 
 router.use(authenticate, requirePasswordSettled);
+// Access Control: reaching the EHR System's clinical API requires EHR access (providers by role; other
+// roles only when granted via Super Admin → Access Control). Enforced server-side, not just in the UI.
+router.use(requireEhrAccess);
 
 router.get('/', ctrl.list);
 router.post('/', csrfProtection, validate(createEncounterSchema), ctrl.createEncounter);
@@ -58,13 +62,15 @@ router.get('/notes/:noteUuid/codes', ctrl.getNoteCodes);
 router.get('/notes/:noteUuid/predict', ctrl.predictNoteCodes);
 router.put('/notes/:noteUuid/codes', csrfProtection, ctrl.saveNoteCodes);
 router.post('/notes/:noteUuid/scrub', csrfProtection, ctrl.scrubNote);
-router.patch('/notes/:noteUuid', csrfProtection, validate(updateNoteSchema), ctrl.updateNote);
-router.post('/notes/:noteUuid/sign', csrfProtection, validate(signNoteSchema), ctrl.signNote);
-router.post('/notes/:noteUuid/amend', csrfProtection, validate(amendNoteSchema), ctrl.amendNote);
+router.patch('/notes/:noteUuid', csrfProtection, requireEditNotes, validate(updateNoteSchema), ctrl.updateNote);
+router.post('/notes/:noteUuid/sign', csrfProtection, requireEditNotes, validate(signNoteSchema), ctrl.signNote);
+router.post('/notes/:noteUuid/amend', csrfProtection, requireEditNotes, validate(amendNoteSchema), ctrl.amendNote);
+// Delete a clinical note — soft-delete, audited; privileged (grant-required via Access Control).
+router.delete('/notes/:noteUuid', csrfProtection, requireDeleteNotes, ctrl.deleteNote);
 
 router.get('/:encounterUuid/details', ctrl.encounterDetails);
 router.get('/:encounterUuid/notes', ctrl.listNotes);
-router.post('/:encounterUuid/notes', csrfProtection, validate(createNoteSchema), ctrl.createNote);
+router.post('/:encounterUuid/notes', csrfProtection, requireEditNotes, validate(createNoteSchema), ctrl.createNote);
 
 router.patch('/:appointmentUuid', csrfProtection, validate(updateEncounterSchema), ctrl.updateStatus);
 

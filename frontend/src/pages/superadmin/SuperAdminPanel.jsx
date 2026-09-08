@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useRef } from 'react';
 import AppHeader from '../../components/AppHeader.jsx';
 import ConfirmDialog from '../../components/ConfirmDialog.jsx';
 import UserFormModal from './UserFormModal.jsx';
@@ -11,7 +11,9 @@ import { useIdleTimeout } from '../../hooks/useIdleTimeout.js';
 import { usersApi, facilitiesApi, toApiError } from '../../lib/api.js';
 import AuditLogs from './AuditLogs.jsx';
 import AiLogs from './AiLogs.jsx';
+import TablePager from '../../components/TablePager.jsx';
 import SystemSettings from './SystemSettings.jsx';
+import ReferralsAdmin from './ReferralsAdmin.jsx';
 
 const TABS = [
   { key: 'super', label: 'Super Admins', roles: ['super_admin', 'master_admin'], createRole: 'super_admin', createLabel: '+ Create Super Admin' },
@@ -33,15 +35,21 @@ export default function SuperAdminPanel() {
   const toast = useToast();
   useIdleTimeout(logout, { minutes: 15 });
 
-  const [all, setAll] = useState([]);
+  const PER_PAGE = 25;
+  const [rows, setRows] = useState([]);            // current page of users (server-paginated)
+  const [total, setTotal] = useState(0);           // full-set total for the active tab + search
+  const [countsData, setCountsData] = useState({ byRole: {}, byRoleStatus: {}, total: 0 });
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState('super');
   const [search, setSearch] = useState('');
+  const [uPage, setUPage] = useState(1);
   const [modal, setModal] = useState(null);
+  const firstLoad = useRef(true);
   const isFacilities = tab === 'facilities';
   const isLogs = tab === 'logs';
   const isAiLogs = tab === 'ailogs';
   const isSettings = tab === 'settings';
+  const isReferrals = tab === 'referrals';
 
   // Facilities state (loaded on demand when the Facilities tab is opened).
   const [facilities, setFacilities] = useState([]);
@@ -49,16 +57,23 @@ export default function SuperAdminPanel() {
   const [facSearch, setFacSearch] = useState('');
   const [facModal, setFacModal] = useState(null);
 
-  async function load() {
+  const activeTab = TABS.find((t) => t.key === tab) || TABS[0];
+
+  async function loadCounts() {
+    try { const { data } = await usersApi.counts(); setCountsData(data); } catch { /* non-fatal */ }
+  }
+  // SERVER-side paginated users load — role-scoped by the active tab, name/email searched via the token
+  // index, one page at a time (scales to thousands of users). Also refreshes the aggregate counts so the
+  // tab badges + stat cards stay accurate. No-op on non-user tabs.
+  async function load(p = uPage, t = tab, q = search) {
+    const at = TABS.find((x) => x.key === t);
+    if (!at) return;
     setLoading(true);
     try {
-      const { data } = await usersApi.list();
-      setAll(data.users);
-    } catch (e) {
-      toast.error(toApiError(e).message);
-    } finally {
-      setLoading(false);
-    }
+      const { data } = await usersApi.list({ roles: at.roles.join(','), q: q.trim(), page: p, pageSize: PER_PAGE });
+      setRows(data.users || []); setTotal(data.total || 0); setUPage(data.page || p);
+      loadCounts();
+    } catch (e) { toast.error(toApiError(e).message); } finally { setLoading(false); }
   }
 
   async function loadFacilities() {
@@ -73,10 +88,15 @@ export default function SuperAdminPanel() {
     }
   }
 
+  useEffect(() => { loadCounts(); }, []);
+  // Reload the user page whenever the tab or search changes (debounced), resetting to page 1.
   useEffect(() => {
-    load();
+    if (!TABS.find((t) => t.key === tab)) return undefined; // non-user tab (facilities/logs/settings/referrals)
+    const d = firstLoad.current ? 0 : 280; firstLoad.current = false;
+    const timer = setTimeout(() => load(1, tab, search), d);
+    return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [tab, search]);
 
   useEffect(() => {
     // Facilities power the Facilities tab AND the audit-log facility filter.
@@ -86,28 +106,16 @@ export default function SuperAdminPanel() {
 
   const counts = useMemo(() => {
     const c = {};
-    for (const t of TABS) c[t.key] = all.filter((u) => t.roles.includes(u.role)).length;
+    for (const t of TABS) c[t.key] = t.roles.reduce((s, r) => s + (countsData.byRole[r] || 0), 0);
     return c;
-  }, [all]);
-
-  const activeTab = TABS.find((t) => t.key === tab) || TABS[0];
+  }, [countsData]);
 
   const stats = useMemo(() => {
-    const scope = all.filter((u) => activeTab.roles.includes(u.role));
-    return {
-      total: scope.length,
-      active: scope.filter((u) => u.status === 'active').length,
-      restricted: scope.filter((u) => u.status === 'restricted').length,
-      disabled: scope.filter((u) => u.status === 'disabled').length,
-    };
-  }, [all, activeTab]);
-
-  const rows = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return all
-      .filter((u) => activeTab.roles.includes(u.role))
-      .filter((u) => !q || u.fullName?.toLowerCase().includes(q) || u.email?.toLowerCase().includes(q));
-  }, [all, activeTab, search]);
+    const brs = countsData.byRoleStatus || {};
+    let active = 0; let restricted = 0; let disabled = 0;
+    for (const role of activeTab.roles) { const s = brs[role] || {}; active += s.active || 0; restricted += s.restricted || 0; disabled += s.disabled || 0; }
+    return { total: active + restricted + disabled, active, restricted, disabled };
+  }, [countsData, activeTab]);
 
   async function changeStatus(u, status) {
     try {
@@ -152,9 +160,9 @@ export default function SuperAdminPanel() {
 
       <main className="admin-main">
         <div className="admin-head">
-          <span className="admin-eyebrow">// {isSettings ? 'SYSTEM CONFIGURATION CONSOLE' : isLogs ? 'AUDIT & COMPLIANCE CONSOLE' : isFacilities ? 'FACILITY MANAGEMENT CONSOLE' : 'USER MANAGEMENT CONSOLE'}</span>
-          <h1>{isSettings ? 'System Settings' : isAiLogs ? 'AI Logs' : isLogs ? 'Audit Logs' : isFacilities ? 'Facilities' : 'User Management'}</h1>
-          <p>{isSettings ? 'Enable or disable platform features across the EHR. Changes apply system-wide and are enforced on the server.' : isLogs ? 'Monitor, filter, and download the activity trail across every account, role, and facility.' : isFacilities ? 'Manage facilities and provider assignments.' : 'Create and govern accounts across roles.'}</p>
+          <span className="admin-eyebrow">// {isReferrals ? 'REFERRAL MANAGEMENT CONSOLE' : isSettings ? 'SYSTEM CONFIGURATION CONSOLE' : isLogs ? 'AUDIT & COMPLIANCE CONSOLE' : isFacilities ? 'FACILITY MANAGEMENT CONSOLE' : 'USER MANAGEMENT CONSOLE'}</span>
+          <h1>{isReferrals ? 'Referrals' : isSettings ? 'System Settings' : isAiLogs ? 'AI Logs' : isLogs ? 'Audit Logs' : isFacilities ? 'Facilities' : 'User Management'}</h1>
+          <p>{isReferrals ? 'Oversee every incoming and outgoing referral across all facilities, with fax delivery status and the Fax.Plus integration health.' : isSettings ? 'Enable or disable platform features across the EHR. Changes apply system-wide and are enforced on the server.' : isLogs ? 'Monitor, filter, and download the activity trail across every account, role, and facility.' : isFacilities ? 'Manage facilities and provider assignments.' : 'Create and govern accounts across roles.'}</p>
         </div>
 
         {/* Centered role tabs */}
@@ -198,6 +206,14 @@ export default function SuperAdminPanel() {
           </button>
           <button
             role="tab"
+            aria-selected={isReferrals}
+            className={`sa-tab ${isReferrals ? 'active' : ''}`}
+            onClick={() => setTab('referrals')}
+          >
+            Referrals
+          </button>
+          <button
+            role="tab"
             aria-selected={isSettings}
             className={`sa-tab ${isSettings ? 'active' : ''}`}
             onClick={() => setTab('settings')}
@@ -206,7 +222,9 @@ export default function SuperAdminPanel() {
           </button>
         </div>
 
-        {isSettings ? (
+        {isReferrals ? (
+          <ReferralsAdmin />
+        ) : isSettings ? (
           <SystemSettings />
         ) : isAiLogs ? (
           <AiLogs />
@@ -270,7 +288,7 @@ export default function SuperAdminPanel() {
                 {loading ? (
                   <tr><td colSpan={6} className="table-empty"><span className="spinner dark" /> Loading…</td></tr>
                 ) : rows.length === 0 ? (
-                  <tr><td colSpan={6} className="table-empty">No {activeTab.label.toLowerCase()} yet.</td></tr>
+                  <tr><td colSpan={6} className="table-empty">{search.trim() ? `No ${activeTab.label.toLowerCase()} match your search.` : `No ${activeTab.label.toLowerCase()} yet.`}</td></tr>
                 ) : (
                   rows.map((u) => {
                     const isSelf = u.uuid === me?.uuid;
@@ -321,6 +339,7 @@ export default function SuperAdminPanel() {
             </table>
           </div>
         </div>
+        {!loading && total > 0 && <TablePager page={uPage} total={total} pageSize={PER_PAGE} onGo={(n) => load(n, tab, search)} />}
         </>
         )}
       </main>
@@ -370,11 +389,15 @@ export default function SuperAdminPanel() {
 
 /** Facilities management view (NPPES-verified facility records + assignments). */
 function FacilitiesView({ facilities, loading, search, setSearch, onAdd, onManage, onStatus, onDelete }) {
+  const PER = 25;
   const q = search.trim().toLowerCase();
   const rows = facilities.filter((f) => !q
     || f.name?.toLowerCase().includes(q)
     || f.npi?.includes(q)
     || f.city?.toLowerCase().includes(q));
+  const [page, setPage] = useState(1);
+  useEffect(() => { setPage(1); }, [search]);
+  const paged = rows.slice((page - 1) * PER, page * PER);
   return (
     <>
       <div className="sa-stats">
@@ -410,7 +433,7 @@ function FacilitiesView({ facilities, loading, search, setSearch, onAdd, onManag
               ) : rows.length === 0 ? (
                 <tr><td colSpan={7} className="table-empty">{q ? 'No facilities match your search.' : 'No facilities yet. Add a facility from the NPPES registry.'}</td></tr>
               ) : (
-                rows.map((f) => (
+                paged.map((f) => (
                   <tr key={f.uuid}>
                     <td>
                       <div className="fac-cell clickable" title="Manage facility" onClick={() => onManage(f)}>
@@ -442,6 +465,7 @@ function FacilitiesView({ facilities, loading, search, setSearch, onAdd, onManag
           </table>
         </div>
       </div>
+      {!loading && rows.length > 0 && <TablePager page={page} total={rows.length} pageSize={PER} onGo={setPage} />}
     </>
   );
 }

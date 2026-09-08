@@ -115,6 +115,40 @@ async function modifierFindings(lines) {
   return findings;
 }
 
+/**
+ * Modifier VALIDITY — every modifier appended to a claim line must be a recognized CPT Level I /
+ * HCPCS Level II / NCCI modifier. An unrecognized modifier is rejected by the payer, so it is a
+ * hard error. The authoritative set is the loaded `modifiers` dataset (CPT + HCPCS + NCCI), cached
+ * once. This closes a real accuracy gap — nothing else validated the modifiers actually submitted.
+ */
+let _knownModifiers = null;
+async function knownModifiers() {
+  if (_knownModifiers) return _knownModifiers;
+  const [rows] = await pool.query('SELECT modifier, description FROM modifiers');
+  const m = new Map();
+  for (const r of rows) { const k = norm(r.modifier); if (k) m.set(k, r.description || ''); }
+  _knownModifiers = m;
+  return m;
+}
+const splitModifiers = (s) => String(s || '').split(/[\s,;+/|]+/).map((x) => norm(x)).filter(Boolean);
+async function modifierValidityFindings(lines) {
+  const findings = [];
+  const pairs = [];
+  for (const l of lines) for (const mod of splitModifiers(l.modifiers)) pairs.push({ cpt: norm(l.cpt), mod });
+  if (!pairs.length) return findings;
+  const known = await knownModifiers();
+  const seen = new Set();
+  for (const { cpt, mod } of pairs) {
+    const key = `${cpt}|${mod}`; if (seen.has(key)) continue; seen.add(key);
+    if (!known.has(mod)) {
+      findings.push({ type: 'INVALID_MODIFIER', severity: 'error', code: cpt, modifier: mod,
+        message: `Modifier "${mod}" on ${cpt} is not a recognized CPT/HCPCS/NCCI modifier — the payer will reject the line. Verify the modifier.`,
+        source: 'modifiers' });
+    }
+  }
+  return findings;
+}
+
 async function mueFindings(lines) {
   const findings = [];
   const codes = lines.map((l) => norm(l.cpt)).filter(Boolean);
@@ -298,49 +332,128 @@ async function medicalNecessityFindings(lines, dxList, { jurisdiction = 'FL' } =
   if (!dxVariants.length) return findings;
   const flOnly = String(jurisdiction).toUpperCase() === 'FL';
   const jLabel = flOnly ? 'First Coast (Central FL)' : 'all-jurisdiction';
+  const contractorJoin = flOnly
+    ? `JOIN mcd_article_x_contractor ax ON ax.article_id = t.article_id
+       JOIN mcd_contractor c ON c.contractor_id = ax.contractor_id AND c.is_first_coast = 1` : '';
   for (const l of lines) {
     const proc = norm(l.cpt); if (!proc) continue;
-    // Articles that govern this procedure in the jurisdiction (official article↔HCPCS + contractor).
-    const [arts] = flOnly
-      ? await pool.query(
-        `SELECT DISTINCT h.article_id FROM mcd_article_hcpc h
-           JOIN mcd_article_x_contractor ax ON ax.article_id = h.article_id
-           JOIN mcd_contractor c ON c.contractor_id = ax.contractor_id AND c.is_first_coast = 1
-          WHERE h.hcpc_code = ?`, [proc])
-      : await pool.query('SELECT DISTINCT article_id FROM mcd_article_hcpc WHERE hcpc_code = ?', [proc]);
-    if (!arts.length) continue; // no governing coverage article in this jurisdiction
-    const articleIds = arts.map((a) => a.article_id);
 
-    // (a) A submitted diagnosis explicitly on the NON-COVERED list → definitive denial.
-    const [noncov] = await pool.query(
-      'SELECT DISTINCT icd_code FROM mcd_article_noncovered_icd WHERE article_id IN (?) AND icd_code IN (?)',
-      [articleIds, dxVariants]);
-    if (noncov.length) {
+    // ---- Governing coverage, jurisdiction-scoped. The licensed CMS MCD data (mcd_*) is AUTHORITATIVE.
+    // The older article_coverage_* dataset is a SUPPLEMENT that FILLS GAPS ONLY — it is consulted solely
+    // for procedures the authoritative MCD set does not govern, so it broadens coverage (fully utilizing
+    // the loaded data) WITHOUT ever overriding the authoritative source or masking a real denial. ----
+    const [mcdArtRows] = await pool.query(
+      `SELECT DISTINCT t.article_id FROM mcd_article_hcpc t ${contractorJoin} WHERE t.hcpc_code = ?`, [proc]);
+    const mcdArts = mcdArtRows.map((a) => a.article_id);
+
+    let covered = new Set();      // submitted dx matched as COVERED
+    let noncovered = new Set();   // submitted dx matched as NON-COVERED (definitive denial)
+    let articleIds = [];
+    let exampleSource = null;     // { table, arts, pairSet? } for surfacing covered examples
+    let sourceLabel;
+
+    if (mcdArts.length) {
+      // AUTHORITATIVE: licensed MCD article coverage.
+      articleIds = mcdArts;
+      const [nc] = await pool.query('SELECT DISTINCT icd_code FROM mcd_article_noncovered_icd WHERE article_id IN (?) AND icd_code IN (?)', [mcdArts, dxVariants]);
+      noncovered = new Set(nc.map((r) => r.icd_code));
+      const [cv] = await pool.query('SELECT DISTINCT icd_code FROM mcd_article_covered_icd WHERE article_id IN (?) AND icd_code IN (?)', [mcdArts, dxVariants]);
+      covered = new Set(cv.map((r) => r.icd_code));
+      exampleSource = { table: 'mcd', arts: mcdArts };
+      sourceLabel = 'mcd_article coverage (First Coast)';
+    } else {
+      // GAP-FILL: only when the authoritative set does not govern this procedure.
+      const [acPairRows] = await pool.query(
+        `SELECT DISTINCT t.article_id, t.code_group FROM article_coverage_proc t ${contractorJoin} WHERE t.procedure_code = ?`, [proc]);
+      if (!acPairRows.length) continue; // no governing coverage policy in this jurisdiction, from either source
+      const acArts = [...new Set(acPairRows.map((r) => r.article_id))];
+      const acPairSet = new Set(acPairRows.map((r) => `${r.article_id}:${r.code_group}`));
+      articleIds = acArts;
+      const [acIcd] = await pool.query('SELECT article_id, code_group, icd_code, covered FROM article_coverage_icd WHERE article_id IN (?) AND icd_code IN (?)', [acArts, dxVariants]);
+      for (const r of acIcd) {
+        if (!acPairSet.has(`${r.article_id}:${r.code_group}`)) continue; // only this proc's code group(s)
+        if (Number(r.covered) === 0) noncovered.add(r.icd_code); else covered.add(r.icd_code);
+      }
+      exampleSource = { table: 'ac', arts: acArts, pairSet: acPairSet };
+      sourceLabel = 'article_coverage (supplemental)';
+    }
+
+    // (a) A submitted diagnosis explicitly NON-COVERED → definitive denial.
+    if (noncovered.size) {
       findings.push({ type: 'MEDICAL_NECESSITY_NONCOVERED', severity: 'error', code: proc, articles: articleIds, jurisdiction: jLabel,
-        message: `${proc}: diagnosis ${noncov.map((r) => r.icd_code).join(', ')} is on the ${jLabel} coverage article's NON-COVERED list — this line will be denied.`,
-        source: 'mcd_article_noncovered_icd' });
+        message: `${proc}: diagnosis ${[...noncovered].join(', ')} is on the ${jLabel} coverage policy's NON-COVERED list — this line will be denied.`,
+        source: sourceLabel });
       continue;
     }
 
-    // (b) No submitted diagnosis on the covered list → denial for medical necessity.
-    const [cov] = await pool.query(
-      'SELECT DISTINCT article_id FROM mcd_article_covered_icd WHERE article_id IN (?) AND icd_code IN (?)',
-      [articleIds, dxVariants]);
-    if (!cov.length) {
-      const [examples] = await pool.query(
-        `SELECT m.icd_code, t.term AS icd_desc
-           FROM mcd_article_covered_icd m
-           LEFT JOIN terminology_cache t ON t.source = 'ICD10CM' AND t.code = m.icd_code
-          WHERE m.article_id IN (?) GROUP BY m.icd_code ORDER BY m.icd_code LIMIT 12`, [articleIds]);
-      const covered = examples.map((e) => ({ icd: e.icd_code, description: e.icd_desc || null }));
-      const preview = covered.slice(0, 6).map((c) => c.icd).join(', ');
+    // (b) No submitted diagnosis on the covered list → medical-necessity denial; surface covered dx.
+    if (!covered.size) {
+      let examples = [];
+      if (exampleSource.table === 'mcd') {
+        const [ex] = await pool.query(
+          `SELECT m.icd_code, t.term AS icd_desc FROM mcd_article_covered_icd m
+             LEFT JOIN terminology_cache t ON t.source='ICD10CM' AND t.code=m.icd_code
+            WHERE m.article_id IN (?) GROUP BY m.icd_code ORDER BY m.icd_code LIMIT 12`, [exampleSource.arts]);
+        examples = ex.map((e) => ({ icd: e.icd_code, description: e.icd_desc || null }));
+      } else {
+        const [ex] = await pool.query(
+          `SELECT ac.icd_code, t.term AS icd_desc FROM article_coverage_icd ac
+             LEFT JOIN terminology_cache t ON t.source='ICD10CM' AND t.code = ac.icd_code COLLATE utf8mb4_unicode_ci
+            WHERE ac.article_id IN (?) AND ac.covered=1 GROUP BY ac.icd_code ORDER BY ac.icd_code LIMIT 12`, [exampleSource.arts]);
+        examples = ex.map((e) => ({ icd: e.icd_code, description: e.icd_desc || null }));
+      }
+      const preview = examples.slice(0, 6).map((c) => c.icd).join(', ');
       findings.push({ type: 'MEDICAL_NECESSITY', severity: 'error', code: proc, articles: articleIds, jurisdiction: jLabel,
-        coveredExamples: covered,
-        message: `${proc} would be DENIED for medical necessity — none of the submitted diagnoses are on the ${jLabel} coverage article's covered list.${preview ? ` Supporting diagnoses include: ${preview}.` : ''}`,
-        source: 'mcd_article_covered_icd + mcd_contractor' });
+        coveredExamples: examples,
+        message: `${proc} would be DENIED for medical necessity — none of the submitted diagnoses are on the ${jLabel} coverage policy's covered list.${preview ? ` Supporting diagnoses include: ${preview}.` : ''}`,
+        source: sourceLabel });
     }
   }
   return findings;
+}
+
+/**
+ * LCD governance awareness from the loaded `coverage_edits` dataset (LCD policy ↔ procedure). This
+ * dataset maps procedures to the LCD policy that governs them (no ICD list of its own), so it is
+ * surfaced as INFORMATIONAL — the coder is told WHICH LCD applies (and should confirm the note meets
+ * its criteria). Deduped per procedure+policy; only for procedures not already flagged for necessity.
+ */
+async function lcdGovernanceFindings(lines, alreadyFlagged) {
+  const findings = [];
+  const codes = [...new Set(lines.map((l) => norm(l.cpt)).filter(Boolean))];
+  if (!codes.length) return findings;
+  const [rows] = await pool.query(
+    "SELECT DISTINCT procedure_code, policy_type, policy_id FROM coverage_edits WHERE procedure_code IN (?) ORDER BY procedure_code, policy_id", [codes]);
+  const byProc = new Map();
+  for (const r of rows) {
+    const p = norm(r.procedure_code);
+    if (alreadyFlagged.has(p)) continue; // a necessity error already covers this proc — don't double-message
+    if (!byProc.has(p)) byProc.set(p, []);
+    if (byProc.get(p).length < 6) byProc.get(p).push(`${r.policy_type} ${r.policy_id}`);
+  }
+  for (const [proc, policies] of byProc) {
+    findings.push({ type: 'LCD_GOVERNED', severity: 'info', code: proc, policies,
+      message: `${proc} is governed by ${policies.join(', ')} — confirm the documentation meets the policy's coverage criteria to avoid a denial.`,
+      source: 'coverage_edits' });
+  }
+  return findings;
+}
+
+/** NCD reference lookup (National Coverage Determinations). The loaded `ncd_policies` table is policy
+ *  TEXT (section/title/coverage_type/description) with NO HCPCS/ICD crosswalk, so it cannot drive a
+ *  deterministic per-line denial edit — it is exposed here for REFERENCE (keyword search) only, never
+ *  fabricated into a coverage rule. */
+export async function lookupNcd(keyword, limit = 10) {
+  const kw = String(keyword || '').trim();
+  if (kw.length < 2) return [];
+  const [rows] = await pool.query(
+    `SELECT ncd_id, section, title, coverage_type, coverage_level, effective_date, item_service_desc
+       FROM ncd_policies WHERE title LIKE ? OR item_service_desc LIKE ? OR section = ?
+      ORDER BY (title LIKE ?) DESC, section LIMIT ?`,
+    [`%${kw}%`, `%${kw}%`, kw, `%${kw}%`, limit]);
+  return rows.map((r) => ({ ncdId: r.ncd_id, section: r.section, title: r.title,
+    coverageType: r.coverage_type, coverageLevel: r.coverage_level, effectiveDate: r.effective_date,
+    description: r.item_service_desc || null }));
 }
 
 async function pdpmPrimaryFinding(primaryDx, fy) {
@@ -375,6 +488,7 @@ export async function scrubClaim(claim = {}) {
     mueFindings(lines),
     aocFindings(codes),
     modifierFindings(lines),
+    modifierValidityFindings(lines),
     icdBillableFindings(diagnoses),
     ageSexFindings(diagnoses, claim.patient),
     specificityFindings(diagnoses),
@@ -387,6 +501,10 @@ export async function scrubClaim(claim = {}) {
   if (claim.partA && claim.primaryDx) checks.push(pdpmPrimaryFinding(claim.primaryDx, fy));
   const groups = await Promise.all(checks);
   const findings = groups.flat();
+  // LCD governance (coverage_edits) is INFORMATIONAL and depends on which procedures a necessity error
+  // already covers — run it after, skipping any procedure already flagged, so it never double-messages.
+  const necProcs = new Set(findings.filter((f) => f.type === 'MEDICAL_NECESSITY' || f.type === 'MEDICAL_NECESSITY_NONCOVERED').map((f) => String(f.code)));
+  findings.push(...await lcdGovernanceFindings(lines, necProcs));
   const summary = { errors: 0, warnings: 0, info: 0 };
   for (const f of findings) summary[f.severity === 'error' ? 'errors' : f.severity === 'warning' ? 'warnings' : 'info'] += 1;
   return { findings, summary, checkedCodes: codes, checkedDiagnoses: diagnoses };

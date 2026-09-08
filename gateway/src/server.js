@@ -388,6 +388,43 @@ app.use('/api/auth', authEdgeLimiter);
 // then stall waiting for the backend to re-negotiate a 100-continue for a body we've
 // already consumed — hanging every POST/PUT/PATCH. Strip it before proxying.
 const stripHopHeaders = (req, _res, next) => { delete req.headers.expect; next(); };
+// Fax.Plus (Svix) INBOUND WEBHOOK — must reach the backend BYTE-EXACT. Its authenticity is an HMAC-SHA256
+// signature computed over the raw request body; the main /api chain parses JSON and RE-SERIALIZES it
+// (JSON.stringify), which changes the bytes and would make every signature fail. So this one path captures
+// the body as a raw Buffer and forwards it unaltered (with the original Content-Type + the svix-* headers
+// http-proxy copies through). It still gets the edge rate-limit + the trusted-gateway internal key; the
+// backend verifies the Svix signature and rejects anything unsigned/invalid (401) before processing — so a
+// raw passthrough here is safe (mirrors how multipart uploads bypass the JSON parser). Declared BEFORE the
+// '/api' chain so it wins for this exact path+method.
+const rawWebhookParser = express.raw({ type: '*/*', limit: '2mb' });
+// Keep the RAW body for byte-exact forwarding, but ALSO expose its text to the WAF so the webhook is
+// signature-scanned in real time like every other request. We stash the Buffer and hand the WAF a plain
+// object holding the body text (collectScannable walks it); the proxy forwards the stashed Buffer.
+const webhookWafPrep = (req, _res, next) => {
+  req._rawWebhook = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+  let text = ''; try { text = req._rawWebhook.toString('utf8'); } catch { text = ''; }
+  req.body = { webhook: text.slice(0, 200000) }; // scannable by the WAF; never forwarded
+  next();
+};
+const faxWebhookProxy = createProxyMiddleware({
+  target: INTERNAL_API_URL, changeOrigin: false, xfwd: true, proxyTimeout: 60000, timeout: 60000,
+  pathRewrite: (_p, req) => req.originalUrl,
+  on: {
+    proxyReq: (proxyReq, req) => {
+      proxyReq.removeHeader('x-internal-api-key');
+      if (currentInternalKey) proxyReq.setHeader('x-internal-api-key', currentInternalKey);
+      const buf = Buffer.isBuffer(req._rawWebhook) ? req._rawWebhook : Buffer.alloc(0);
+      proxyReq.setHeader('Content-Length', buf.length);
+      proxyReq.end(buf); // forward the EXACT bytes the client sent — no re-serialization (Svix signature stays valid)
+    },
+    error: (err, req, res) => {
+      logger.error({ err: err.message, url: req.originalUrl }, 'fax webhook proxy error');
+      if (res && !res.headersSent && typeof res.status === 'function') res.status(502).json({ error: 'Upstream API unavailable.', code: 'BAD_GATEWAY' });
+    },
+  },
+});
+app.post('/api/fax/webhook', edgeLimiter, stripHopHeaders, enforceBodyContentType, rawWebhookParser, webhookWafPrep, waf, faxWebhookProxy);
+
 app.use(
   '/api',
   edgeLimiter,

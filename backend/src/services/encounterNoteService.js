@@ -100,9 +100,52 @@ const ATTESTATION_STATEMENTS = {
   hospice: 'I am the patient’s designated attending physician (not employed by the hospice) and personally performed this visit on the date of service.',
   telehealth: 'This evaluation and management service was furnished via telehealth as attested; the billing team applies the telehealth modifier and place of service.',
   custom: 'I personally performed and reviewed this service on the date of service.',
+
+  // ---- Florida Personal Injury (PIP/BI) — service-specific attestations (CMS/E-M + Fla. Stat.) ----
+  pi_initial: 'I personally performed this initial evaluation of the injured patient on the date of service, and the findings, diagnoses, and causation opinion documented here are my own.',
+  pi_soap: 'I personally performed the substantive portion of this evaluation and management service on the date of service.',
+  pi_reexam: 'I personally performed this re-examination and reassessment on the date of service.',
+  pi_emc: 'I am a provider qualified under Fla. Stat. §627.732 to render this determination, and I personally made the emergency-medical-condition determination documented here based on my evaluation and the records reviewed.',
+  pi_mri: 'I personally reviewed the clinical findings and ordered the advanced imaging documented here, which I certify is medically necessary.',
+  pi_narrative: 'The opinions in this narrative report are my own, held within a reasonable degree of medical probability, based on my personal evaluation of the patient and the records identified as reviewed.',
+  pi_procedure: 'I personally performed the interventional procedure documented here on the date of service.',
+  pi_imaging: 'I personally reviewed the imaging results and clinically correlated them to the patient’s presentation as documented on the date of service.',
+  pi_workstatus: 'I personally examined the patient and certify the work status and restrictions documented here on the date of service.',
+  pi_gap: 'I personally reviewed and documented the patient’s gap in care and the related counseling on the date of service.',
+  pi_referral: 'I personally reviewed the clinical need for, and authorized, the referral/consultation documented here on the date of service.',
+  pi_vob: 'I attest that the personal-injury benefits verification documented here was performed and recorded accurately.',
+
+  // ---- Pain Management — service-specific attestations (CMS E/M, opioid stewardship, LCD) ----
+  pain_initial: 'I personally performed this initial pain evaluation and management service on the date of service.',
+  pain_followup: 'I personally performed the substantive portion of this evaluation and management service on the date of service.',
+  pain_controlled: 'I personally performed this controlled-substance management service, personally reviewed the PDMP, and take full responsibility for the prescribing decisions documented here.',
+  pain_procedure: 'I personally performed the interventional procedure documented here on the date of service.',
+  pain_udt: 'I personally ordered and reviewed the drug testing documented here and acted on the results as medically necessary.',
+  pain_reeval: 'I personally performed this periodic re-evaluation on the date of service.',
+  pain_postproc: 'I personally performed this post-procedure evaluation on the date of service.',
+  pain_telehealth: 'This evaluation and management service was furnished via telehealth as attested; the billing team applies the telehealth modifier and place of service.',
+  pain_scs: 'I personally performed the neurostimulator trial/service documented here on the date of service.',
+  pain_telephone: 'I personally conducted and documented this telephone/portal encounter with the patient on the date of service.',
+  pain_replyletter: 'I personally performed the consultation and authored the findings and recommendations communicated in this letter.',
+  pain_incidentto: 'This service was furnished incident-to my professional services: an established patient with an established plan of care, no new problem addressed at this visit, with me present in the office suite and immediately available throughout the service.',
+  pain_abn: 'I attest that the Advance Beneficiary Notice documented here was delivered in advance and completed as recorded.',
+  pain_priorauth: 'I personally reviewed the clinical record and authored the medical-necessity determination communicated in this letter.',
+  pain_taper: 'I personally performed this evaluation and authored the individualized opioid taper plan documented here on the date of service.',
+  pain_dme: 'I personally performed the face-to-face encounter and issued the standard written order for the item documented here, which I certify is medically necessary.',
+  pain_discharge: 'I personally performed this discharge / care-transition evaluation on the date of service.',
 };
-// The initial comprehensive visit (H&P) must be physician-performed — never framed as split/shared.
-const SPLIT_SHARED_TYPES = new Set(['soap', 'progress', 'discharge', 'acuteChange', 'acp', 'hospice', 'telehealth', 'custom']);
+// Note types eligible to be documented as split/shared or collaborative when a non-physician
+// practitioner performs the service and a physician finalizes it. E/M visit types qualify; the
+// initial comprehensive SNF visit (H&P), interventional PROCEDURES, and physician-only
+// determinations/opinions/orders (EMC, narrative/permanency, work-status certification, imaging
+// orders, prior-auth/medical-necessity, opioid taper authorship) are physician-performed and are
+// NEVER framed as split/shared. `pain_incidentto` carries its own incident-to attestation.
+const SPLIT_SHARED_TYPES = new Set([
+  'soap', 'progress', 'discharge', 'acuteChange', 'acp', 'hospice', 'telehealth', 'custom',
+  'pi_initial', 'pi_soap', 'pi_reexam', 'pi_imaging', 'pi_gap', 'pi_referral',
+  'pain_initial', 'pain_followup', 'pain_controlled', 'pain_udt', 'pain_reeval',
+  'pain_postproc', 'pain_telehealth', 'pain_telephone', 'pain_discharge', 'pain_abn', 'pain_dme',
+]);
 
 export function buildSignedAttestation({ noteType, signerName, signerCreds, rendering }) {
   const base = ATTESTATION_STATEMENTS[noteType] || ATTESTATION_STATEMENTS.custom;
@@ -187,6 +230,41 @@ export async function getNote(noteUuid, providerId) {
     signedByName: r.signed_by_name, signedAt: r.signed_at,
     isOwner: !!Number(r.is_owner),
   };
+}
+
+/**
+ * DELETE a clinical note — gated by the Access Control "Delete Notes" permission (enforced at the route).
+ * ENTERPRISE / COMPLIANCE RULE: only a DRAFT (unsigned) note may be deleted. A SIGNED or AMENDED note is
+ * part of the finalized medico-legal record and can NEVER be deleted — it returns a clear error (amend
+ * instead). Access is the same owner / facility-wide-MD scope as reading; a note outside scope is 404 (no
+ * cross-provider deletion). The removal is audit-logged. No fallback, no soft-hide — a draft is removed
+ * for real (its captured codes are removed first so nothing is orphaned).
+ * @returns {{ ok:true } | { notFound:true }}  — throws NOTE_SIGNED (409) for a signed/amended note.
+ */
+export async function deleteNote(noteUuid, providerId) {
+  const scope = await viewerScope(providerId);
+  const params = { u: noteUuid };
+  const access = noteAccess(scope, providerId, params);
+  const [rows] = await execute(
+    `SELECT n.id, n.status, n.note_type FROM encounter_notes n
+       JOIN encounters e ON e.id = n.encounter_id
+       LEFT JOIN patients p ON p.id = e.patient_id
+      WHERE n.uuid = :u AND ${access} LIMIT 1`,
+    params,
+  );
+  const r = rows[0];
+  if (!r) return { notFound: true };
+  if (r.status !== 'draft') {
+    const e = new Error('Signed notes cannot be deleted. Amend the note instead to correct the record.');
+    e.status = 409; e.code = 'NOTE_SIGNED'; throw e;
+  }
+  // Remove captured codes first (no FK orphan), then the draft note itself. Re-check status = 'draft' in
+  // the DELETE so a concurrent sign can never race a delete of a now-signed note. No fallback.
+  await execute('DELETE FROM encounter_note_codes WHERE note_id = :id', { id: r.id });
+  const [del] = await execute("DELETE FROM encounter_notes WHERE id = :id AND status = 'draft'", { id: r.id });
+  if (!del.affectedRows) { const e = new Error('Signed notes cannot be deleted.'); e.status = 409; e.code = 'NOTE_SIGNED'; throw e; }
+  logger.info({ noteUuid, providerId }, 'Draft clinical note deleted');
+  return { ok: true, noteType: r.note_type };
 }
 
 // ---- Billable codes captured on a note (diagnoses + procedures) --------------------------------

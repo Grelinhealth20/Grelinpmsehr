@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { execute } from '../db/pool.js';
-import { decrypt } from '../utils/crypto.js';
+import { decrypt, encrypt } from '../utils/crypto.js';
+import { logger } from '../config/logger.js';
 import { normalizeState, extractStateFromText } from './payerDirectoryService.js';
 import { s3Enabled, uploadFacilityLogo, getObjectBytes, deleteObject } from './s3Service.js';
 
@@ -268,7 +269,12 @@ export async function assignProvider(facilityUuid, providerUuid, adminId) {
     { pid: providerId, fid: facilityId, aid: adminId || null },
   );
   invalidateFacilityIds(providerId); // assignment changed → refresh access scope now
-  return { ok: true };
+  // Real-time auto-heal: link any of this provider's UNLINKED patients/referrals to their primary facility
+  // so gaining facility-wide MD scope never hides their own previously-unlinked records.
+  let healed = { patients: 0, referrals: 0 };
+  try { healed = await healProviderNullFacilities(providerId); if (healed.patients || healed.referrals) logger.info({ providerId, ...healed }, 'assignProvider: auto-linked unlinked records to primary facility'); }
+  catch (e) { logger.error({ err: e.message, providerId }, 'assignProvider: auto-heal failed (assignment still applied)'); }
+  return { ok: true, healed };
 }
 
 export async function unassignProvider(facilityUuid, providerUuid) {
@@ -314,7 +320,7 @@ export async function providerFacilityIds(providerId) {
   const [rows] = await execute(`SELECT facility_id FROM provider_facilities WHERE provider_id = :pid`, { pid: providerId });
   const ids = rows.map((r) => Number(r.facility_id));
   facIdsCache.set(key, { ids, exp: now + FAC_IDS_TTL_MS });
-  if (facIdsCache.size > 5000) facIdsCache.delete(facIdsCache.keys().next().value);
+  if (facIdsCache.size > 50000) facIdsCache.delete(facIdsCache.keys().next().value); // headroom well beyond 5000 providers — no thrash at scale
   return ids.slice();
 }
 
@@ -340,6 +346,42 @@ export async function providerPrimaryFacility(providerId) {
     || extractStateFromText([r.address, r.city, r.zip].filter(Boolean).join(' '))
     || null;
   return { npi: r.npi || null, name: r.name || null, state };
+}
+
+/**
+ * The provider's PRIMARY assigned facility's INTERNAL id (first ACTIVE by name), or null. The single
+ * source of truth used to auto-link a new patient / referral to a real facility (shared by patientService
+ * and referralService) — deterministic (active-only, name-ordered), never an inactive or arbitrary pick.
+ */
+export async function providerPrimaryFacilityId(providerId) {
+  const [rows] = await execute(
+    `SELECT f.id FROM facilities f JOIN provider_facilities pf ON pf.facility_id = f.id
+      WHERE pf.provider_id = :pid AND f.status = 'active' ORDER BY f.name ASC LIMIT 1`,
+    { pid: providerId },
+  );
+  return rows[0]?.id ? Number(rows[0].id) : null;
+}
+
+/**
+ * AUTO-HEAL every UNLINKED (facility_id IS NULL) patient and referral OWNED by this provider by linking
+ * them to the provider's primary active facility. Called right after a facility assignment so a provider
+ * who gains facility-wide MD scope never loses sight of their own previously-unlinked records (the exact
+ * stranding that pure facility-scoped access would otherwise cause). Never overwrites an existing link;
+ * sets the encrypted facility snapshot on patients only when absent. No-op when the provider has no
+ * active facility. Returns how many rows were healed.
+ */
+export async function healProviderNullFacilities(providerId) {
+  const fid = await providerPrimaryFacilityId(providerId);
+  if (!fid) return { patients: 0, referrals: 0, facilityId: null };
+  const [frows] = await execute('SELECT uuid, name FROM facilities WHERE id = :id LIMIT 1', { id: fid });
+  const snap = frows[0] ? encrypt(JSON.stringify({ facilityUuid: frows[0].uuid, facilityName: frows[0].name })) : null;
+  const [p] = await execute(
+    'UPDATE patients SET facility_id = :fid, facility_enc = COALESCE(facility_enc, :snap) WHERE provider_id = :pid AND facility_id IS NULL',
+    { fid, snap, pid: providerId });
+  const [r] = await execute(
+    'UPDATE referrals SET facility_id = :fid WHERE provider_id = :pid AND facility_id IS NULL',
+    { fid, pid: providerId });
+  return { patients: p.affectedRows || 0, referrals: r.affectedRows || 0, facilityId: fid };
 }
 
 /**

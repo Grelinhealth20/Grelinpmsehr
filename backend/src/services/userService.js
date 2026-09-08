@@ -4,6 +4,27 @@ import { encrypt, decrypt, blindIndex } from '../utils/crypto.js';
 import { config } from '../config/env.js';
 import { invalidateServiceLines, invalidateCredentials } from './accessScope.js';
 
+// --- Name-search tokens (prefix blind indexes) — enables SERVER-SIDE paginated search over the users
+//     table without decrypting names. Mirrors patient name tokens; names stay AES-GCM encrypted. ----------
+const MAX_PREFIX = 12;
+export function userNameTokens(fullName) {
+  const set = new Set();
+  for (const part of String(fullName || '').toLowerCase().split(/[\s\-]+/)) {
+    const w = part.replace(/[^a-z0-9]/g, '');
+    if (!w) continue;
+    for (let n = 1; n <= Math.min(w.length, MAX_PREFIX); n += 1) set.add(w.slice(0, n));
+  }
+  return [...set].map((t) => blindIndex(t));
+}
+export async function syncUserNameTokens(userId, fullName) {
+  const tokens = userNameTokens(fullName);
+  await execute('DELETE FROM user_name_tokens WHERE user_id = :uid', { uid: userId });
+  if (!tokens.length) return;
+  const params = { uid: userId };
+  const values = tokens.map((t, i) => { params[`t${i}`] = t; return `(:uid, :t${i})`; }).join(', ');
+  await execute(`INSERT IGNORE INTO user_name_tokens (user_id, token_bidx) VALUES ${values}`, params);
+}
+
 /** Map a raw DB row to a safe, decrypted DTO (never leaks the password hash). */
 export function toPublicUser(row) {
   if (!row) return null;
@@ -174,23 +195,65 @@ export async function createUser({
   // specialtyId when the caller used the legacy field, so both paths populate the join table.
   const assign = specialtyIds !== undefined ? specialtyIds : (specialtyId ? [specialtyId] : []);
   if (assign.length) await setUserSpecialties(ins.insertId, assign);
+  await syncUserNameTokens(ins.insertId, fullName); // index the name for server-side paginated search
   return findRawByUuid(uuid);
 }
 
-export async function listUsers({ role = null, status = null } = {}) {
+/**
+ * SERVER-SIDE paginated users list → `{ users, total, page, pageSize }`. Search `q` matches the encrypted
+ * name via the name-token blind index (each typed word is a prefix-hash EXISTS — no decrypt, no full scan)
+ * OR an exact email match. Role/status filters are index-backed. COUNT(*) OVER() returns the full-set total
+ * in the same round-trip as the page. Constant per-page cost at thousands of users (no full-table load).
+ */
+const ROLE_SET = new Set(['master_admin', 'super_admin', 'billing', 'provider']);
+export async function listUsers({ role = null, roles = null, status = null, q = '', page = 1, pageSize = 25 } = {}) {
   const clauses = [];
   const params = {};
-  if (role) {
-    clauses.push('u.role = :role');
-    params.role = role;
-  }
-  if (status) {
-    clauses.push('u.status = :status');
-    params.status = status;
+  // Accept a single role OR a set of roles (a Super-Admin tab spans super_admin + master_admin). Only
+  // known enum values are used (never interpolate raw input) → index-backed `role IN (...)`.
+  const roleList = (Array.isArray(roles) ? roles : (typeof roles === 'string' ? roles.split(',') : [])).map((r) => String(r).trim()).filter((r) => ROLE_SET.has(r));
+  if (roleList.length) {
+    const ph = roleList.map((r, i) => { params[`role${i}`] = r; return `:role${i}`; }).join(',');
+    clauses.push(`u.role IN (${ph})`);
+  } else if (role && ROLE_SET.has(role)) { clauses.push('u.role = :role'); params.role = role; }
+  if (status) { clauses.push('u.status = :status'); params.status = status; }
+  const needle = String(q || '').trim();
+  if (needle) {
+    const words = needle.toLowerCase().split(/[\s-]+/).map((w) => w.replace(/[^a-z0-9]/g, '')).filter(Boolean);
+    const nameConds = words.map((w, i) => { params[`nt${i}`] = blindIndex(w); return `EXISTS (SELECT 1 FROM user_name_tokens t WHERE t.user_id = u.id AND t.token_bidx = :nt${i})`; });
+    const nameClause = nameConds.length ? `(${nameConds.join(' AND ')})` : '0';
+    // Also match an exact email (email is encrypted; only an exact blind-index lookup is possible).
+    params.emailBidx = blindIndex(needle);
+    clauses.push(`(${nameClause} OR u.email_bidx = :emailBidx)`);
   }
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  const [rows] = await execute(`${USER_SELECT} ${where} ORDER BY u.created_at DESC`, params);
-  return rows.map(toPublicUser);
+  const lim = Math.max(1, Math.min(100, Math.floor(Number(pageSize)) || 25));
+  const pg = Math.max(1, Math.floor(Number(page)) || 1);
+  const off = (pg - 1) * lim;
+  // Page + total in parallel (one effective round-trip). USER_SELECT is a full SELECT…FROM, so the count
+  // is a separate query over the same alias/predicate rather than a COUNT(*) OVER() column.
+  const [[rows], [cnt]] = await Promise.all([
+    execute(`${USER_SELECT} ${where} ORDER BY u.created_at DESC, u.id DESC LIMIT ${lim} OFFSET ${off}`, params),
+    execute(`SELECT COUNT(*) AS total FROM users u ${where}`, params),
+  ]);
+  return { users: rows.map(toPublicUser), total: Number(cnt[0].total), page: pg, pageSize: lim };
+}
+
+/**
+ * Aggregate user counts by role AND status in ONE query — powers the Super Admin tab badges + the
+ * active/restricted/disabled stat cards without loading the full user list (constant cost at any scale).
+ * Returns { byRole: {role: n}, byRoleStatus: {role: {status: n}}, total }.
+ */
+export async function userCounts() {
+  const [rows] = await execute('SELECT role, status, COUNT(*) AS n FROM users GROUP BY role, status');
+  const byRole = {}; const byRoleStatus = {}; let total = 0;
+  for (const r of rows) {
+    const n = Number(r.n);
+    byRole[r.role] = (byRole[r.role] || 0) + n;
+    (byRoleStatus[r.role] ||= {})[r.status] = n;
+    total += n;
+  }
+  return { byRole, byRoleStatus, total };
 }
 
 /**
@@ -269,6 +332,8 @@ export async function updateUserProfile(uuid, { fullName, role, accessLevel, cre
   // Credentials drive the viewer's MD/read-scope flag (cached) — refresh it immediately when changed
   // so an access-scope change never lags behind an admin edit.
   if (credentials !== undefined) { const uid = await userIdByUuid(uuid); if (uid != null) invalidateCredentials(uid); }
+  // Re-index the name for server-side search whenever it changed (keeps the token index accurate).
+  if (fullName !== undefined) { const uid = await userIdByUuid(uuid); if (uid != null) await syncUserNameTokens(uid, fullName); }
   return findRawByUuid(uuid);
 }
 

@@ -29,6 +29,7 @@ export function serviceForSpecialty(specialtyName) {
   const n = String(specialtyName || '');
   if (/\bpain\b/i.test(n)) return 'pain';
   if (/\btcm\b|transitional care/i.test(n)) return 'tcm';
+  if (/\bpi\b|\bpip\b|\bbi\b|personal injury|bodily injury|\bmva\b|auto accident/i.test(n)) return 'pi';
   return 'snf';
 }
 
@@ -42,9 +43,11 @@ export async function providerServiceLine(providerId) {
 // Re-export the authoritative multi-line resolver so callers have one template API surface.
 export { providerServiceLines };
 
-/** The service line a note type belongs to (null if unknown). */
+/** The service line a note type belongs to. Prefix-authoritative (pi_/pain_/tcm_ → that line;
+ *  anything else → SNF, the residual), consistent with the access-scope note predicate so a
+ *  provider's create/edit gate and their read scope agree exactly. */
 export function serviceForNoteType(noteType) {
-  return SERVICE_BY_TYPE.get(noteType) || null;
+  return lineForNoteType(noteType);
 }
 
 /** True iff this provider may create/edit a note of this type — i.e. the note type's
@@ -82,8 +85,8 @@ const SEC_GROUP = {
 };
 // A section is FREE-FORM by default; `checks` adds a set of discrete clinical checkboxes ABOVE the text
 // area (the provider ticks what applies and can still type detail). Every key is explicitly grouped above.
-const sec = (key, label, prompt = '', rows = 3, checks = null) => ({
-  key, label, prompt, rows, group: SEC_GROUP[key] || 'subjective', ...(checks ? { checks } : {}),
+const sec = (key, label, prompt = '', rows = 3, checks = null, group = null) => ({
+  key, label, prompt, rows, group: group || SEC_GROUP[key] || 'subjective', ...(checks ? { checks } : {}),
 });
 export const NOTE_TYPE_TEMPLATES = [
   {
@@ -232,9 +235,401 @@ export const NOTE_TYPE_TEMPLATES = [
     ],
   },
 ];
-/** Fresh, immutable copies of the note-type templates (no shared reference). */
-export function listNoteTypeTemplates() {
-  return NOTE_TYPE_TEMPLATES.map((t) => ({ ...t, sections: t.sections.map((s) => ({ ...s, ...(s.checks ? { checks: [...s.checks] } : {}) })) }));
+
+// ================= FLORIDA PERSONAL INJURY (PIP / BI) — service line 'pi' =========================
+// Free-form section templates modeled on the SNF pattern; note types are prefixed `pi_` so the
+// access-scope service-line filter (accessScope.lineNotePredicate) isolates them exactly like pain/tcm.
+// Checkbox sets are the EXACT options from the source documents (no fabricated fields).
+const O = 'objective', S = 'subjective', A = 'ap';
+export const PI_NOTE_TEMPLATES = [
+  {
+    noteType: 'pi_initial', label: 'Initial Exam (MVA/PIP)', category: 'Initial Examination — Motor Vehicle Accident (Florida PIP · §627.736)', serviceLine: 'pi',
+    sections: [
+      sec('piInsurance', 'Patient, Visit & Insurance Details', 'Patient/DOB/sex/MRN; date & time of service; date of accident and days since; PIP carrier, claim #, policy #, adjuster; Med-Pay; attorney/firm; LOP on file; referral source and whether referred by attorney under LOP; health coverage at time of treatment; rendering & supervising provider.', 4, null, S),
+      sec('piFirstVisitChecklist', 'First-Visit Compliance Checklist', 'Complete BEFORE the patient leaves — Florida PIP prerequisites (§627.736).', 3,
+        ['Initial care within 14 days of the accident (§627.736(1)(a)) — else document first-care date & reason', 'Standard Disclosure & Acknowledgment (OIR-B1-1571) signed by patient & provider, copy retained', 'Assignment of Benefits (AOB) executed and retained', 'Photo ID + auto insurance card copied to chart', 'Crash report / exchange-of-information obtained or requested', 'EMC determination status addressed (Section: EMC)', 'Patient advised massage therapy & acupuncture are not PIP-reimbursable (§627.736(1)(a)5.)', 'If LOP: attorney-referral source & health-coverage status captured (§768.0427)'], S),
+      sec('piMechanism', 'Mechanism of Injury', 'How the accident happened — date/time, location, patient role, vehicle type, impact direction, speed, seatbelt, airbag, head strike, loss of consciousness, body position, vehicle damage, towed, EMS/ER, police report #.', 4, null, S),
+      sec('piComplaints', 'Complaints Today', 'What hurts now — each region with onset relative to the crash, severity (0–10), quality, radiation, aggravating/relieving factors, and effect on function/sleep.', 4, null, S),
+      sec('piPrior', 'Prior Injuries & Conditions', 'Anything before this accident affecting the same regions — prior injuries, treatment, baseline status; degenerative/pre-existing conditions relevant to causation and apportionment.', 3, null, S),
+      sec('piHistoryROS', 'Medical History & Review of Systems', 'PMH/PSH, medications, allergies, social history; pertinent review of systems (positives first).', 3, null, S),
+      sec('piExam', 'Examination', 'Objective findings by region — inspection, palpation, ROM (with degrees), orthopedic/neurologic tests, motor/sensory/reflex, gait; documented deficits that support the diagnoses.', 4, null, O),
+      sec('piImaging', 'Imaging & Tests — Reviewed and Ordered', 'Studies reviewed today (modality, date, facility, result) and studies ordered today with the clinical indication.', 3, null, O),
+      sec('piDiagnoses', 'Diagnoses & Clinical Reasoning', 'Working diagnoses (ICD-10) with the reasoning linking exam/imaging findings to each; identify the pain generator(s).', 4, null, A),
+      sec('piEmc', 'Emergency Medical Condition (EMC)', 'EMC determined, referred, or pending. If determined here, state the basis and conclusion.', 3,
+        ['EMC determined at this visit', 'Referred for EMC determination', 'EMC pending — to be addressed'], A),
+      sec('piCausation', 'Causation Opinion', 'Within a reasonable degree of medical probability, whether the accident caused the injuries; address aggravation of any pre-existing condition and apportionment.', 3, null, A),
+      sec('piPlanWork', 'Treatment Plan & Work Status', 'Multimodal plan (frequency/duration), referrals, procedures, re-exam interval; work status and any restrictions.', 4, null, A),
+      sec('piPrognosis', 'Prognosis & Patient Education', 'Expected course; what you explained to the patient (activity, home care, follow-up, return precautions).', 3, null, A),
+      sec('piAttest', 'Sign & Attest', '"I personally performed this initial evaluation on the date of service." Credentials (MD/DO) and NPI; electronic signature and date captured automatically.', 2, null, A),
+    ],
+  },
+  {
+    noteType: 'pi_soap', label: 'Daily Treatment (SOAP)', category: 'Daily Treatment SOAP Note — Personal Injury', serviceLine: 'pi',
+    sections: [
+      sec('piVisit', 'Visit Details', 'Date/time in–out, provider, treating diagnoses addressed today, visit number in the plan of care.', 2, null, S),
+      sec('piSubjective', 'Subjective — Reported Today', 'Interval change since last visit — pain levels, functional change, new complaints, adherence to home program.', 3, null, S),
+      sec('piObjective', 'Objective — Found Today', 'Exam/measures today; regions treated; objective response to prior treatment.', 3, null, O),
+      sec('piServicesTimed', 'Services Rendered (record times for timed services)', 'Each service/modality with CPT and START/STOP or total minutes for timed codes; supervision as required.', 3, null, A),
+      sec('piAssessment', 'Assessment — Progressing?', 'Is the patient progressing toward goals? Objective evidence; barriers.', 3, null, A),
+      sec('piPlan', 'Plan — Next Steps', 'Continue/modify plan, next visit, any new orders or referrals; re-exam due.', 3, null, A),
+    ],
+  },
+  {
+    noteType: 'pi_reexam', label: 'Re-Examination / Progress', category: 'Re-Examination & Progress Evaluation — Personal Injury', serviceLine: 'pi',
+    sections: [
+      sec('piVisit', 'Visit Details', 'Date, provider, period covered since the last formal exam.', 2, null, S),
+      sec('piInterval', 'Interval Report & Gaps in Care', 'Patient report since the last exam; document any gap in care with the reason.', 3, null, S),
+      sec('piThenVsNow', 'Then vs. Now — Objective Comparison', 'Side-by-side objective comparison (ROM, strength, neuro, functional tests) versus baseline.', 4, null, O),
+      sec('piOutcomeScores', 'Outcome Questionnaire Scores', 'Validated outcome measures (ODI / NDI / VAS / PSFS) with dates and change from baseline.', 2, null, O),
+      sec('piUpdatedDx', 'Updated Diagnoses & Need for Continued Care', 'Updated diagnoses and the medical necessity rationale for continued treatment.', 3, null, A),
+      sec('piUpdatedPlan', 'Updated Plan & Work Status', 'Revised plan, frequency/duration, work status/restrictions, next re-exam.', 3, null, A),
+    ],
+  },
+  {
+    noteType: 'pi_emc', label: 'EMC Determination', category: 'Emergency Medical Condition Determination (Florida PIP · §627.732/627.736)', serviceLine: 'pi',
+    sections: [
+      sec('piClaim', 'Patient & Claim Details', 'Patient, date of accident, PIP carrier, claim #, date of this determination.', 2, null, S),
+      sec('piEmcDeterminer', 'Who Is Making This Determination? (check one — required)', 'Only a qualified provider type may render an EMC determination under Florida law.', 2,
+        ['Physician, M.D. (Ch. 458)', 'Osteopathic Physician, D.O. (Ch. 459)', 'Dentist (Ch. 466)', 'Physician Assistant (Ch. 458/459)', 'Advanced Practice Registered Nurse (Ch. 464)'], S),
+      sec('piEmcBasis', 'Basis of the Determination', 'What the determination rests on.', 2,
+        ['In-person history and examination performed this date', 'Determination based on examination plus review of the records identified'], O),
+      sec('piEmcDetermination', 'Determination — Is This an EMC?', 'State the conclusion. If EMC exists, check the qualifying criteria; if not, give the rationale below.', 3,
+        ['EMC EXISTS', 'Serious jeopardy to patient health', 'Serious impairment to bodily functions', 'Serious dysfunction of a body organ or part', 'EMC DOES NOT EXIST'], A),
+      sec('piEmcBenefits', 'What This Means for Benefits (billing team)', 'Effect on the PIP benefit level (EMC → up to $10,000; no EMC → up to $2,500). Note for the billing team.', 2, null, A),
+      sec('piAttest', 'Sign & Attest', 'Provider signature, credentials, NPI; electronic signature and date captured automatically.', 2, null, A),
+    ],
+  },
+  {
+    noteType: 'pi_mri', label: 'Advanced Imaging / MRI Necessity', category: 'Advanced Imaging (MRI) Referral & Medical Necessity', serviceLine: 'pi',
+    sections: [
+      sec('piClaim', 'Patient & Claim Details', 'Patient, accident date, carrier/claim #, ordering provider.', 2, null, S),
+      sec('piStudyOrdered', 'Study Ordered', 'Modality, body region/level, with or without contrast; laterality. Prior imaging of this region checked (none duplicative); MRI contraindications screened (implants, pacemaker, claustrophobia, renal function if contrast, pregnancy).', 3, null, O),
+      sec('piMriReasons', 'Clinical Reasons (check all that apply)', 'The findings that justify advanced imaging.', 3,
+        ['Radicular pain / paresthesia (dermatomal)', 'Objective neurologic deficit (motor/DTR/sensory)', 'Progressive neurologic deficit', 'Failed conservative care (weeks documented)', 'Persistent significant functional limitation', 'Suspected internal joint derangement', 'Suspected disc herniation with clinical correlation', 'Red flag: suspected fracture', 'Red flag: progressive weakness', 'Red flag: bowel/bladder change', 'Red flag: saddle anesthesia', 'Red flag: night pain / constitutional', 'Pre-procedural / surgical planning at specialist request'], A),
+      sec('piMriSupport', 'Findings, Failed Care & Expected Impact', 'Exam/imaging findings, the conservative care already tried (duration and response), and how the MRI result will change management.', 4, null, A),
+      sec('piAttest', 'Sign & Attest', 'Ordering provider signature, credentials, NPI; date captured automatically.', 2, null, A),
+    ],
+  },
+  {
+    noteType: 'pi_narrative', label: 'Final Narrative (MMI / LOP / BI)', category: 'Final Narrative — MMI, Discharge, LOP & Bodily-Injury Report', serviceLine: 'pi',
+    sections: [
+      sec('piReportDetails', 'Report Details', 'Patient, date of report, date of accident, claim/attorney reference.', 2, null, S),
+      sec('piQualifications', 'Your Qualifications', 'Your training, licensure, board status and experience relevant to this opinion.', 2, null, S),
+      sec('piRecordsReviewed', 'Records Reviewed', 'Every record relied on for this report (source and date).', 3, null, S),
+      sec('piAccidentPresentation', 'Accident & Initial Presentation', 'The accident and how the patient first presented for care.', 3, null, S),
+      sec('piImagingResults', 'Imaging & Test Results', 'Key imaging/test results with dates and relevance.', 3, null, O),
+      sec('piTreatmentProvided', 'Treatment Provided — Start to Finish', 'The full course of care chronologically, with response.', 4, null, A),
+      sec('piFinalExam', 'Final Examination — What Remains', 'Date and findings of the final exam; residual objective deficits.', 3, null, O),
+      sec('piFinalDx', 'Final Diagnoses & Status at Discharge', 'Final diagnoses and each one’s status at discharge.', 3, null, A),
+      sec('piMmi', 'Maximum Medical Improvement', 'MMI status.', 2,
+        ['Patient reached MMI on the date stated (no further significant recovery reasonably expected)', 'Patient discharged prior to MMI — reason stated below'], A),
+      sec('piImpairmentRating', 'Permanent Impairment Rating', 'Whole-person or regional impairment rating with the guide/edition used and the calculation.', 3, null, A),
+      sec('piPermanency', 'Permanency Opinion (check the categories that apply)', 'Within a reasonable degree of medical probability.', 3,
+        ['Significant & permanent loss of an important bodily function', 'Permanent injury (reasonable medical probability), other than scarring/disfigurement', 'Significant & permanent scarring or disfigurement', 'None of the above — no permanent injury within a reasonable degree of medical probability'], A),
+      sec('piCausation', 'Causation', 'Whether the accident caused the injuries within a reasonable degree of medical probability; aggravation/apportionment of any pre-existing condition.', 3, null, A),
+      sec('piFutureCare', 'Future Care & Estimated Cost', 'Anticipated future care and its estimated cost (for the demand package).', 3, null, A),
+      sec('piRestrictions', 'Restrictions', 'What the patient can and cannot do (permanent restrictions).', 3, null, A),
+      sec('piPrognosis', 'Prognosis', 'Long-term prognosis.', 2, null, A),
+      sec('piBillingSummary', 'Billing Summary (LOP accounting / demand)', 'Itemized summary for the LOP ledger / demand package (coding/billing team prepares the CPT/HCPCS-coded ledger).', 3, null, A),
+      sec('piLopDisclosure', 'LOP Litigation Disclosure Checklist (§768.0427)', 'Required disclosures where care was under a Letter of Protection.', 3,
+        ['Copy of the LOP (or equivalent payment-from-settlement arrangement) included', 'Itemized CPT/HCPCS-coded billing ledger included', 'Whether AR was sold to a factoring company / third party disclosed (name, amount, discount)', 'Patient health-coverage status at time of treatment documented (and identity if covered)', 'Whether patient was referred for treatment under the LOP, and referrer identity, documented', 'Billing team aware: paid past medical expenses limited to amounts actually paid'], A),
+      sec('piCertify', 'Sign & Certify', 'Certification of the opinions to a reasonable degree of medical probability; signature, credentials, NPI, date.', 2, null, A),
+    ],
+  },
+  {
+    noteType: 'pi_procedure', label: 'Interventional Pain Procedure', category: 'Interventional Pain Procedure Note — Personal Injury', serviceLine: 'pi',
+    sections: [
+      sec('piClaim', 'Patient, Visit & Claim Details', 'Patient, date of service, accident date, carrier/claim #, provider.', 2, null, S),
+      sec('piProcIndication', 'Indication', 'Why this procedure — diagnosis, failed conservative care, target level/joint, laterality.', 3, null, S),
+      sec('piConsentTimeout', 'Consent & Time-Out (before needle)', 'Informed consent obtained; pre-procedure time-out completed.', 2,
+        ['Informed consent obtained and documented', 'Time-out: correct patient, procedure, site/side, position confirmed'], A),
+      sec('piProcDetails', 'Procedure Details', 'What was done — technique, level(s)/target, guidance (fluoro/US), needle, medication/agent and dose, contrast, images.', 4, null, A),
+      sec('piProcResponse', 'Response & Complications', 'Immediate response (pain before/after), any complications, post-procedure neuro check.', 3, null, A),
+      sec('piAftercare', 'Aftercare & Next Steps', 'Post-procedure instructions, expected course, follow-up / response assessment plan.', 3, null, A),
+      sec('piAttest', 'Sign & Attest', 'Provider signature, credentials, NPI; date captured automatically.', 2, null, A),
+    ],
+  },
+  {
+    noteType: 'pi_imaging', label: 'Imaging Result Review', category: 'Imaging Result Review & Plan Update — Personal Injury', serviceLine: 'pi',
+    sections: [
+      sec('piStudyDetails', 'Patient & Study Details', 'Patient, study modality/region, date performed, facility, reading radiologist.', 2, null, S),
+      sec('piKeyFindings', 'Key Findings', 'The findings that matter clinically (your review, not just the filed report).', 3, null, O),
+      sec('piCorrelation', 'Clinical Correlation', 'Does the study match the exam and complaints? Correlate to the pain generator.', 3, null, A),
+      sec('piPlanUpdate', 'Plan Update', 'What changes as a result — treatment, referral, or procedure.', 3, null, A),
+      sec('piPatientNotified', 'Patient Notified', 'How/when the patient was informed of results and the plan.', 2, null, A),
+      sec('piAttest', 'Sign & Attest', 'Provider signature, credentials, NPI; date captured automatically.', 2, null, A),
+    ],
+  },
+  {
+    noteType: 'pi_workstatus', label: 'Work Status Certificate', category: 'Work Status Certificate — Personal Injury', serviceLine: 'pi',
+    sections: [
+      sec('piExamDetails', 'Patient & Examination Details', 'Patient, date examined, diagnoses, employer/occupation if known.', 2, null, S),
+      sec('piWorkStatus', 'Work Status (check one)', 'The certified work status and effective dates.', 2,
+        ['FULL DUTY (no restrictions) as of the date stated', 'MODIFIED / LIGHT DUTY for the dates stated, subject to the restrictions below', 'UNABLE TO WORK for the dates stated — clinical basis below'], A),
+      sec('piRestrictions', 'Restrictions (for modified duty)', 'Lifting limit; bending/twisting; standing/sitting tolerances with position-change intervals; climbing/driving; other specific restrictions.', 3, null, A),
+      sec('piBasis', 'Basis for Certification', 'Objective clinical basis for the work status and restrictions.', 2, null, A),
+      sec('piCertify', 'Sign & Certify', 'Provider signature, credentials, NPI, date.', 2, null, A),
+    ],
+  },
+  {
+    noteType: 'pi_gap', label: 'Missed Appt / Gap in Care', category: 'Missed Appointment & Gap-in-Care Note — Personal Injury', serviceLine: 'pi',
+    sections: [
+      sec('piClaim', 'Patient & Claim Details', 'Patient, accident date, carrier/claim #, plan of care.', 2, null, S),
+      sec('piMissedLog', 'Missed Appointment Log', 'Each missed/cancelled/no-show appointment with date and reason if known.', 3, null, S),
+      sec('piGapExplain', 'Gap in Care — Explanation', 'Explain the gap (patient factors, scheduling, external) so the record shows continuity was pursued.', 3, null, A),
+      sec('piComplianceCounsel', 'Compliance Counseling', 'What the patient was told about the importance of continued care and the risk of a care gap.', 2, null, A),
+      sec('piAttest', 'Sign & Attest', 'Provider signature, credentials, NPI, date.', 2, null, A),
+    ],
+  },
+  {
+    noteType: 'pi_referral', label: 'Referral / Consultation Request', category: 'Referral & Consultation Request — Personal Injury', serviceLine: 'pi',
+    sections: [
+      sec('piClaim', 'Patient & Claim Details', 'Patient, accident date, carrier/claim #, referring provider.', 2, null, S),
+      sec('piReferredTo', 'Referred To', 'Consultant/specialty, facility, contact/fax, NPI.', 2, null, S),
+      sec('piClinicalQuestion', 'Clinical Question & Summary', 'The specific question for the consultant and a concise clinical summary.', 3, null, A),
+      sec('piRecordsSent', 'Records Sent With This Referral', 'Which records/imaging accompany the referral.', 2, null, A),
+      sec('piLoopBack', 'Loop-Back (referring clinic use)', 'Consultant reply received / date; how findings were incorporated into the plan.', 2, null, A),
+      sec('piSendAttest', 'Sign & Send', 'Referring provider signature, credentials, NPI, date.', 2, null, A),
+    ],
+  },
+  {
+    noteType: 'pi_vob', label: 'PIP Benefits Verification (VOB)', category: 'PIP Benefits Verification / Verification of Benefits', serviceLine: 'pi',
+    sections: [
+      sec('piAccidentDetails', 'Patient & Accident Details', 'Patient, date of accident, state, vehicles/parties.', 2, null, S),
+      sec('piCoveragePriority', 'Whose Policy Pays? (coverage priority)', 'Determine the priority PIP policy — patient’s own, resident relative, owner/operator of the vehicle, etc.', 3, null, S),
+      sec('piVerificationCall', 'Verification Call / Portal Details', 'Carrier, phone/portal, reference #, representative, date/time of verification.', 2, null, O),
+      sec('piBenefitDetails', 'Benefit Details (get every item)', 'PIP limit, deductible, % payable, EMC status effect, exhausted amount to date, remaining benefits, coordination with Med-Pay/health.', 3, null, A),
+      sec('piClaimFlags', 'Claim-Status Flags (ask directly)', 'Any investigation, EUO requested, IME scheduled, denial/reduction, or benefits-exhausted flag.', 2, null, A),
+      sec('piOtherPayers', 'Other Payers (after/alongside PIP)', 'Med-Pay, health insurance, third-party/BI order of payment.', 2, null, A),
+      sec('piBiSnapshot', 'Third-Party / BI Snapshot (for the file)', 'At-fault carrier, BI limits if known, adjuster/claim # for the bodily-injury claim.', 2, null, A),
+      sec('piReVerification', 'Re-Verification Log', 'Subsequent re-verifications with dates (benefits change as care accrues).', 2, null, A),
+      sec('piVerifiedBy', 'Verified By', 'Staff who verified, signature/initials, date.', 2, null, A),
+    ],
+  },
+];
+
+// ================= PAIN MANAGEMENT — service line 'pain' ==========================================
+// Free-form section templates; note types prefixed `pain_` for the access-scope service-line filter.
+export const PAIN_NOTE_TEMPLATES = [
+  {
+    noteType: 'pain_initial', label: 'Initial Pain Consultation', category: 'Initial Pain Consultation — Comprehensive E/M', serviceLine: 'pain',
+    sections: [
+      sec('pnVisit', 'Patient & Visit Details', 'Patient, date/time, referral source, chief complaint.', 2, null, S),
+      sec('pnPainStory', 'The Pain Story', 'Onset, location(s), radiation, quality, severity (0–10), timing, aggravating/relieving factors, functional impact, sleep.', 4, null, S),
+      sec('pnPriorTx', 'Prior Treatment & Response', 'What has been tried (meds, PT, injections, surgery) and the response to each.', 3, null, S),
+      sec('pnBackground', 'Medical Background', 'PMH/PSH, medications, allergies, relevant social/family history, substance history.', 3, null, S),
+      sec('pnScreens', 'Screening Scores (mind & function)', 'Validated screens — pain/function (PEG, ODI/NDI), mood (PHQ/GAD), and any risk tools.', 2, null, O),
+      sec('pnOpioidRisk', 'Opioid Risk & PDMP', 'Opioid risk stratification (e.g., ORT/DIRE), PDMP checked (date/state/findings), prior UDT.', 3, null, O),
+      sec('pnExam', 'Examination', 'Focused musculoskeletal & neurologic exam — inspection, ROM, provocative tests, motor/sensory/reflex, gait.', 4, null, O),
+      sec('pnImaging', 'Imaging & Tests Reviewed', 'Studies reviewed with dates and pertinent findings.', 3, null, O),
+      sec('pnDiagnoses', 'Diagnoses & Pain Generators', 'Diagnoses (ICD-10) and the identified pain generator(s) with reasoning.', 3, null, A),
+      sec('pnPlan', 'Multimodal Plan', 'Multimodal plan — non-opioid meds, PT/rehab, interventional options, behavioral, referrals; goals and follow-up.', 4, null, A),
+      sec('pnEducation', 'Patient Education', 'What you told the patient — risks/benefits, expectations, self-management, safety.', 2, null, A),
+      sec('pnEmLevel', 'Visit Level Support (MDM or Time — 2021 E/M)', 'Support the E/M level by MDM (problems/data/risk) or total time on the date of service.', 2, null, A),
+      sec('pnAttest', 'Sign & Attest', 'Provider signature, credentials, NPI; date captured automatically.', 2, null, A),
+    ],
+  },
+  {
+    noteType: 'pain_followup', label: 'Follow-Up / Medication Mgmt', category: 'Follow-Up Medication Management — Pain', serviceLine: 'pain',
+    sections: [
+      sec('pnVisit', 'Visit Details', 'Date/time, interval since last visit, treating diagnoses.', 2, null, S),
+      sec('pnFiveAs', 'Since Last Visit — The Five A’s', 'Analgesia, Activities of daily living, Adverse effects, Aberrant behavior, Affect — with objective support.', 3, null, S),
+      sec('pnRefillSafety', 'Refill Safety Checks (before any prescription)', 'PDMP reviewed, UDT status, agreement adherence, MME calculation, concurrent benzodiazepine/CNS check.', 3, null, O),
+      sec('pnExam', 'Focused Examination', 'Focused exam pertinent to the pain complaint and therapy.', 3, null, O),
+      sec('pnAssessment', 'Assessment — Is the Plan Working?', 'Function/analgesia vs. goals; is current therapy justified.', 3, null, A),
+      sec('pnPlanRx', 'Plan & Prescriptions', 'Medication changes with rationale, dose/MME, quantity, monitoring; non-pharmacologic plan; follow-up.', 3, null, A),
+      sec('pnEmLevel', 'Visit Level Support (MDM or Time)', 'Support the E/M level by MDM or total time.', 2, null, A),
+      sec('pnAttest', 'Sign & Attest', 'Provider signature, credentials, NPI; date captured automatically.', 2, null, A),
+    ],
+  },
+  {
+    noteType: 'pain_controlled', label: 'Controlled Substance Management', category: 'Controlled Substance Management — Opioid Stewardship', serviceLine: 'pain',
+    sections: [
+      sec('pnPrescriber', 'Patient & Prescriber Details', 'Patient, prescriber, DEA context, date.', 2, null, S),
+      sec('pnRightTool', 'Is an Opioid the Right Tool?', 'Indication, prior non-opioid trials, expected benefit vs. risk, goals of therapy.', 3, null, S),
+      sec('pnRiskStrat', 'Risk Stratification', 'Risk tools, PDMP, history of misuse/SUD, mental health, concurrent sedatives.', 3, null, O),
+      sec('pnConsent', 'Informed Consent & Treatment Agreement', 'Consent and controlled-substance agreement signed; expectations, single-prescriber/pharmacy, UDT, refill rules.', 3, null, A),
+      sec('pnPdmp', 'PDMP Check', 'State, date checked, findings, discrepancies addressed.', 2, null, O),
+      sec('pnRx', 'The Prescription — Dose, MME & Safeguards', 'Drug, dose, quantity, MME/day, naloxone co-prescription, taper/limits, safeguards.', 3, null, A),
+      sec('pnMonitoring', 'Monitoring Plan (written down)', 'UDT schedule, PDMP cadence, visit interval, functional goals monitored.', 3, null, A),
+      sec('pnExit', 'Exit Criteria', 'Conditions that would trigger dose reduction, discontinuation, or referral.', 2, null, A),
+      sec('pnAttest', 'Sign & Attest', 'Provider signature, credentials, NPI; date captured automatically.', 2, null, A),
+    ],
+  },
+  {
+    noteType: 'pain_procedure', label: 'Interventional Procedure (LCD)', category: 'Interventional Procedure Note — LCD-Aligned', serviceLine: 'pain',
+    sections: [
+      sec('pnProcDetails', 'Patient & Procedure Details', 'Patient, date, procedure, target level(s)/joint, laterality, side.', 2, null, S),
+      sec('pnLcdCase', 'Why This Procedure — Build the LCD Case', 'Diagnosis, conservative care and duration, prior response, indications meeting the applicable LCD/coverage policy.', 4, null, A),
+      sec('pnConsentTimeout', 'Consent & Time-Out (before the needle)', 'Informed consent; time-out.', 2,
+        ['Informed consent obtained and documented', 'Time-out: correct patient, procedure, site/side, position confirmed'], A),
+      sec('pnDone', 'What Was Done', 'Technique, guidance (fluoro/US/CT), needle, medication/agent and dose, contrast, images, levels.', 4, null, A),
+      sec('pnResponse', 'How the Patient Did', 'Immediate response (pre/post pain scores), complications, post-procedure neuro check.', 3, null, A),
+      sec('pnNext', 'Counting & What Comes Next', 'Needle/sponge/instrument count if applicable; aftercare and follow-up/response assessment plan.', 3, null, A),
+      sec('pnAttest', 'Sign & Attest', 'Provider signature, credentials, NPI; date captured automatically.', 2, null, A),
+    ],
+  },
+  {
+    noteType: 'pain_udt', label: 'UDT Order & Review', category: 'Urine Drug Testing — Order & Result Review', serviceLine: 'pain',
+    sections: [
+      sec('pnTestDetails', 'Patient & Test Details', 'Patient, date, current controlled medications.', 2, null, S),
+      sec('pnUdtNecessity', 'Why This Test — Medical Necessity', 'Risk-based rationale for testing at this interval (baseline/random/for-cause).', 3, null, A),
+      sec('pnUdtOrdered', 'What You Ordered', 'Presumptive/definitive, specific analytes, and why.', 2, null, A),
+      sec('pnUdtResult', 'The Result — Reviewed, Not Filed', 'Result, expected vs. unexpected findings, consistency with the prescribed regimen.', 3, null, O),
+      sec('pnUdtAction', 'What You Did About It', 'Actions taken for any discrepancy (discussion, plan change, referral).', 3, null, A),
+      sec('pnAttest', 'Sign & Attest', 'Provider signature, credentials, NPI; date captured automatically.', 2, null, A),
+    ],
+  },
+  {
+    noteType: 'pain_reeval', label: 'Periodic Re-Evaluation', category: 'Periodic Re-Evaluation — Pain', serviceLine: 'pain',
+    sections: [
+      sec('pnVisit', 'Visit Details', 'Date, provider, period covered.', 2, null, S),
+      sec('pnLookBack', 'What the Last Period Delivered', 'Objective function/analgesia change over the period; adherence; adverse effects.', 3, null, S),
+      sec('pnStillEarning', 'Is Current Therapy Still Justified?', 'Benefit vs. risk of continuing current therapy; the hard question, answered with evidence.', 3, null, A),
+      sec('pnExam', 'Focused Examination', 'Focused re-exam.', 3, null, O),
+      sec('pnUpdatedDx', 'Updated Diagnoses', 'Updated problem list.', 2, null, A),
+      sec('pnPlanAhead', 'The Plan Ahead', 'Continue/modify/taper/refer; goals and monitoring for the next period.', 3, null, A),
+      sec('pnAttest', 'Sign & Attest', 'Provider signature, credentials, NPI; date captured automatically.', 2, null, A),
+    ],
+  },
+  {
+    noteType: 'pain_postproc', label: 'Post-Procedure Block Response', category: 'Post-Procedure / Block Response — Pain', serviceLine: 'pain',
+    sections: [
+      sec('pnVisit', 'Visit Details', 'Date, prior procedure and date, target.', 2, null, S),
+      sec('pnResponseNumbers', 'The Response Numbers', 'Pre/post pain scores, % relief, duration of relief, functional change (the numbers that drive coverage of a repeat/next step).', 3, null, O),
+      sec('pnInterval', 'Interval Status & Focused Exam', 'Interval report and focused exam since the procedure.', 3, null, O),
+      sec('pnAssessment', 'What It Means — Assessment', 'Interpretation of the response (diagnostic/therapeutic) and implications.', 3, null, A),
+      sec('pnPlan', 'Plan', 'Next step — repeat, escalate, refer, or change modality.', 3, null, A),
+      sec('pnAttest', 'Sign & Attest', 'Provider signature, credentials, NPI; date captured automatically.', 2, null, A),
+    ],
+  },
+  {
+    noteType: 'pain_telehealth', label: 'Telehealth Visit', category: 'Telehealth Visit Note — Pain', serviceLine: 'pain',
+    sections: [
+      sec('pnTechDetails', 'Visit & Technology Details', 'Date/time, patient location, provider location, platform/modality.', 2, null, S),
+      sec('pnTeleCompliance', 'Telehealth Compliance (check before you start)', 'Telehealth eligibility & consent for this encounter.', 2,
+        ['Patient consent to telehealth obtained', 'Patient identity and location confirmed', 'Real-time audio-video (or audio-only where permitted)'], S),
+      sec('pnVisitBody', 'The Visit — Same Standards as In-Person', 'History, observed exam within telehealth limits, and clinical decisions.', 4, null, O),
+      sec('pnAssessPlan', 'Assessment & Plan', 'Assessment and plan; any need for in-person follow-up.', 3, null, A),
+      sec('pnEmLevel', 'Visit Level Support (MDM or Time)', 'Support the E/M level by MDM or total time.', 2, null, A),
+      sec('pnAttest', 'Sign & Attest', '"This service was furnished via telehealth." Credentials, NPI; date captured automatically.', 2, null, A),
+    ],
+  },
+  {
+    noteType: 'pain_scs', label: 'SCS Trial & Outcome', category: 'Spinal Cord Stimulator Trial & Outcome', serviceLine: 'pain',
+    sections: [
+      sec('pnDeviceDetails', 'Patient & Device Details', 'Patient, date, device/system, indication.', 2, null, S),
+      sec('pnCandidacy', 'Candidacy (complete BEFORE the trial)', 'Diagnosis, failed conservative/interventional care, psychological evaluation clearance, absence of contraindications.', 3, null, A),
+      sec('pnTrial', 'The Trial — Placed & Programmed', 'Lead placement level(s), programming parameters, trial duration.', 3, null, A),
+      sec('pnOutcome', 'Outcome — The Numbers That Decide', '% pain relief, functional change, medication change, patient satisfaction — the criteria for permanent implant.', 3, null, O),
+      sec('pnCoordination', 'Plan & Coordination', 'Proceed to implant vs. not; coordination with surgeon/psych; next steps.', 3, null, A),
+      sec('pnAttest', 'Sign & Attest', 'Provider signature, credentials, NPI; date captured automatically.', 2, null, A),
+    ],
+  },
+  {
+    noteType: 'pain_telephone', label: 'Telephone / Portal Encounter', category: 'Telephone / Portal Encounter — Pain', serviceLine: 'pain',
+    sections: [
+      sec('pnContact', 'Contact Details', 'Date/time, who initiated, patient identity confirmed, duration.', 2, null, S),
+      sec('pnRequest', 'What Was Requested / Reported', 'The patient’s request or report.', 3, null, S),
+      sec('pnSafetyReview', 'Safety Review Before Any Action', 'PDMP/agreement/med-safety review before any medication action.', 2, null, O),
+      sec('pnDecision', 'Decision & Action', 'Decision, advice, any prescription/order, and follow-up.', 3, null, A),
+      sec('pnSignoff', 'Sign-Off', 'Provider signature, credentials, NPI; date captured automatically.', 2, null, A),
+    ],
+  },
+  {
+    noteType: 'pain_replyletter', label: 'Consultation Reply Letter', category: 'Consultation Reply Letter — Pain', serviceLine: 'pain',
+    sections: [
+      sec('pnRef', 'Reference Details', 'Referring provider, patient, date, reason for consult.', 2, null, S),
+      sec('pnLetter', 'The Letter', 'The consultation reply — findings, impression, recommendations, and plan communicated to the referrer.', 6, null, A),
+    ],
+  },
+  {
+    noteType: 'pain_incidentto', label: 'Incident-To Supervision Attestation', category: 'Incident-To Supervision Attestation', serviceLine: 'pain',
+    sections: [
+      sec('pnEncounter', 'Encounter Details', 'Patient, date, rendering staff, supervising physician.', 2, null, S),
+      sec('pnIncidentToTest', 'The Incident-To Test (every box, every time)', 'Incident-to requirements for this encounter.', 3,
+        ['Established patient with an established plan of care', 'No new problem addressed at this visit', 'Supervising physician present in the office suite and immediately available', 'Service integral to the physician’s plan and personally initiated by the physician'], A),
+      sec('pnAttestations', 'Attestations', 'Rendering-provider and supervising-physician attestations, credentials, NPIs, date.', 3, null, A),
+    ],
+  },
+  {
+    noteType: 'pain_abn', label: 'ABN Issuance Record', category: 'Advance Beneficiary Notice — Issuance Record', serviceLine: 'pain',
+    sections: [
+      sec('pnAbnService', 'Patient & Service Details', 'Patient, date, service/item that may be non-covered.', 2, null, S),
+      sec('pnAbnReason', 'Why Medicare May Not Pay (check the genuine reason)', 'The specific coverage reason.', 2,
+        ['Not medically necessary for this diagnosis/frequency', 'Experimental / investigational', 'Frequency limit exceeded', 'Other statutory non-coverage'], A),
+      sec('pnAbnDelivery', 'Proper Delivery (confirm each element)', 'ABN delivered correctly.', 2,
+        ['Delivered in advance, before the service', 'Reason and estimated cost stated', 'Patient chose an option and signed', 'Copy given to patient; original retained'], A),
+      sec('pnAbnBilling', 'Billing Instruction to Coding Team', 'Modifier guidance (GA/GX/GY/GZ) for the coding team.', 2, null, A),
+      sec('pnSignoff', 'Sign-Off', 'Staff/provider signature, date.', 2, null, A),
+    ],
+  },
+  {
+    noteType: 'pain_priorauth', label: 'Medical Necessity / Prior-Auth Letter', category: 'Medical Necessity / Prior-Authorization Letter', serviceLine: 'pain',
+    sections: [
+      sec('pnRef', 'Reference Details', 'Payer, member/claim #, requested service/CPT, ordering provider.', 2, null, S),
+      sec('pnLetter', 'The Letter — Build It in This Order', 'Diagnosis → failed conservative care → objective findings/imaging → guideline/LCD support → requested service → expected benefit.', 6, null, A),
+      sec('pnEnclosures', 'Enclosures Checklist', 'Supporting documents attached (notes, imaging, prior treatment records).', 2, null, A),
+      sec('pnSendAttest', 'Sign & Send', 'Provider signature, credentials, NPI, date.', 2, null, A),
+    ],
+  },
+  {
+    noteType: 'pain_taper', label: 'Opioid Taper Plan', category: 'Opioid Taper Plan', serviceLine: 'pain',
+    sections: [
+      sec('pnBaseline', 'Patient & Baseline', 'Patient, current regimen and MME/day, duration of therapy.', 2, null, S),
+      sec('pnTaperDriver', 'Why We Are Tapering (document the driver)', 'The clinical reason for tapering (risk, lack of benefit, patient goal, safety).', 3, null, A),
+      sec('pnSchedule', 'The Schedule — Gradual by Design', 'Step-wise dose reductions with intervals and target; individualized pace.', 3, null, A),
+      sec('pnTaperSupport', 'Support Around the Taper', 'Behavioral support, withdrawal management, naloxone, monitoring and follow-up.', 3, null, A),
+      sec('pnAttest', 'Sign & Attest', 'Provider signature, credentials, NPI; date captured automatically.', 2, null, A),
+    ],
+  },
+  {
+    noteType: 'pain_dme', label: 'DME Order (SWO + F2F)', category: 'DME Order — Standard Written Order & Face-to-Face', serviceLine: 'pain',
+    sections: [
+      sec('pnDmeItem', 'Patient & Item Details', 'Patient, date, DME item (HCPCS if known), supplier.', 2, null, S),
+      sec('pnSwo', 'Standard Written Order (all elements present)', 'Beneficiary name, item, prescriber name & NPI, order date, prescriber signature — all present.', 2,
+        ['Beneficiary name', 'Item of DME', 'Prescriber name & NPI', 'Order date', 'Prescriber signature'], A),
+      sec('pnF2f', 'Face-to-Face & Medical Necessity (written for the item)', 'F2F encounter date and the clinical findings establishing medical necessity for THIS item.', 3, null, A),
+      sec('pnSignOrder', 'Sign & Order', 'Prescriber signature, credentials, NPI, date.', 2, null, A),
+    ],
+  },
+  {
+    noteType: 'pain_discharge', label: 'Discharge / Care Transition', category: 'Discharge Summary & Care Transition — Pain', serviceLine: 'pain',
+    sections: [
+      sec('pnDischargeDetails', 'Patient & Discharge Details', 'Patient, date, reason category for discharge.', 2, null, S),
+      sec('pnWhyEnding', 'Why Care Is Ending', 'Goals met / transfer / non-adherence / other — stated clearly.', 3, null, A),
+      sec('pnCourse', 'Course of Care — The Summary', 'Summary of treatment and outcomes over the episode.', 3, null, A),
+      sec('pnDischargeMeds', 'Medications at Discharge (handled safely)', 'Final medication list, any controlled-substance handoff/taper, last prescription details.', 3, null, A),
+      sec('pnHandoff', 'Hand-Off', 'Receiving provider/PCP, records sent, follow-up arranged, patient instructions.', 3, null, A),
+      sec('pnSignClose', 'Sign & Close', 'Provider signature, credentials, NPI, date.', 2, null, A),
+    ],
+  },
+];
+
+// Register the PIP/BI and Pain templates alongside the SNF set (all served through the same pipeline:
+// draft/save/sign/PDF, isolation, pagination). Each carries a `serviceLine` so the picker + access scope
+// show a provider ONLY their own line's templates — no cross-service-line leakage.
+NOTE_TYPE_TEMPLATES.push(...PI_NOTE_TEMPLATES, ...PAIN_NOTE_TEMPLATES);
+
+/** The service line a note type belongs to — prefix-authoritative (pi_/pain_/tcm_), else SNF/universal. */
+function lineForNoteType(noteType) {
+  if (String(noteType).startsWith('pi_')) return 'pi';
+  if (String(noteType).startsWith('pain_')) return 'pain';
+  if (String(noteType).startsWith('tcm_')) return 'tcm';
+  return 'snf';
+}
+
+/**
+ * Fresh, immutable copies of the note-type templates, FILTERED to the provider's service line(s). The
+ * universal SNF set is always available; a specialty-line template (pi_/pain_/tcm_) is returned ONLY when
+ * that line is among the provider's granted service lines — so a Pain provider never sees PI templates and
+ * vice-versa (no cross-service-line leakage). Pass no lines → SNF/universal only (safe default).
+ */
+export function listNoteTypeTemplates(lines = []) {
+  const has = new Set(Array.isArray(lines) ? lines : [lines].filter(Boolean));
+  return NOTE_TYPE_TEMPLATES
+    .filter((t) => { const line = t.serviceLine || lineForNoteType(t.noteType); return line === 'snf' || has.has(line); })
+    .map((t) => ({ ...t, sections: t.sections.map((s) => ({ ...s, ...(s.checks ? { checks: [...s.checks] } : {}) })) }));
 }
 export async function providerCanUseNoteType(providerId, noteType) {
   if (UNIVERSAL_NOTE_TYPES.has(noteType)) return true; // H&P / SOAP / Progress — open to all
@@ -242,6 +637,29 @@ export async function providerCanUseNoteType(providerId, noteType) {
   if (!typeLine) return false;
   const lines = await providerServiceLines(providerId);
   return lines.includes(typeLine);
+}
+
+// SINGLE SOURCE OF TRUTH for note-type document metadata (title + section labels), built ONCE from
+// NOTE_TYPE_TEMPLATES so the signed DOCX / PDF NEVER show a raw note_type or a raw section key. The
+// document builders consult these before their own legacy maps. Pure, in-memory, no DB.
+const NOTE_TYPE_TITLE = new Map();       // noteType -> descriptive document title
+const NOTE_TYPE_SECTION_LABELS = new Map(); // noteType -> { key: label }
+for (const t of NOTE_TYPE_TEMPLATES) {
+  NOTE_TYPE_TITLE.set(t.noteType, t.category || t.label || null);
+  const m = {};
+  for (const s of t.sections) if (s && s.key) m[s.key] = s.label || s.key;
+  NOTE_TYPE_SECTION_LABELS.set(t.noteType, m);
+}
+
+/** Descriptive document title for a note type (from its template), or null if unknown. */
+export function noteTypeTitle(noteType) {
+  return NOTE_TYPE_TITLE.get(noteType) || null;
+}
+
+/** Section key→label map for a note type (from its template); {} if unknown. A fresh copy per call
+ *  so a caller can never mutate the shared reference. */
+export function sectionLabelsForNoteType(noteType) {
+  return { ...(NOTE_TYPE_SECTION_LABELS.get(noteType) || {}) };
 }
 
 // Pre-built, per-service-line template lists (immutable static reference data). Built

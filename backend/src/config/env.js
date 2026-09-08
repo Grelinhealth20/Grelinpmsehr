@@ -163,6 +163,31 @@ export const config = {
     timeoutMs: int('OPENAI_TIMEOUT_MS', 30000),
     enabled: !!process.env.OPENAI_API_KEY,
   },
+  // Fax.Plus (Alohi) programmable fax — sends/receives referral documents. OAuth2 authorization_code:
+  // a one-time consent yields a refresh token (in .env) the backend auto-exchanges for access tokens.
+  // `enabled` = fully wired for LIVE sending (needs the refresh token); `configured` = app creds present
+  // (enough to build the one-time consent URL). No mock — the service throws when not enabled.
+  faxplus: {
+    clientId: process.env.FAXPLUS_CLIENT_ID || '',
+    clientSecret: process.env.FAXPLUS_CLIENT_SECRET || '',
+    redirectUri: process.env.FAXPLUS_REDIRECT_URI || '',
+    refreshToken: process.env.FAXPLUS_REFRESH_TOKEN || '',
+    // Personal Access Token (Alohi/Fax.Plus console → API) — a long-lived Bearer token used DIRECTLY, with
+    // no OAuth consent/redirect/refresh. The simplest, most reliable auth for a server integration.
+    personalAccessToken: process.env.FAXPLUS_PAT || '',
+    userId: process.env.FAXPLUS_USER_ID || 'self',
+    baseUrl: process.env.FAXPLUS_BASE_URL || 'https://restapi.fax.plus/v3',
+    tokenUrl: process.env.FAXPLUS_TOKEN_URL || 'https://accounts.fax.plus/token',
+    authorizeUrl: process.env.FAXPLUS_AUTHORIZE_URL || 'https://accounts.fax.plus/login',
+    incomingNumber: process.env.FAXPLUS_INCOMING_NUMBER || '',
+    outgoingNumber: process.env.FAXPLUS_OUTGOING_NUMBER || '',
+    webhookSecret: process.env.FAXPLUS_WEBHOOK_SECRET || '',
+    timeoutMs: int('FAXPLUS_TIMEOUT_MS', 45000),
+    // `configured` = enough to attempt OAuth (client creds) OR a PAT is present. `enabled` = live now:
+    // a Personal Access Token, OR a full OAuth setup (client creds + refresh token).
+    configured: !!((process.env.FAXPLUS_CLIENT_ID && process.env.FAXPLUS_CLIENT_SECRET) || process.env.FAXPLUS_PAT),
+    enabled: !!(process.env.FAXPLUS_PAT || (process.env.FAXPLUS_CLIENT_ID && process.env.FAXPLUS_CLIENT_SECRET && process.env.FAXPLUS_REFRESH_TOKEN)),
+  },
 };
 
 /** Roles, ordered by privilege. Used for RBAC checks. */

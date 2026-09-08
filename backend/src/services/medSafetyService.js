@@ -135,6 +135,11 @@ async function classInfoForIngredient(ingredient) {
   return index.get(ingredient.toLowerCase()) || EMPTY_INFO;
 }
 
+/** Pre-build the in-memory drug-class index at boot so the FIRST prescription safety check is instant
+ *  (the build reads ~13k rows and takes a couple seconds). Best-effort — a lazy build covers any early
+ *  call if this is skipped or fails. */
+export async function warmMedSafetyIndex() { return ensureIndex(); }
+
 /**
  * Run the safety checks for a drug about to be prescribed.
  * @param {{ name:string, rxcui?:string, allergies?:string, currentDrugs?:string[] }} params

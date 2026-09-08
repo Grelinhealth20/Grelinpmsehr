@@ -4,7 +4,7 @@ import { s3Enabled, getObjectBytes } from './s3Service.js';
 import { toPublicPatient } from './patientService.js';
 import { getNote, canSign, getNoteCodes } from './encounterNoteService.js';
 import { listChecks } from './eligibilityService.js';
-import { buildNotePdf, buildFaceSheetPdf, buildBenefitsPdf } from './pdfService.js';
+import { buildNotePdf, buildFaceSheetPdf, buildBenefitsPdf, buildReferralPdf } from './pdfService.js';
 
 /**
  * Gathers the data for each downloadable document, resolves the facility brand
@@ -127,4 +127,38 @@ export async function benefitsPdf(row, policyIndex = 0) {
   const name = `${patient.demographics?.firstName || ''} ${patient.demographics?.lastName || ''}`.trim() || 'patient';
   const buffer = await buildBenefitsPdf({ ...brand, patient: { name }, summary: check.summary, verifiedAt: check.verifiedAt });
   return { buffer, filename: `benefits-${slug(name)}.pdf` };
+}
+
+/**
+ * The brand (name, address, NPI, phone, logo) of ONE specific facility, resolved directly by its id.
+ * Deterministic and exact — the referral letterhead is ALWAYS the referral's own facility, never a
+ * guessed/alphabetical one from the provider's assignment list (which would be a wrong-facility record
+ * on a faxed medical document). Returns an empty brand only when the facility id is null/not found.
+ */
+async function facilityBrandById(facilityId) {
+  if (facilityId == null) return { facility: {}, logoBuffer: null };
+  const [rows] = await execute(
+    `SELECT f.name, f.npi, f.phone, f.address, f.city, f.state, f.zip, f.logo,
+            f.fax_outgoing_number, f.fax_incoming_number
+       FROM facilities f WHERE f.id = :id LIMIT 1`,
+    { id: facilityId },
+  );
+  const f = rows[0];
+  if (!f) return { facility: {}, logoBuffer: null };
+  return {
+    facility: { name: f.name, npi: f.npi, phone: f.phone, address: f.address, city: f.city, state: f.state, zip: f.zip,
+      faxOutgoing: f.fax_outgoing_number || '', faxIncoming: f.fax_incoming_number || '' },
+    logoBuffer: await loadLogo(f.logo),
+  };
+}
+
+/**
+ * Enterprise referral PDF on the REFERRAL'S OWN facility letterhead. `facilityId` (the referral's
+ * facility) drives the brand exactly — no cross-facility brand, no fallback to a different facility.
+ * The caller supplies the already-scoped + decrypted referral / provider / attachment data.
+ */
+export async function referralPdf({ referral = {}, provider = {}, facilityId = null, attachments = [] }) {
+  const brand = await facilityBrandById(facilityId);
+  const buffer = await buildReferralPdf({ ...brand, referral, provider, attachments });
+  return { buffer, filename: `referral-${slug(referral.referralNo || 'referral')}.pdf` };
 }

@@ -3,12 +3,13 @@ import { execute } from '../db/pool.js';
 import { logger } from '../config/logger.js';
 import { serviceForSpecialty } from './noteTemplateService.js';
 
-const DEFAULT_SPECIALTIES = ['SNFs', 'Pain Management', 'TCM'];
+const DEFAULT_SPECIALTIES = ['SNFs', 'Pain Management', 'TCM', 'Personal Injury (PIP/BI)'];
+const VALID_SERVICE_LINES = new Set(['snf', 'pain', 'tcm', 'pi']);
 
 /** Normalize an incoming service line to a valid enum, or null to auto-derive from name. */
 function normalizeServiceLine(line) {
   const v = String(line || '').toLowerCase().trim();
-  return v === 'pain' || v === 'snf' ? v : null;
+  return VALID_SERVICE_LINES.has(v) ? v : null;
 }
 
 export function toPublicSpecialty(row) {

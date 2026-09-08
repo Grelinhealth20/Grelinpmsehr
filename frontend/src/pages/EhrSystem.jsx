@@ -1,7 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import AppointmentScheduler from './AppointmentScheduler.jsx';
 import Encounter from './Encounter.jsx';
 import ClinicalRecords from './ClinicalRecords.jsx';
+import Referrals from './Referrals.jsx';
+import { useAuth } from '../context/AuthContext.jsx';
 
 const CalendarIcon = (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -49,15 +51,23 @@ const NAV = [
  * which opens the synced appointment scheduler.
  */
 export default function EhrSystem({ systems = [], active = null, onSwitch = null }) {
+  const { referralsEnabled } = useAuth();
   const otherSystems = (systems || []).filter((s) => s.key !== active);
   const [collapsed, setCollapsed] = useState(() => {
     try { return localStorage.getItem('gh.ehr.sidebar') === '1'; } catch { return false; }
   });
   const [view, setView] = useState('appointment');
 
+  // Referrals is a per-facility feature — hide it (and never render it) when a Super Admin has disabled
+  // it for the user's facility. Enforced server-side too; this just keeps the nav honest.
+  const nav = useMemo(() => NAV.filter((n) => n.key !== 'referral' || referralsEnabled), [referralsEnabled]);
+
   useEffect(() => {
     try { localStorage.setItem('gh.ehr.sidebar', collapsed ? '1' : '0'); } catch { /* ignore */ }
   }, [collapsed]);
+
+  // If the active view becomes unavailable (feature turned off), fall back to the first tab.
+  useEffect(() => { if (view === 'referral' && !referralsEnabled) setView('appointment'); }, [view, referralsEnabled]);
 
   return (
     <div className={`ehr-layout ${collapsed ? 'is-collapsed' : ''}`}>
@@ -77,7 +87,7 @@ export default function EhrSystem({ systems = [], active = null, onSwitch = null
         </div>
 
         <nav className="ehr-nav">
-          {NAV.map((n) => (
+          {nav.map((n) => (
             <button
               key={n.key}
               type="button"
@@ -115,8 +125,7 @@ export default function EhrSystem({ systems = [], active = null, onSwitch = null
         {view === 'appointment' && <AppointmentScheduler />}
         {view === 'encounter' && <Encounter />}
         {view === 'clinical' && <ClinicalRecords />}
-        {/* Referrals — reserved access system; blank canvas until built out. */}
-        {view === 'referral' && <div className="ehr-blank" role="region" aria-label="Referrals" />}
+        {view === 'referral' && referralsEnabled && <Referrals />}
       </main>
     </div>
   );

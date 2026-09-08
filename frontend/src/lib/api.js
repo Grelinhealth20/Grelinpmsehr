@@ -110,6 +110,7 @@ export const authApi = {
 // --- Users (admin) ---------------------------------------------------------
 export const usersApi = {
   list: (params) => api.get('/users', { params }),
+  counts: () => api.get('/users/counts'),
   nppes: (params) => api.get('/users/nppes', { params }),
   create: (payload) => api.post('/users', payload),
   update: (uuid, payload) => api.patch(`/users/${uuid}`, payload),
@@ -147,6 +148,9 @@ export const facilitiesApi = {
   setStatus: (uuid, status) => api.post(`/facilities/${uuid}/status`, { status }),
   // Per-facility feature switches: { codingEnabled?, eligibilityEnabled? }
   setFlags: (uuid, flags) => api.post(`/facilities/${uuid}/flags`, flags),
+  // Per-facility referral FAX numbers (incoming/outgoing) — Super Admin.
+  faxConfig: (params) => api.get('/facilities/fax-config', params ? { params } : undefined),
+  setFaxConfig: (uuid, payload) => api.put(`/facilities/${uuid}/fax-config`, payload),
   remove: (uuid) => api.delete(`/facilities/${uuid}`),
   assignProvider: (uuid, providerUuid) => api.post(`/facilities/${uuid}/providers`, { providerUuid }),
   unassignProvider: (uuid, providerUuid) => api.delete(`/facilities/${uuid}/providers/${providerUuid}`),
@@ -219,6 +223,46 @@ export const patientsApi = {
 };
 
 // --- Encounters (EHR worklist) ---------------------------------------------
+// Referral Management — incoming / outgoing referrals (owner / facility-scoped server-side).
+export const referralsApi = {
+  options: () => api.get('/referrals/options'),
+  nppesLookup: (params) => api.get('/referrals/nppes', { params }), // NPI registry lookup for the referred-to consultant/facility
+
+  stats: () => api.get('/referrals/stats'),
+  refreshInbox: () => api.post('/referrals/refresh-inbox'), // force a live fetch of incoming faxes
+
+  list: (params) => api.get('/referrals', { params }),
+  get: (uuid) => api.get(`/referrals/${uuid}`),
+  create: (payload) => api.post('/referrals', payload),
+  update: (uuid, payload) => api.patch(`/referrals/${uuid}`, payload),
+  remove: (uuid) => api.delete(`/referrals/${uuid}`),
+  letter: (uuid) => api.get(`/referrals/${uuid}/letter`),
+  pdf: (uuid) => api.get(`/referrals/${uuid}/pdf`, { responseType: 'blob' }),
+  receivedDocument: (uuid) => api.get(`/referrals/${uuid}/received-document`, { responseType: 'blob' }),
+  sendFax: (uuid) => api.post(`/referrals/${uuid}/fax`),
+  faxAi: (uuid, mode) => api.post(`/referrals/${uuid}/fax/ai`, null, { params: { mode } }),
+  restoreDocument: (uuid) => api.post(`/referrals/${uuid}/fax/restore`),
+  faxStatusSync: (uuid) => api.get(`/referrals/${uuid}/fax/status`), // pull authoritative status from Fax.Plus
+  adminPollInbox: () => api.post('/referrals/admin/poll-inbox'), // sync Fax.Plus inbox (super admin)
+  attachments: (uuid) => api.get(`/referrals/${uuid}/attachments`),
+  uploadAttachment: (uuid, file) => { const fd = new FormData(); fd.append('file', file); return api.post(`/referrals/${uuid}/attachments`, fd, { headers: { 'Content-Type': 'multipart/form-data' } }); },
+  deleteAttachment: (uuid, attUuid) => api.delete(`/referrals/${uuid}/attachments/${attUuid}`),
+  faxStatus: () => api.get('/fax/status'),
+  // Super Admin oversight (server-guarded to super/master admin)
+  adminList: (params) => api.get('/referrals/admin/list', { params }),
+  adminStats: () => api.get('/referrals/admin/stats'),
+  faxAuthorizeUrl: () => api.get('/fax/authorize-url'),
+  // Fax.Plus live activation (Super Admin) — exchange the pasted OAuth code + persist the refresh token.
+  faxActivate: (code) => api.post('/fax/activate', { code }),
+  faxSetPersonalToken: (token) => api.post('/fax/personal-token', { token }),
+  faxSetWebhookSecret: (secret) => api.post('/fax/webhook-secret', { secret }),
+  faxAiStatus: () => api.get('/fax/ai-status'),
+  faxListWebhooks: () => api.get('/fax/webhooks'),
+  faxRegisterWebhook: (url) => api.post('/fax/webhooks', { url }),
+  faxDeleteWebhook: (id) => api.delete(`/fax/webhooks/${id}`),
+  faxDeactivate: () => api.post('/fax/deactivate'),
+};
+
 export const encountersApi = {
   list: () => api.get('/encounters'),
   // Server-side pagination (enterprise scale)
@@ -263,6 +307,7 @@ export const encountersApi = {
   // downloadable only by an MD (enforced server-side).
   downloadNote: (noteUuid, name) => downloadPdf(`/encounters/notes/${noteUuid}/pdf`, name || 'medical-record.pdf'),
   updateNote: (noteUuid, payload) => api.patch(`/encounters/notes/${noteUuid}`, payload),
+  deleteNote: (noteUuid) => api.delete(`/encounters/notes/${noteUuid}`),
   signNote: (noteUuid, payload) => api.post(`/encounters/notes/${noteUuid}/sign`, payload),
   amendNote: (noteUuid, payload) => api.post(`/encounters/notes/${noteUuid}/amend`, payload),
   // Billable codes captured on a note (diagnoses SNOMED→ICD-10, procedures CPT) + Part B scrub.
@@ -280,6 +325,7 @@ export const terminologyApi = {
     api.get('/terminology/rx-safety', { params: { name, rxcui, allergies, current } }),
   cpt: (q, pageSize) => api.get('/terminology/cpt', { params: { q, pageSize } }),
   search: (q, source, pageSize) => api.get('/terminology/search', { params: { q, source, pageSize } }),
+  icd10: (q, pageSize) => api.get('/terminology/search', { params: { q, source: 'ICD10CM', pageSize } }),
   // SNOMED concept → billable ICD-10-CM (official complex map).
   snomedToIcd: (conceptId) => api.get(`/terminology/snomed/${conceptId}/icd10cm`),
 };

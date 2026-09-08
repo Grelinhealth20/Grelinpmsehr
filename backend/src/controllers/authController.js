@@ -1,10 +1,13 @@
 import * as authService from '../services/authService.js';
 import { changeOwnPassword, issueFullSession } from '../services/authService.js';
 import { toPublicUser } from '../services/userService.js';
+import { referralsEnabledForProvider } from '../services/facilityFaxService.js';
 import * as mfa from '../services/mfaService.js';
 import { recordAudit } from '../services/auditService.js';
 import { setAuthCookies, setCsrfCookie, clearAuthCookies, COOKIE } from '../utils/cookies.js';
 import { randomToken } from '../utils/crypto.js';
+import { viewerScope } from '../services/accessScope.js';
+import { logger } from '../config/logger.js';
 
 function ctxOf(req) {
   return { ip: req.ip, userAgent: req.get('user-agent') };
@@ -14,6 +17,12 @@ function establishSession(res, session) {
   setAuthCookies(res, session);
   const csrf = randomToken(24);
   setCsrfCookie(res, csrf);
+  // Fire-and-forget: pre-warm this user's access-scope caches (MD flag + service lines + facility ids) the
+  // moment a session is granted, so the FIRST table they open (Patients / Encounters / Notes / Referrals /
+  // Clinical Records — all use viewerScope) is already warm (~0.5s) instead of paying ~3 cold sequential
+  // round-trips (~2.3s) to the remote DB. Non-blocking — never delays or fails the login response.
+  const uid = session?.user?.id;
+  if (uid) viewerScope(uid).catch((e) => logger.warn({ err: e.message, uid }, 'scope pre-warm failed (non-fatal)'));
   return csrf;
 }
 
@@ -22,10 +31,13 @@ export async function login(req, res, next) {
     const { email, password } = req.body;
     const result = await authService.login(email, password, ctxOf(req));
     const csrfToken = establishSession(res, result);
+    let referrals = true;
+    try { referrals = await referralsEnabledForProvider(result.user.id); } catch { referrals = true; }
     res.json({
       user: toPublicUser(result.user),
       mustResetPassword: result.mustResetPassword,
       mfaStage: result.mfaStage, // 'ok' | 'setup' (must scan QR) | 'pending' (must enter code)
+      features: { referrals },
       csrfToken,
     });
   } catch (err) {
@@ -55,10 +67,14 @@ export async function logout(req, res, next) {
 }
 
 export async function me(req, res) {
+  // Per-facility feature availability for THIS user (drives which sections the EHR shell shows).
+  let referrals = true;
+  try { referrals = await referralsEnabledForProvider(req.authUserId); } catch { referrals = true; }
   res.json({
     user: req.user,
     mustResetPassword: req.mustResetPassword,
     mfa: { enabled: !!req.mfaEnabled, enrolled: !!req.mfaConfirmed, satisfied: req.mfaClaim === 'ok' },
+    features: { referrals },
   });
 }
 

@@ -2,6 +2,7 @@ import {
   listFacilities, getFacility, createFacility, updateFacility,
   setFacilityStatus, setFacilityFlags, deleteFacility, assignProvider, unassignProvider,
 } from '../services/facilityService.js';
+import { listFacilityFaxConfigs, setFacilityFaxConfig } from '../services/facilityFaxService.js';
 import { searchFacilities, nppesEnabled } from '../services/nppesService.js';
 import { recordAudit } from '../services/auditService.js';
 
@@ -77,6 +78,32 @@ export async function flags(req, res, next) {
     await recordAudit({ actorUserId: req.authUserId, action: 'facility.flags', entityType: 'facility', entityId: facility.uuid, ...ctx(req), metadata: patch });
     res.json({ facility });
   } catch (err) { next(err); }
+}
+
+// ---- Per-facility referral FAX configuration (Super Admin) --------------------------------------
+/** All facilities with their incoming/outgoing referral-fax numbers + the global defaults. */
+export async function faxConfigList(req, res, next) {
+  try {
+    const { q, page, pageSize } = req.query;
+    res.json(await listFacilityFaxConfigs({ q: q || '', page, pageSize }));
+  } catch (err) { next(err); }
+}
+
+/** Set one facility's incoming/outgoing referral-fax numbers and enabled flag. */
+export async function faxConfigSet(req, res, next) {
+  try {
+    const patch = {};
+    if (req.body.incomingNumber !== undefined) patch.incomingNumber = req.body.incomingNumber;
+    if (req.body.outgoingNumber !== undefined) patch.outgoingNumber = req.body.outgoingNumber;
+    if (typeof req.body.enabled === 'boolean') patch.enabled = req.body.enabled;
+    const config = await setFacilityFaxConfig(req.params.uuid, patch, req.authUserId);
+    if (!config) return res.status(404).json({ error: 'Facility not found.', code: 'NOT_FOUND' });
+    await recordAudit({ actorUserId: req.authUserId, action: 'facility.fax_config', entityType: 'facility', entityId: req.params.uuid, ...ctx(req), metadata: { fields: Object.keys(patch) } });
+    res.json({ facility: config });
+  } catch (err) {
+    if (err.code === 'FAX_CONFIG_INVALID') return res.status(err.status || 400).json({ error: err.message, code: err.code });
+    next(err);
+  }
 }
 
 export async function remove(req, res, next) {
