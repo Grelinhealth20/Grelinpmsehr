@@ -53,7 +53,9 @@ router.get('/:uuid/received-document', ctrl.receivedDocument); // stream an inco
 router.post('/:uuid/fax', csrfProtection, ctrl.sendFax); // send this referral out via Fax.Plus
 router.post('/:uuid/fax/ai', csrfProtection, ctrl.faxAiRun); // on-demand Fax.Plus AI (button-triggered)
 router.post('/:uuid/fax/restore', csrfProtection, ctrl.restoreDocument); // re-fetch a missing received document (no data loss)
-router.get('/:uuid/fax/status', ctrl.reconcileFax); // pull authoritative fax status from Fax.Plus (real-time sync)
+// POST (not GET) + CSRF: this pulls authoritative status from Fax.Plus and WRITES it to the referral row,
+// so it is a state-changing operation and must not be triggerable by a cross-site GET.
+router.post('/:uuid/fax/status', csrfProtection, ctrl.reconcileFax); // pull authoritative fax status from Fax.Plus (real-time sync)
 // Enclosed-record attachments (uploaded PDFs added to the faxed package)
 router.get('/:uuid/attachments', ctrl.listAttachments);
 router.post('/:uuid/attachments', csrfProtection, attachUpload.single('file'), ctrl.uploadAttachment);

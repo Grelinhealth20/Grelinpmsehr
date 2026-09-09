@@ -158,7 +158,11 @@ export async function runMigrations() {
   await ensureColumn('facilities', 'fax_referrals_enabled', "`fax_referrals_enabled` TINYINT(1) NOT NULL DEFAULT 1 AFTER `fax_outgoing_number`");
   await ensureColumn('facilities', 'fax_updated_by', "`fax_updated_by` BIGINT UNSIGNED NULL AFTER `fax_referrals_enabled`");
   await ensureColumn('facilities', 'fax_updated_at', "`fax_updated_at` DATETIME NULL AFTER `fax_updated_by`");
-  await ensureIndex('facilities', 'idx_fac_fax_in', '`fax_incoming_number`');
+  // UNIQUE (not just indexed): an inbound DID must map to exactly ONE facility, else received PHI faxes
+  // could mis-route. A UNIQUE index on a NULLable column still allows many NULLs (facilities with no DID),
+  // so only ASSIGNED numbers are constrained. If legacy duplicates exist the ALTER is skipped with a warn
+  // (routingMap() then fails those DIDs closed at runtime). Config sets '' → NULL, so no empty-string clash.
+  await ensureUniqueIndex('facilities', 'uniq_fac_fax_incoming', '`fax_incoming_number`');
   // Full NPPES (NPI-2) identity for a group/organization — captured so nothing is dropped:
   // taxonomy code, fax, authorized official, enumeration date, mailing address, registry status.
   await ensureColumn('facilities', 'taxonomy_code', '`taxonomy_code` VARCHAR(16) NULL AFTER `taxonomy`');

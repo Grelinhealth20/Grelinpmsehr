@@ -35,13 +35,19 @@ function lockState(row) {
     ? { locked: true, minutesLeft: Math.ceil((until - now) / 60000) }
     : { locked: false, minutesLeft: 0 };
 }
-async function bumpFailure(row) {
-  const n = (row.mfa_failed_attempts || 0) + 1;
+async function bumpFailure(row, exec = execute) {
+  // `exec` lets a caller run this on its OWN transaction/connection (e.g. verifyCode, which holds a
+  // FOR UPDATE lock on this row — using the module `execute` there would deadlock against that lock).
+  // If a PRIOR lockout has already lapsed, start the counter fresh (mirrors the login clearLockWindow).
+  // Otherwise mfa_failed_attempts stayed pinned at the max, so the first wrong code after a lock expired
+  // would immediately re-lock for another full window — locking a user out permanently after one mistake.
+  const lapsed = row.mfa_locked_until_epoch != null && !lockState(row).locked;
+  const n = (lapsed ? 0 : (row.mfa_failed_attempts || 0)) + 1;
   if (n >= MFA_MAX_FAILURES) {
-    await execute('UPDATE users SET mfa_failed_attempts = :n, mfa_locked_until = DATE_ADD(NOW(), INTERVAL :m MINUTE) WHERE id = :id',
+    await exec('UPDATE users SET mfa_failed_attempts = :n, mfa_locked_until = DATE_ADD(NOW(), INTERVAL :m MINUTE) WHERE id = :id',
       { n, m: MFA_LOCK_MINUTES, id: row.id });
   } else {
-    await execute('UPDATE users SET mfa_failed_attempts = :n WHERE id = :id', { n, id: row.id });
+    await exec('UPDATE users SET mfa_failed_attempts = :n WHERE id = :id', { n, id: row.id });
   }
   invalidateUserCache(row.uuid);
   return n >= MFA_MAX_FAILURES;
@@ -90,7 +96,10 @@ export async function confirmEnrollment(row, code) {
   if (lock.locked) return { error: 'locked', minutesLeft: lock.minutesLeft };
   if (!row.mfa_secret_enc) return { error: 'no_pending_secret' };
   const secret = decrypt(row.mfa_secret_enc);
-  const res = verifyTotp(secret, code);
+  // Honor the single-use replay guard here too (defense-in-depth): a code already consumed by a prior
+  // verify/confirm in the same window cannot be replayed through this path. For a first-time enrollment
+  // mfa_last_step is null (-1), so the initial confirming code is unaffected.
+  const res = verifyTotp(secret, code, { afterStep: Number(row.mfa_last_step ?? -1) });
   if (!res.valid) { const locked = await bumpFailure(row); return { error: 'invalid_code', locked }; }
   const codes = Array.from({ length: RECOVERY_COUNT }, newRecoveryCode);
   const hashed = await Promise.all(codes.map(async (c) => ({ hash: await hashPassword(c.replace('-', '')), used: false })));
@@ -108,11 +117,17 @@ export async function verifyCode(row, code) {
   if (lock.locked) return { error: 'locked', minutesLeft: lock.minutesLeft };
   if (!row.mfa_secret_enc || !row.mfa_confirmed_at) return { error: 'not_enrolled' };
   const secret = decrypt(row.mfa_secret_enc);
-  const res = verifyTotp(secret, code, { afterStep: Number(row.mfa_last_step ?? -1) });
-  if (!res.valid) { const locked = await bumpFailure(row); return { error: 'invalid_code', locked }; }
-  await execute('UPDATE users SET mfa_last_step = :st, mfa_failed_attempts = 0, mfa_locked_until = NULL WHERE id = :id', { st: res.step, id: row.id });
-  invalidateUserCache(row.uuid);
-  return { ok: true };
+  // Single-use guarantee under concurrency: lock the row and RE-READ mfa_last_step inside a transaction,
+  // so two simultaneous verifies of the same code can't both pass off a stale (cached) step — the second
+  // serializes behind the first and sees the advanced step (matching verifyRecovery's FOR UPDATE guard).
+  return withTransaction(async (exec) => {
+    const [[fresh]] = await exec('SELECT mfa_last_step FROM users WHERE id = :id FOR UPDATE', { id: row.id });
+    const res = verifyTotp(secret, code, { afterStep: Number(fresh?.mfa_last_step ?? -1) });
+    if (!res.valid) { const locked = await bumpFailure(row, exec); return { error: 'invalid_code', locked }; }
+    await exec('UPDATE users SET mfa_last_step = :st, mfa_failed_attempts = 0, mfa_locked_until = NULL WHERE id = :id', { st: res.step, id: row.id });
+    invalidateUserCache(row.uuid);
+    return { ok: true };
+  });
 }
 
 /** Verify a one-time recovery code (pending → satisfied). Consumes the code. */

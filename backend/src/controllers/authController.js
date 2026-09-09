@@ -82,7 +82,11 @@ export async function me(req, res) {
 function guardMfa(req, res, { stage }) {
   if (req.mustResetPassword) { res.status(403).json({ error: 'Password reset required first.', code: 'PASSWORD_RESET_REQUIRED' }); return false; }
   if (!req.mfaEnabled) { res.status(400).json({ error: 'MFA is not enabled for this account.', code: 'MFA_NOT_ENABLED' }); return false; }
-  if (stage === 'setup' && req.mfaConfirmed && req.mfaClaim === 'ok') { res.status(409).json({ error: 'MFA is already set up.', code: 'MFA_ALREADY_SET' }); return false; }
+  // Block the enroll/confirm path for ANY already-enrolled user (not only a fully-satisfied session):
+  // an mfa-'pending' mid-login session is still mfaConfirmed, and letting it re-run confirmEnrollment was
+  // a TOTP-replay bypass (confirm ignored mfa_last_step) that also silently rotated the victim's recovery
+  // codes. Re-enrolling a new authenticator goes through an admin reset (which clears mfa_confirmed_at first).
+  if (stage === 'setup' && req.mfaConfirmed) { res.status(409).json({ error: 'MFA is already set up.', code: 'MFA_ALREADY_SET' }); return false; }
   if (stage === 'verify' && !req.mfaConfirmed) { res.status(400).json({ error: 'MFA is not set up yet.', code: 'MFA_SETUP_REQUIRED' }); return false; }
   return true;
 }

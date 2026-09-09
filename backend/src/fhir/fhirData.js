@@ -17,7 +17,9 @@ const PT_SELECT = `SELECT p.id, p.uuid, p.mrn, p.demographics_enc, p.created_at,
 
 /** All of the caller's patients, decrypted (unreadable demographics → skipped). */
 export async function fhirPatients(providerId) {
-  const [rows] = await execute(`${PT_SELECT} WHERE p.provider_id = :pid ORDER BY p.created_at DESC`, { pid: providerId });
+  // Bound the fetch (every other FHIR query is capped) so a provider with a very large panel can't load
+  // an unbounded result set into memory. 5000 comfortably covers real panels; page beyond it if ever needed.
+  const [rows] = await execute(`${PT_SELECT} WHERE p.provider_id = :pid ORDER BY p.created_at DESC LIMIT 5000`, { pid: providerId });
   const out = [];
   for (const r of rows) {
     const demographics = decJson(r.demographics_enc);

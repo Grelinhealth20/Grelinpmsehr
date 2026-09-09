@@ -242,7 +242,7 @@ export const referralsApi = {
   sendFax: (uuid) => api.post(`/referrals/${uuid}/fax`),
   faxAi: (uuid, mode) => api.post(`/referrals/${uuid}/fax/ai`, null, { params: { mode } }),
   restoreDocument: (uuid) => api.post(`/referrals/${uuid}/fax/restore`),
-  faxStatusSync: (uuid) => api.get(`/referrals/${uuid}/fax/status`), // pull authoritative status from Fax.Plus
+  faxStatusSync: (uuid) => api.post(`/referrals/${uuid}/fax/status`), // pull authoritative status from Fax.Plus (POST: it writes the synced status; CSRF auto-attached)
   adminPollInbox: () => api.post('/referrals/admin/poll-inbox'), // sync Fax.Plus inbox (super admin)
   attachments: (uuid) => api.get(`/referrals/${uuid}/attachments`),
   uploadAttachment: (uuid, file) => { const fd = new FormData(); fd.append('file', file); return api.post(`/referrals/${uuid}/attachments`, fd, { headers: { 'Content-Type': 'multipart/form-data' } }); },

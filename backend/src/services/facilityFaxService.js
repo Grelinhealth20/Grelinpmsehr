@@ -1,5 +1,6 @@
 import { execute } from '../db/pool.js';
 import { config } from '../config/env.js';
+import { logger } from '../config/logger.js';
 
 /**
  * Per-facility referral FAX configuration (Super Admin).
@@ -123,7 +124,14 @@ export async function setFacilityFaxConfig(uuid, patch = {}, adminId = null) {
   if (patch.enabled !== undefined) { sets.push('fax_referrals_enabled = :en'); params.en = patch.enabled ? 1 : 0; }
   if (patch.referralsEnabled !== undefined) { sets.push('referrals_enabled = :re'); params.re = patch.referralsEnabled ? 1 : 0; }
 
-  await execute(`UPDATE facilities SET ${sets.join(', ')} WHERE id = :id`, params);
+  try {
+    await execute(`UPDATE facilities SET ${sets.join(', ')} WHERE id = :id`, params);
+  } catch (e) {
+    // The unique index on fax_incoming_number closes the app-check TOCTOU window: a concurrent save of
+    // the same DID to another facility fails here — return the same friendly 400 rather than a raw 500.
+    if (e && e.code === 'ER_DUP_ENTRY') throw invalid('That incoming fax number is already assigned to another facility.');
+    throw e;
+  }
   invalidateFaxRouting();
   invalidateReferralAccess();
   return getFacilityFaxConfig(uuid);
@@ -162,8 +170,23 @@ async function routingMap() {
   if (routeCache.map && routeCache.exp > now) return routeCache.map;
   const [rows] = await execute(
     "SELECT id, uuid, name, fax_incoming_number AS inc FROM facilities WHERE fax_incoming_number IS NOT NULL AND fax_incoming_number <> ''");
+  // Build the DID→facility map, but FAIL CLOSED on any DID assigned to more than one facility: an
+  // ambiguous number must NOT be silently delivered to an arbitrary facility (cross-facility PHI
+  // mis-routing). Such a collision is prevented by the unique index on fax_incoming_number; this guards
+  // the write-race window and any legacy duplicates by leaving the number UNROUTED (→ master_admin intake
+  // queue) and logging loudly, rather than picking a winner.
+  const byKey = new Map();
+  for (const r of rows) {
+    const key = normalizeFax(r.inc);
+    if (!key) continue;
+    const e = byKey.get(key);
+    if (e) { e.count += 1; } else { byKey.set(key, { count: 1, fac: { id: Number(r.id), uuid: r.uuid, name: r.name } }); }
+  }
   const map = new Map();
-  for (const r of rows) map.set(normalizeFax(r.inc), { id: Number(r.id), uuid: r.uuid, name: r.name });
+  for (const [key, e] of byKey) {
+    if (e.count === 1) map.set(key, e.fac);
+    else logger.error({ did: key, facilities: e.count }, 'inbound DID assigned to multiple facilities — routing REFUSED (fax → intake queue) to prevent cross-facility PHI mis-delivery');
+  }
   routeCache = { map, exp: now + ROUTE_TTL_MS };
   return map;
 }

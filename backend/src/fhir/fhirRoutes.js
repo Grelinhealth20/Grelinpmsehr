@@ -108,6 +108,15 @@ async function fhirAuth(req, res, next) {
     try {
       const u = await findRawByUuid(claims.sub);
       if (!u || u.status === USER_STATUS.DISABLED) return send(res, 401, operationOutcome('error', 'login', 'User no longer valid'));
+      // Credential-cut / force-logout revocation — mirror authenticate.js so a SMART Bearer token can't
+      // outlive a password reset, admin force-logout, or role/status change (all bump tokens_valid_after).
+      // Without this, a live SMART token kept reading PHI for its full TTL after the user was revoked.
+      if (u.tokens_valid_after_epoch != null) {
+        const cutSec = Number(u.tokens_valid_after_epoch);
+        if (Number.isFinite(cutSec) && typeof claims.iat === 'number' && claims.iat < cutSec) {
+          return send(res, 401, operationOutcome('error', 'login', 'Access token revoked'));
+        }
+      }
       req.authUserId = u.id; req.smartScope = claims.scope; req.smartToken = true;
       req.smartPatient = claims.patient || null; // launch/patient context — confines access to one patient
       return next();

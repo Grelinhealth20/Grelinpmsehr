@@ -46,7 +46,9 @@ export async function registerClient({ name, redirectUris, scopes, confidential 
     const e = new Error('name and at least one redirectUri are required.'); e.status = 400; e.code = 'BAD_REQUEST'; throw e;
   }
   for (const u of redirectUris) {
-    if (!/^https:\/\/|^http:\/\/localhost|^http:\/\/127\.0\.0\.1/.test(u)) {
+    // Anchor the http-localhost exceptions with a boundary (port / path / end) so a look-alike host like
+    // http://localhost.evil.com or http://127.0.0.1.evil.com can NOT register as a valid redirect.
+    if (!/^https:\/\/|^http:\/\/localhost(?::\d+)?(?:\/|$)|^http:\/\/127\.0\.0\.1(?::\d+)?(?:\/|$)/.test(u)) {
       const e = new Error('redirectUris must be https (localhost may be http).'); e.status = 400; e.code = 'BAD_REDIRECT'; throw e;
     }
   }
@@ -76,6 +78,9 @@ export async function authorize({ query, userId }) {
   if (!clientId) fail('client_id is required');
   const client = await getClient(clientId);
   if (!client) fail('unknown client_id', 'unauthorized_client');
+  // SMART App Launch: when `aud` is supplied it MUST equal this server's FHIR base — reject a token
+  // request aimed at a different audience (prevents a token minted for another server being replayed here).
+  if (aud && aud !== FHIR_AUD) fail('aud must equal the FHIR base URL', 'invalid_request');
   const allowed = JSON.parse(client.redirect_uris || '[]');
   if (!redirectUri || !allowed.includes(redirectUri)) fail('redirect_uri does not match a registered value', 'invalid_request');
   // PKCE required (public clients) — S256 only.

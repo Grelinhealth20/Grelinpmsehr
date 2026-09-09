@@ -96,7 +96,7 @@ function toPublicReferral(r, { full = false } = {}) {
       error: r.fax_error || null, faxedAt: r.faxed_at_str || null, hasDocument: !!r.fax_s3_key,
       timeline: parseFaxEvents(r.fax_events),
       // Auto-computed (once, cached) Fax.Plus AI triage for an inbound fax — assists the intake provider.
-      ai: parseJsonCol(r.fax_ai),
+      ai: decodeFaxAi(r.fax_ai),
       aiAt: r.fax_ai_at_str || null,
     } : null,
     reason: strictText(r.reason_enc, 'Referral reason'),
@@ -144,6 +144,16 @@ function parseJsonCol(raw) {
   if (raw == null) return null;
   if (typeof raw === 'object') return raw;
   try { return JSON.parse(raw); } catch { return null; }
+}
+/** Decode the inbound-fax AI triage column. New rows are an {enc:<base64>} encrypted envelope; decrypt +
+ *  parse. Legacy plaintext rows (no `enc`) return as-is. Assist metadata → FAIL SOFT (never block the
+ *  referral view on a bad blob). */
+function decodeFaxAi(col) {
+  const w = parseJsonCol(col);
+  if (!w || typeof w !== 'object') return w || null;
+  if (!w.enc) return w; // legacy plaintext payload (pre-encryption)
+  try { return JSON.parse(decrypt(Buffer.from(String(w.enc), 'base64'))); }
+  catch { return null; }
 }
 /** Append one timestamped event to a referral's fax timeline (bounded to the last 50). */
 async function pushFaxEvent(referralId, status, detail = '') {
@@ -330,7 +340,17 @@ export async function listReferrals(providerId, { direction = '', status = '', q
     params,
   );
   const total = rows.length ? Number(rows[0]._total) : 0;
-  return { referrals: rows.map((r) => toPublicReferral(r)), total, page: pg, pageSize: lim };
+  // Fail-SOFT per row for the LIST: a single corrupt/undecryptable cipher-blob must not 422 the whole
+  // page (availability). Surface a clearly-flagged placeholder for the bad row; the single-record fetch
+  // (getReferral) stays fail-loud so a specific unreadable record is still reported precisely.
+  const referrals = rows.map((r) => {
+    try { return toPublicReferral(r); }
+    catch (e) {
+      logger.error({ uuid: r.uuid, err: e.message }, 'referral row unreadable in list — placeholder returned');
+      return { uuid: r.uuid, referralNo: r.referral_no || null, direction: r.direction, status: r.status, unreadable: true };
+    }
+  });
+  return { referrals, total, page: pg, pageSize: lim };
 }
 
 /** Per-status counts for one direction (owner-scoped) — powers the tab badges + filter chips. */
@@ -484,11 +504,23 @@ export async function sendReferralFax(providerId, uuid) {
       if (ctx) { await ensureReferralFolder(ctx); s3Key = await uploadReferralObject(ctx, { direction: 'outgoing', fileName: `${gen.referral.referralNo}-${result.faxId || 'sent'}.pdf` }, cover, 'application/pdf'); }
     } catch (e) { logger.error({ err: e.message, uuid }, 'referral outgoing fax S3 store failed'); }
   }
+  // Fax.Plus MUST return a tracking id, else the send is unreconcilable (reconcile keys on fax_id) and
+  // would sit as a false "sent" forever. Never report a phantom success: record an unconfirmed/error
+  // state (kept out of 'sent') and fail loud so the user can verify/retry.
+  if (!result.faxId) {
+    await execute(
+      `UPDATE referrals SET fax_status = 'error', fax_s3_key = :key,
+         fax_error = 'Fax provider returned no tracking id — delivery could not be confirmed.' WHERE id = :id`,
+      { key: s3Key, id: own[0].id });
+    await pushFaxEvent(own[0].id, 'error', 'Fax provider returned no tracking id — delivery unconfirmed, not marked sent');
+    logger.error({ uuid, referral: gen.referral.referralNo }, 'outbound fax returned no fax id — marked unconfirmed, NOT sent');
+    throw attErr('The fax provider did not confirm the send (no tracking id). The referral was NOT marked sent — please verify and retry.');
+  }
   await execute(
     `UPDATE referrals SET fax_id = :fid, fax_status = 'queued', fax_s3_key = :key, fax_error = NULL,
        faxed_at = NOW(), status = CASE WHEN status = 'draft' THEN 'sent' ELSE status END WHERE id = :id`,
-    { fid: result.faxId || null, key: s3Key, id: own[0].id });
-  await pushFaxEvent(own[0].id, 'queued', `Submitted to Fax.Plus from ${result.from} → ${own[0].counterparty_fax}${result.faxId ? ` (fax ${result.faxId})` : ''}`);
+    { fid: result.faxId, key: s3Key, id: own[0].id });
+  await pushFaxEvent(own[0].id, 'queued', `Submitted to Fax.Plus from ${result.from} → ${own[0].counterparty_fax} (fax ${result.faxId})`);
   return getReferral(providerId, uuid);
 }
 
@@ -687,8 +719,11 @@ export async function ingestIncomingFax(rec = {}) {
     logger.info({ faxId }, 'inbound fax AI triage skipped — Fax.Plus AI not enabled on account (0 credits)');
   }
 
-  const [[owner]] = [await execute("SELECT id FROM users WHERE role = 'master_admin' ORDER BY id LIMIT 1")].map((x) => x[0]);
-  if (!owner) { logger.error({ faxId }, 'no master_admin to own inbound fax referral'); return null; }
+  // Intake owner for the inbound-fax queue: prefer an active master_admin, else fall back to an active
+  // super_admin — so a received PHI fax is never DROPPED just because no master_admin happens to exist.
+  const [[owner]] = [await execute(
+    "SELECT id FROM users WHERE role IN ('master_admin','super_admin') AND status = 'active' ORDER BY FIELD(role,'master_admin','super_admin'), id LIMIT 1")].map((x) => x[0]);
+  if (!owner) { logger.error({ faxId }, 'no active master_admin/super_admin to own inbound fax referral — fax left in provider inbox for retry'); return null; }
   const uuid = uuidv4();
   let ins;
   try {
@@ -700,7 +735,12 @@ export async function ingestIncomingFax(rec = {}) {
           :from, :from, :fid, 'received', :fileRef, :key, :pages, :err, :ai, :aiAt, CURDATE(), :owner, NOW())`,
       { uuid, tmpNo: `TMP-${uuid.slice(0, 18)}`, owner: owner.id, facId: facilityId, from: clip(rec.from_number || rec.from, 32).replace(/[^\d+]/g, '') || null,
         fid: faxId, fileRef: fileRef ? String(fileRef).slice(0, 128) : null, key: s3Key,
-        pages, err: s3Key ? null : (storeErr ? String(storeErr).slice(0, 255) : null), ai: aiJson, aiAt: aiJson ? new Date() : null });
+        pages, err: s3Key ? null : (storeErr ? String(storeErr).slice(0, 255) : null),
+        // Encrypt the AI-extracted PHI at rest (patient name/DOB/diagnosis from the fax), consistent with
+        // every other clinical field. Stored as an {enc:<base64 ciphertext>} JSON envelope so the existing
+        // `json` column type is unchanged (no migration); decoded via decodeFaxAi on read.
+        ai: aiJson ? JSON.stringify({ v: 1, enc: encrypt(aiJson).toString('base64') }) : null,
+        aiAt: aiJson ? new Date() : null });
   } catch (e) {
     // Race guard: a concurrent ingest (webhook + poll) already inserted this fax_id — the UNIQUE index
     // (uniq_ref_fax_id) rejects the duplicate. Treat as already-ingested (idempotent, no duplicate row).
