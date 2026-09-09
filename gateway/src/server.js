@@ -11,6 +11,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
+import tls from 'node:tls';
 import selfsigned from 'selfsigned';
 import { fileURLToPath } from 'node:url';
 
@@ -61,6 +62,11 @@ const HTTPS_PORT = Number.parseInt(process.env.GATEWAY_HTTPS_PORT || '6004', 10)
 const CERT_DIR = path.resolve(__dirname, '..', 'certs');
 const CERT_PATH = process.env.TLS_CERT_PATH || path.join(CERT_DIR, 'gateway.crt');
 const KEY_PATH = process.env.TLS_KEY_PATH || path.join(CERT_DIR, 'gateway.key');
+// When TLS_CERT_PATH/TLS_KEY_PATH are set explicitly, the operator intends a REAL cert (production).
+// In that case a missing file must FAIL LOUDLY — never silently self-sign (browsers would reject it,
+// and the failure would masquerade as a working HTTPS endpoint). Self-signing is only for the dev
+// default paths.
+const TLS_EXPLICIT = !!(process.env.TLS_CERT_PATH || process.env.TLS_KEY_PATH);
 
 const logger = pino({
   level: isProd ? 'info' : 'debug',
@@ -504,9 +510,21 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal error.', code: 'GATEWAY_ERROR' });
 });
 
-/** Ensure a TLS cert/key exists; generate a self-signed pair on first boot. */
+/** Ensure a TLS cert/key exists; generate a self-signed pair on first boot (dev paths only). */
 async function ensureCertificate() {
-  if (fs.existsSync(CERT_PATH) && fs.existsSync(KEY_PATH)) return;
+  const haveCert = fs.existsSync(CERT_PATH);
+  const haveKey = fs.existsSync(KEY_PATH);
+  if (haveCert && haveKey) return;
+  // Production intent (explicit paths): the real cert/key MUST be present. Fail fast with an
+  // actionable message instead of self-signing (which would serve a browser-rejected cert).
+  if (TLS_EXPLICIT) {
+    const missing = [!haveCert && CERT_PATH, !haveKey && KEY_PATH].filter(Boolean).join(' and ');
+    throw new Error(
+      `TLS is enabled with explicit paths but ${missing} not found. `
+      + 'Copy the real certificate + private key into place (see DEPLOY_pms.grelinhealth.com.md) '
+      + 'before starting the gateway. Refusing to self-sign in production.',
+    );
+  }
   fs.mkdirSync(CERT_DIR, { recursive: true });
   const pems = await selfsigned.generate([{ name: 'commonName', value: 'localhost' }], {
     days: 825,
@@ -530,7 +548,20 @@ const banner = `→ API ${INTERNAL_API_URL} (env=${process.env.NODE_ENV || 'deve
 async function start() {
   if (TLS_ENABLED) {
     await ensureCertificate();
-    const creds = { key: fs.readFileSync(KEY_PATH), cert: fs.readFileSync(CERT_PATH), minVersion: 'TLSv1.2' };
+    let creds;
+    try {
+      creds = { key: fs.readFileSync(KEY_PATH), cert: fs.readFileSync(CERT_PATH), minVersion: 'TLSv1.2' };
+      // Build a TLS context up front so a bad/mismatched pair fails HERE with a clear message
+      // (e.g. the key does not match the cert) rather than mid-handshake later.
+      tls.createSecureContext(creds);
+    } catch (err) {
+      throw new Error(
+        `TLS cert/key at ${CERT_PATH} + ${KEY_PATH} could not be loaded (${err.message}). `
+        + 'Verify the key MATCHES the cert: '
+        + '`openssl x509 -in <cert> -noout -modulus | openssl md5` must equal '
+        + '`openssl rsa -in <key> -noout -modulus | openssl md5`.',
+      );
+    }
     server = https.createServer(creds, app).listen(HTTPS_PORT, HOST, () => {
       logger.info(`Gateway listening on https://${HOST}:${HTTPS_PORT} ${banner}`);
       logger.info(FRONTEND_ORIGIN ? `Proxying SPA from ${FRONTEND_ORIGIN}` : `Serving SPA from ${FRONTEND_DIST}`);
