@@ -109,9 +109,22 @@ export const adminResetPasswordSchema = z
 export const uuidParam = z.object({ uuid: z.string().uuid() });
 
 // --- Appointments ----------------------------------------------------------
+// A YYYY-MM-DD string that is ALSO a real calendar date. The regex alone accepts
+// e.g. 2027-13-40 / 2027-02-30 — those pass format but are impossible dates, which
+// would otherwise reach MySQL and throw a 500. Refine so an impossible date is a
+// clean 400 at the edge (no silent DB error).
+export function isRealCalendarDate(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (!m) return false;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return false;
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d;
+}
 const apptType = z.enum(['consult', 'followup', 'procedure']);
 const apptStatus = z.enum(['scheduled', 'checked_in', 'checked_out', 'cancelled', 'completed']);
-const apptDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be YYYY-MM-DD.');
+const apptDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be YYYY-MM-DD.')
+  .refine(isRealCalendarDate, 'Date is not a valid calendar date.');
 const startMin = z.number().int().min(0).max(1439);
 const durationMin = z.number().int().min(5).max(600);
 const apptTitle = z.string().trim().min(1, 'Title is required.').max(200);
