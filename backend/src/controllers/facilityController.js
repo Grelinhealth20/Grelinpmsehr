@@ -75,6 +75,7 @@ export async function flags(req, res, next) {
     const patch = {};
     if (typeof req.body.codingEnabled === 'boolean') patch.codingEnabled = req.body.codingEnabled;
     if (typeof req.body.eligibilityEnabled === 'boolean') patch.eligibilityEnabled = req.body.eligibilityEnabled;
+    if (typeof req.body.autoCreatePatients === 'boolean') patch.autoCreatePatients = req.body.autoCreatePatients;
     const facility = await setFacilityFlags(req.params.uuid, patch);
     if (!facility) return res.status(404).json({ error: 'Facility not found.', code: 'NOT_FOUND' });
     await recordAudit({ actorUserId: req.authUserId, action: 'facility.flags', entityType: 'facility', entityId: facility.uuid, ...ctx(req), metadata: patch });
@@ -98,6 +99,8 @@ export async function faxConfigSet(req, res, next) {
     if (req.body.incomingNumber !== undefined) patch.incomingNumber = req.body.incomingNumber;
     if (req.body.outgoingNumber !== undefined) patch.outgoingNumber = req.body.outgoingNumber;
     if (typeof req.body.enabled === 'boolean') patch.enabled = req.body.enabled;
+    if (typeof req.body.referralsEnabled === 'boolean') patch.referralsEnabled = req.body.referralsEnabled;
+    if (typeof req.body.autoCreatePatients === 'boolean') patch.autoCreatePatients = req.body.autoCreatePatients;
     const config = await setFacilityFaxConfig(req.params.uuid, patch, req.authUserId);
     if (!config) return res.status(404).json({ error: 'Facility not found.', code: 'NOT_FOUND' });
     await recordAudit({ actorUserId: req.authUserId, action: 'facility.fax_config', entityType: 'facility', entityId: req.params.uuid, ...ctx(req), metadata: { fields: Object.keys(patch) } });

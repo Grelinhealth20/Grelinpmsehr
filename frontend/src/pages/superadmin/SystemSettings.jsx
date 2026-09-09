@@ -26,7 +26,9 @@ export default function SystemSettings() {
     try {
       const { data } = await facilitiesApi.setFlags(fac.uuid, { [flag]: next });
       setFacilities((cur) => cur.map((f) => (f.uuid === fac.uuid ? { ...f, ...data.facility } : f)));
-      const label = flag === 'codingEnabled' ? 'Coding engine' : 'Eligibility verification';
+      const label = flag === 'codingEnabled' ? 'Coding engine'
+        : flag === 'autoCreatePatients' ? 'Automatic patient creation from faxes'
+          : 'Eligibility verification';
       toast.success(`${label} ${next ? 'enabled' : 'disabled'} for ${fac.name}.`);
     } catch (e) { toast.error(toApiError(e).message); }
     finally { setBusy((b) => ({ ...b, [key]: false })); }
@@ -82,6 +84,13 @@ export default function SystemSettings() {
                 <span className="sysset-desc">Real-time insurance eligibility &amp; benefits (X12 270/271) on the Face Sheet and scheduler. When off, the Verify actions are hidden and the server rejects eligibility requests for this facility.</span>
               </div>
               <Switch fac={f} flag="eligibilityEnabled" />
+            </div>
+            <div className="sysset-row">
+              <div className="sysset-info">
+                <span className="sysset-title">Automatic patient creation from faxes</span>
+                <span className="sysset-desc">When an incoming referral fax to this facility&apos;s number has no matching chart, deterministically create the patient from the extracted demographics and file the document to that chart. When off, unmatched inbound faxes stay unlinked in the intake queue for manual review (existing-chart matching is unaffected).</span>
+              </div>
+              <Switch fac={f} flag="autoCreatePatients" />
             </div>
           </div>
         ))

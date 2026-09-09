@@ -6,9 +6,13 @@ import { logger } from '../config/logger.js';
 import { sendFax, downloadFaxFile, getFaxRecord, faxAi, faxAiAvailable, faxEnabled, listInbox } from './faxService.js';
 import { referralPdf } from './pdfExport.js';
 import { s3Enabled, uploadReferralObject, ensureReferralFolder, getObjectBytes, deleteObject } from './s3Service.js';
-import { getPatientS3Ctx } from './patientService.js';
-import { resolveFacilityFax, facilityByIncomingFaxNumber } from './facilityFaxService.js';
+import { getPatientS3Ctx, createPatient } from './patientService.js';
+import { resolveFacilityFax, facilityByIncomingFaxNumber, facilityFaxAutoCreateEnabled } from './facilityFaxService.js';
+import { isFaxAutoCreateEnabled } from './settingsService.js';
 import { providerPrimaryFacilityId, providerFacilityIds } from './facilityService.js';
+import { extractReferralFax } from './referralExtractService.js';
+import { ocrEnabled } from './docExtractService.js';
+import { createDocumentRecord } from './patientDocumentService.js';
 
 /**
  * READ scope for referrals — identical to the rest of the EHR (patients / encounters): a non-MD provider
@@ -666,6 +670,110 @@ export async function reconcileAllFaxes() {
  * (4) creates the UNASSIGNED incoming referral owned by the master-admin intake account so a provider
  * can review and link it to a patient.
  */
+const titleCaseName = (s) => String(s || '').toLowerCase().replace(/\b([a-z])/g, (m) => m.toUpperCase()).trim();
+/** Split an extracted patient name into { firstName, lastName } (handles "Last, First" and "First … Last").
+ *  Credential suffixes and non-name characters are stripped. Deterministic. */
+export function splitPatientName(full) {
+  const s = String(full || '')
+    .replace(/^\s*(?:dr|mr|mrs|ms|miss|mx|prof|sir|madam)\.?\s+/i, '') // leading honorific/title
+    .replace(/\b(md|do|np|pa|rn|dds|dpm|phd|faan|facp)\b\.?/gi, '') // trailing credentials
+    .replace(/[^A-Za-z'\- ,]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!s) return { firstName: '', lastName: '' };
+  if (s.includes(',')) { const [ln, rest] = s.split(','); return { lastName: titleCaseName(ln), firstName: titleCaseName((rest || '').trim().split(' ')[0]) }; }
+  const parts = s.split(' ').filter(Boolean);
+  if (parts.length < 2) return { firstName: '', lastName: titleCaseName(parts[0] || '') };
+  return { firstName: titleCaseName(parts[0]), lastName: titleCaseName(parts[parts.length - 1]) };
+}
+/**
+ * PURE, DETERMINISTIC dedupe/link decision for an inbound-fax patient (unit-testable, no DB). Given the
+ * extracted DOB and the same-name candidate charts (already facility-scoped by the caller) decide whether
+ * to LINK an existing chart, CREATE a new one, leave for MANUAL review, or report BLOCKED (auto-create off).
+ * Guarantees: (1) no duplicate — a same-name+DOB chart is always linked; (2) no wrong-patient — a no-DOB fax
+ * with multiple same-name charts is never auto-linked (manual); (3) creation only when truly not present.
+ * @param {{dob?:string, candidates?:Array<{id:number,dob?:string}>, allowCreate?:boolean}} args
+ */
+export function decidePatientMatch({ dob = '', candidates = [], allowCreate = true } = {}) {
+  const cands = Array.isArray(candidates) ? candidates.filter((c) => c && c.id != null) : [];
+  const d = String(dob || '').slice(0, 10);
+  let res;
+  if (d) {
+    const exact = cands.find((c) => String(c.dob || '').slice(0, 10) === d);
+    if (exact) res = { action: 'link', id: exact.id, reason: 'matched existing chart (name + DOB)' };
+    else if (cands.length === 1 && !cands[0].dob) res = { action: 'link', id: cands[0].id, reason: 'matched existing chart (name; chart had no DOB)' };
+    else res = { action: 'create', reason: 'not in system (name present, DOB differs) → new chart' };
+  } else if (cands.length === 1) res = { action: 'link', id: cands[0].id, reason: 'matched existing chart (single same-name, no DOB)' };
+  else if (cands.length > 1) res = { action: 'manual', reason: 'ambiguous — multiple same-name charts and no DOB to disambiguate (manual review)' };
+  else res = { action: 'create', reason: 'not in system → new chart' };
+  if (res.action === 'create' && !allowCreate) return { action: 'blocked', reason: 'not in system; auto-create disabled — queued for manual review' };
+  return res;
+}
+
+/** An ACTIVE provider assigned to the facility (prefers a physician) to OWN an auto-created patient. */
+async function facilityOwningProviderId(facilityId) {
+  if (!facilityId) return null;
+  const [rows] = await execute(
+    `SELECT pf.provider_id AS id FROM provider_facilities pf JOIN users u ON u.id = pf.provider_id
+       WHERE pf.facility_id = :fid AND u.status = 'active'
+       ORDER BY FIELD(u.role, 'md', 'do', 'physician', 'provider') DESC, pf.provider_id LIMIT 1`, { fid: facilityId });
+  return rows[0]?.id || null;
+}
+/**
+ * DETERMINISTIC match-or-create of the patient an inbound referral is for. FACILITY-SCOPED throughout so a
+ * fax can NEVER link to or create a patient outside the DID-routed facility (no cross-facility leakage):
+ *  - MATCH: exact name blind-index within THIS facility; confirmed by DOB when both sides have one.
+ *  - CREATE: only when the facility is known AND a real patient name is present AND the facility has an
+ *    active provider to own the record. The new patient is pinned to THIS facility. Insurance carries over.
+ * Returns { patientId, created, reason }. Never fabricates a name; a nameless/facility-less fax stays
+ * unlinked in the intake queue (document still stored — no data loss).
+ */
+async function matchOrCreatePatientForReferral(extracted, { facilityId, createdBy, allowCreate = true } = {}) {
+  const p = (extracted && extracted.patient) || {};
+  const { firstName, lastName } = splitPatientName(p.name);
+  if (!facilityId) return { patientId: null, created: false, reason: 'unknown DID — no facility to scope patient' };
+  if (!firstName || !lastName) return { patientId: null, created: false, reason: 'no patient name on document' };
+  const nameKey = `${lastName} ${firstName}`.trim().toLowerCase();
+  const bidx = blindIndex(nameKey);
+  const dob = p.dob || '';
+
+  // Load same-NAME charts in THIS facility (facility-scoped → no cross-facility leakage) with their DOB.
+  const loadCands = async () => {
+    const [rows] = await execute('SELECT id, demographics_enc FROM patients WHERE name_bidx = :b AND facility_id = :f ORDER BY id', { b: bidx, f: facilityId });
+    return rows.map((c) => { let d = {}; try { d = JSON.parse(decrypt(c.demographics_enc)); } catch { d = {}; } return { id: c.id, dob: d.dob ? String(d.dob).slice(0, 10) : '' }; });
+  };
+  const decide = (cands) => decidePatientMatch({ dob, candidates: cands, allowCreate });
+
+  const first = decide(await loadCands());
+  if (first.action === 'link') return { patientId: first.id, created: false, reason: first.reason };
+  if (first.action === 'manual') return { patientId: null, created: false, reason: first.reason };
+  if (first.action === 'blocked') return { patientId: null, created: false, reason: first.reason };
+
+  const providerId = await facilityOwningProviderId(facilityId);
+  if (!providerId) return { patientId: null, created: false, reason: 'no active provider at facility to own a new patient' };
+  const created = await createPatient({
+    providerId,
+    demographics: { firstName, lastName, ...(dob ? { dob } : {}), ...(p.sex ? { sex: p.sex } : {}), ...(p.phone ? { phone: p.phone } : {}) },
+    insurance: (extracted.insurance || []).filter((x) => x && (x.payer || x.memberId)),
+    facility: null,
+    createdBy,
+  });
+  const [row] = await execute('SELECT id FROM patients WHERE uuid = :u LIMIT 1', { u: created.uuid });
+  const newId = row[0]?.id || null;
+  // Pin the new patient to THIS facility (createPatient derives facility from the provider's PRIMARY
+  // assignment, which may differ) — guarantees facility-scoping matches the DID (no cross-facility leak).
+  if (newId) await execute('UPDATE patients SET facility_id = :f WHERE id = :id AND (facility_id IS NULL OR facility_id <> :f)', { f: facilityId, id: newId });
+  // RACE GUARD (no duplicates under concurrency): if a simultaneous fax for the SAME patient created a
+  // chart between our decide() and insert, more than one now matches. Re-decide over the fresh set; if the
+  // winner is an EARLIER chart (not the one we just made), delete our just-created duplicate (it has no
+  // children yet — the document is filed AFTER this returns) and link the earlier one.
+  const after = await loadCands();
+  const settled = decide(after);
+  if (settled.action === 'link' && settled.id && settled.id !== newId) {
+    if (newId) await execute('DELETE FROM patients WHERE id = :id', { id: newId }).catch(() => {});
+    return { patientId: settled.id, created: false, reason: 'deduped to concurrently-created chart (no duplicate)' };
+  }
+  return { patientId: newId, created: true, reason: first.reason };
+}
+
 export async function ingestIncomingFax(rec = {}) {
   const faxId = String(rec.id || rec.fax_id || '');
   if (!faxId) return null;
@@ -690,33 +798,43 @@ export async function ingestIncomingFax(rec = {}) {
     catch (e) { logger.warn({ err: e.message, faxId }, 'inbound fax record lookup failed'); }
   }
 
-  // (2) Store the received document in the facility's OWN incoming folder, with one retry. Downloaded by
-  // FAX ID per Fax.Plus docs (GET /accounts/self/files/{fax_id}, Accept: application/pdf). If it cannot be
-  // stored, we keep the fax id (re-fetchable) and record the error — never a silent data loss.
-  let s3Key = null; let storeErr = null;
-  if (faxId && s3Enabled()) {
-    for (let attempt = 1; attempt <= 2 && !s3Key; attempt += 1) {
+  // (2) Download the received document ONCE (by FAX ID per Fax.Plus docs) and reuse the SAME buffer for
+  // both S3 storage and deterministic OCR extraction — one fetch, no double download, no data loss. If it
+  // cannot be stored, keep the fax id (re-fetchable) and record the error — never a silent loss.
+  let s3Key = null; let storeErr = null; let docBuffer = null; let docSize = null;
+  if (faxId && (s3Enabled() || ocrEnabled())) {
+    for (let attempt = 1; attempt <= 2 && !docBuffer; attempt += 1) {
       try {
         const { buffer } = await downloadFaxFile(faxId);
         if (!buffer || !buffer.length) throw new Error('received document is empty');
-        s3Key = await uploadReferralObject(facilityCtx, { direction: 'incoming', fileName: `${faxId}.pdf` }, buffer, 'application/pdf');
-      } catch (e) { storeErr = e.message; logger.error({ err: e.message, faxId, attempt }, 'incoming fax download/store failed'); }
+        docBuffer = buffer; docSize = buffer.length;
+      } catch (e) { storeErr = e.message; logger.error({ err: e.message, faxId, attempt }, 'incoming fax download failed'); }
+    }
+    if (docBuffer && s3Enabled()) {
+      try { s3Key = await uploadReferralObject(facilityCtx, { direction: 'incoming', fileName: `${faxId}.pdf` }, docBuffer, 'application/pdf'); }
+      catch (e) { storeErr = e.message; logger.error({ err: e.message, faxId }, 'incoming fax store failed'); }
     }
   }
 
-  // (3) Fax.Plus AI field-extraction triage — run ONCE at ingest, cache it; never recomputed (no
-  // overusage). Gated on real credit availability (cached) so a disabled account is NOT probed on every
-  // inbound fax. Best-effort: a real result is cached; any failure is LOGGED with its reason (never
-  // silently swallowed) and simply leaves triage empty — ingestion + storage are unaffected.
+  // (3) DETERMINISTIC field extraction from the received document via the local PaddleOCR service — the
+  // AUTHORITATIVE source for the structured referral fields (patient identity, referring provider/facility,
+  // reason, diagnosis+ICD, specialty, urgency, insurance). Best-effort + real-time: any OCR failure is
+  // LOGGED (never swallowed) and leaves the fields empty — the fax + document are still ingested & stored
+  // (no data loss). Deterministic (same scan → same fields), no AI, no mock, no fabrication.
+  let extracted = null;
+  if (docBuffer && ocrEnabled()) {
+    try { extracted = await extractReferralFax({ buffer: docBuffer, contentType: 'application/pdf', fileName: `${faxId}.pdf` }); }
+    catch (e) { logger.error({ err: e.message, code: e.code, faxId }, 'deterministic inbound fax extraction failed (fax still ingested)'); }
+  }
+  const ex = extracted || {};
+  const exPatient = ex.patient || {}; const exReferring = ex.referring || {}; const exReferral = ex.referral || {};
+  // Optional Fax.Plus AI triage (secondary, non-authoritative) — kept only when the account has AI credits.
   let aiJson = null;
   if (faxEnabled() && await faxAiAvailable()) {
     try {
       const ai = await faxAi(faxId, 'extract');
       if (ai && (ai.text || ai.fields)) aiJson = JSON.stringify(ai).slice(0, 60000);
-      else logger.info({ faxId, status: ai?.status }, 'inbound fax AI triage returned no content (not cached)');
     } catch (e) { logger.warn({ err: e.message, code: e.code, faxId }, 'inbound fax AI triage skipped'); }
-  } else if (faxEnabled()) {
-    logger.info({ faxId }, 'inbound fax AI triage skipped — Fax.Plus AI not enabled on account (0 credits)');
   }
 
   // Intake owner for the inbound-fax queue: prefer an active master_admin, else fall back to an active
@@ -724,23 +842,54 @@ export async function ingestIncomingFax(rec = {}) {
   const [[owner]] = [await execute(
     "SELECT id FROM users WHERE role IN ('master_admin','super_admin') AND status = 'active' ORDER BY FIELD(role,'master_admin','super_admin'), id LIMIT 1")].map((x) => x[0]);
   if (!owner) { logger.error({ faxId }, 'no active master_admin/super_admin to own inbound fax referral — fax left in provider inbox for retry'); return null; }
+
+  // (4) Resolve (match) OR create the patient this referral is FOR — deterministically, facility-scoped so
+  // there is NO cross-facility/cross-patient leakage. A name+DOB match within the SAME facility links the
+  // existing chart; otherwise a new patient is auto-created under a provider at that facility (real-time).
+  // Auto-CREATE gate = GLOBAL super-admin setting AND the FACILITY-SPECIFIC toggle (both live-read so a
+  // toggle takes effect in ~real time). Matching an EXISTING chart is ALWAYS allowed (safe, dedupes);
+  // only creating a NEW chart is gated. When creation is off and no chart matches, the fax stays unlinked
+  // in the intake queue for manual review — document still stored (no data loss).
+  let patientId = null; let patientCreated = false; let patientReason = 'no extraction';
+  if (extracted) {
+    let allowCreate = false;
+    try { allowCreate = (await isFaxAutoCreateEnabled()) && (await facilityFaxAutoCreateEnabled(facilityId)); }
+    catch (e) { logger.warn({ err: e.message, faxId }, 'auto-create flag read failed — defaulting to no auto-create'); }
+    try { const pr = await matchOrCreatePatientForReferral(ex, { facilityId, createdBy: owner.id, allowCreate }); patientId = pr.patientId; patientCreated = pr.created; patientReason = pr.reason || (pr.created ? 'created' : 'matched'); }
+    catch (e) { logger.error({ err: e.message, faxId }, 'inbound fax patient match/create failed (referral still ingested)'); patientReason = `patient link failed: ${e.message}`; }
+  }
+
+  // Structured referral fields from the DETERMINISTIC extraction (fall back to the fax metadata when a
+  // field wasn't on the document — never fabricated). counterparty = the REFERRING (sending) side.
+  const fromNum = clip(rec.from_number || rec.from, 32).replace(/[^\d+]/g, '') || null;
+  const counterpartyName = clip(exReferring.provider || exReferring.org || '', 160) || fromNum;
+  const counterpartyOrg = clip(exReferring.org || '', 160) || null;
+  const counterpartyNpi = /^\d{10}$/.test(exReferring.npi || '') ? exReferring.npi : null;
+  const specialty = clip(exReferral.specialty || '', 100) || 'Unassigned (inbound fax)';
+  const priority = ['routine', 'urgent', 'stat'].includes(exReferral.urgency) ? exReferral.urgency : 'routine';
+  const reasonEnc = exReferral.reason ? encrypt(exReferral.reason) : null;
+  const diagnosisEnc = exReferral.diagnosis ? encrypt(exReferral.diagnosis) : null;
+  const extractedEnc = extracted ? encrypt(JSON.stringify(extracted)).slice(0, 16384) : null;
+
   const uuid = uuidv4();
   let ins;
   try {
     [ins] = await execute(
-      `INSERT INTO referrals (uuid, referral_no, provider_id, facility_id, direction, specialty, priority, status,
-          counterparty_name, counterparty_fax, fax_id, fax_status, fax_file_id, fax_s3_key, fax_pages, fax_error,
-          fax_ai, fax_ai_at, referral_date, created_by, faxed_at)
-       VALUES (:uuid, :tmpNo, :owner, :facId, 'incoming', 'Unassigned (inbound fax)', 'routine', 'received',
-          :from, :from, :fid, 'received', :fileRef, :key, :pages, :err, :ai, :aiAt, CURDATE(), :owner, NOW())`,
-      { uuid, tmpNo: `TMP-${uuid.slice(0, 18)}`, owner: owner.id, facId: facilityId, from: clip(rec.from_number || rec.from, 32).replace(/[^\d+]/g, '') || null,
-        fid: faxId, fileRef: fileRef ? String(fileRef).slice(0, 128) : null, key: s3Key,
+      `INSERT INTO referrals (uuid, referral_no, provider_id, patient_id, facility_id, direction, specialty, priority, status,
+          counterparty_name, counterparty_org, counterparty_npi, counterparty_fax, reason_enc, diagnosis_enc,
+          fax_id, fax_status, fax_file_id, fax_s3_key, fax_pages, fax_error, fax_ai, fax_ai_at,
+          extracted_enc, extracted_at, referral_date, created_by, faxed_at)
+       VALUES (:uuid, :tmpNo, :owner, :patientId, :facId, 'incoming', :specialty, :priority, 'received',
+          :cpName, :cpOrg, :cpNpi, :from, :reasonEnc, :diagnosisEnc,
+          :fid, 'received', :fileRef, :key, :pages, :err, :ai, :aiAt,
+          :exEnc, :exAt, CURDATE(), :owner, NOW())`,
+      { uuid, tmpNo: `TMP-${uuid.slice(0, 18)}`, owner: owner.id, patientId, facId: facilityId,
+        specialty, priority, cpName: counterpartyName, cpOrg: counterpartyOrg, cpNpi: counterpartyNpi, from: fromNum,
+        reasonEnc, diagnosisEnc, fid: faxId, fileRef: fileRef ? String(fileRef).slice(0, 128) : null, key: s3Key,
         pages, err: s3Key ? null : (storeErr ? String(storeErr).slice(0, 255) : null),
-        // Encrypt the AI-extracted PHI at rest (patient name/DOB/diagnosis from the fax), consistent with
-        // every other clinical field. Stored as an {enc:<base64 ciphertext>} JSON envelope so the existing
-        // `json` column type is unchanged (no migration); decoded via decodeFaxAi on read.
         ai: aiJson ? JSON.stringify({ v: 1, enc: encrypt(aiJson).toString('base64') }) : null,
-        aiAt: aiJson ? new Date() : null });
+        aiAt: aiJson ? new Date() : null,
+        exEnc: extractedEnc, exAt: extracted ? new Date() : null });
   } catch (e) {
     // Race guard: a concurrent ingest (webhook + poll) already inserted this fax_id — the UNIQUE index
     // (uniq_ref_fax_id) rejects the duplicate. Treat as already-ingested (idempotent, no duplicate row).
@@ -751,10 +900,26 @@ export async function ingestIncomingFax(rec = {}) {
     throw e; // any other error is real — never silently swallowed
   }
   await execute("UPDATE referrals SET referral_no = CONCAT('RXF-', LPAD(id, 6, '0')) WHERE id = :id", { id: ins.insertId });
-  // real-time timeline: received (+ facility) and whether the document was stored
-  await pushFaxEvent(ins.insertId, 'received', `Inbound fax${facility ? ` for ${facility.name}` : ''}${s3Key ? ' — document stored' : (storeErr ? ` — store failed: ${storeErr}` : '')}`);
-  logger.info({ faxId, referralId: ins.insertId, facilityId, stored: !!s3Key, ai: !!aiJson }, 'Inbound fax ingested as incoming referral');
-  return { uuid, existing: false, stored: !!s3Key, facilityId };
+
+  // (5) File the received document into the LINKED patient's Documents section — so the referral letter and
+  // enclosed pages live in that patient's chart (never another patient's). Best-effort; a failure here is
+  // logged and leaves the document safely stored under the referral (re-linkable) — no data loss.
+  let filedDocUuid = null;
+  if (patientId && s3Key) {
+    try {
+      const doc = await createDocumentRecord({
+        patientId, docType: 'referral', s3Key,
+        fileName: `Incoming referral fax${faxId ? ` ${faxId}` : ''}${pages ? ` (${pages}p)` : ''}.pdf`,
+        contentType: 'application/pdf', size: docSize, uploadedBy: owner.id,
+        serviceDate: new Date().toISOString().slice(0, 10),
+      });
+      filedDocUuid = doc?.uuid || null;
+    } catch (e) { logger.error({ err: e.message, faxId, patientId }, 'filing inbound fax into patient documents failed (document still stored on referral)'); }
+  }
+
+  await pushFaxEvent(ins.insertId, 'received', `Inbound fax${facility ? ` for ${facility.name}` : ''}${s3Key ? ' — document stored' : (storeErr ? ` — store failed: ${storeErr}` : '')}${patientId ? ` — ${patientCreated ? 'patient created' : 'patient matched'}${filedDocUuid ? ' + filed to chart' : ''}` : (extracted ? ` — not linked (${patientReason})` : '')}`);
+  logger.info({ faxId, referralId: ins.insertId, facilityId, stored: !!s3Key, extracted: !!extracted, patientId, patientCreated, filed: !!filedDocUuid }, 'Inbound fax ingested as incoming referral');
+  return { uuid, existing: false, stored: !!s3Key, facilityId, patientId, patientCreated };
 }
 
 /**

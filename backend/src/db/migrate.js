@@ -156,7 +156,12 @@ export async function runMigrations() {
   await ensureColumn('facilities', 'fax_incoming_number', "`fax_incoming_number` VARCHAR(24) NULL AFTER `fax`");
   await ensureColumn('facilities', 'fax_outgoing_number', "`fax_outgoing_number` VARCHAR(24) NULL AFTER `fax_incoming_number`");
   await ensureColumn('facilities', 'fax_referrals_enabled', "`fax_referrals_enabled` TINYINT(1) NOT NULL DEFAULT 1 AFTER `fax_outgoing_number`");
-  await ensureColumn('facilities', 'fax_updated_by', "`fax_updated_by` BIGINT UNSIGNED NULL AFTER `fax_referrals_enabled`");
+  // FACILITY-SPECIFIC control: may an incoming fax to THIS facility's DID auto-create a patient when no
+  // existing chart matches? ON by default; a super/master admin can turn it off per facility so unmatched
+  // inbound faxes for that facility stay unlinked in the intake queue for manual review. Matching an
+  // EXISTING chart is unaffected — only NEW-chart creation is gated.
+  await ensureColumn('facilities', 'fax_auto_create_patients', "`fax_auto_create_patients` TINYINT(1) NOT NULL DEFAULT 1 AFTER `fax_referrals_enabled`");
+  await ensureColumn('facilities', 'fax_updated_by', "`fax_updated_by` BIGINT UNSIGNED NULL AFTER `fax_auto_create_patients`");
   await ensureColumn('facilities', 'fax_updated_at', "`fax_updated_at` DATETIME NULL AFTER `fax_updated_by`");
   // UNIQUE (not just indexed): an inbound DID must map to exactly ONE facility, else received PHI faxes
   // could mis-route. A UNIQUE index on a NULLable column still allows many NULLs (facilities with no DID),
@@ -351,6 +356,13 @@ export async function runMigrations() {
     // patient/specialty/summary) without a manual button.
     await ensureColumn('referrals', 'fax_ai', "`fax_ai` JSON NULL AFTER `fax_events`");
     await ensureColumn('referrals', 'fax_ai_at', "`fax_ai_at` DATETIME NULL AFTER `fax_ai`");
+    // DETERMINISTIC OCR field-extraction envelope for an INCOMING fax (patient identity, referring
+    // provider/facility, reason, diagnosis+ICD, requested specialty, urgency, insurance) — computed once at
+    // ingest by the local PaddleOCR service (NO AI, NO mock). Encrypted at rest ({v,enc} JSON envelope) as
+    // it holds PHI, consistent with every other clinical field. Distinct from fax_ai (the optional Fax.Plus
+    // triage); this deterministic result is authoritative for the structured referral fields.
+    await ensureColumn('referrals', 'extracted_enc', "`extracted_enc` VARBINARY(16384) NULL AFTER `fax_ai_at`");
+    await ensureColumn('referrals', 'extracted_at', "`extracted_at` DATETIME NULL AFTER `extracted_enc`");
     await ensureIndex('referrals', 'idx_ref_fax', 'fax_id');
     // Idempotency HARD-GUARANTEE for inbound ingestion: dedupe any duplicate fax_id rows a pre-index
     // concurrent ingest (webhook + poll racing) may have created — keep the earliest — then enforce a

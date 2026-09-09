@@ -8,11 +8,13 @@ import { logger } from '../config/logger.js';
  * eligibility checks never add a DB round-trip.
  */
 
-// Defaults applied when a key has never been set. Eligibility is ON by default.
-const DEFAULTS = Object.freeze({ eligibilityEnabled: true });
+// Defaults applied when a key has never been set. Eligibility is ON by default. Automatic patient
+// creation from an incoming referral fax is ON by default (deterministic match-or-create); a super/master
+// admin can disable it so unmatched inbound faxes stay unlinked in the intake queue for manual review.
+const DEFAULTS = Object.freeze({ eligibilityEnabled: true, faxAutoCreatePatients: true });
 
 // Only these keys are accepted from an admin PATCH (allowlist — no arbitrary keys).
-const BOOLEAN_KEYS = new Set(['eligibilityEnabled']);
+const BOOLEAN_KEYS = new Set(['eligibilityEnabled', 'faxAutoCreatePatients']);
 
 const CACHE_TTL_MS = 15 * 1000;
 let cache = null;
@@ -51,6 +53,14 @@ export function invalidateSettingsCache() { cache = null; cacheAt = 0; }
 export async function isEligibilityEnabled() {
   const s = await getSettings();
   return s.eligibilityEnabled !== false;
+}
+
+/** Whether inbound-fax ingestion may AUTO-CREATE a patient when no existing chart matches. Read live at
+ *  ingest (cached ≤15s) so a super/master admin toggle takes effect in ~real time. Matching an EXISTING
+ *  chart is unaffected — only the creation of a new chart is gated. */
+export async function isFaxAutoCreateEnabled() {
+  const s = await getSettings();
+  return s.faxAutoCreatePatients !== false;
 }
 
 /**

@@ -393,9 +393,14 @@ async function enrichFacilityFromRegistry(suggestions) {
 }
 
 /* ---- HTTP call to the OCR microservice ----------------------------------- */
-export async function extractDocument({ buffer, contentType, fileName }) {
+/**
+ * Low-level DETERMINISTIC structured-OCR call: POST the document to the Python OCR microservice
+ * (PP-StructureV2 + docTR) and return the raw pages plus flattened { kv, text }. No AI, no mock — the
+ * exact key/value pairs and text the scan produced. Shared by extractDocument (face sheets) and the
+ * deterministic referral-fax field extractor (referralExtractService).
+ */
+export async function ocrExtractRaw({ buffer, contentType, fileName }) {
   if (!config.ocr.serviceUrl) throw Object.assign(new Error('Document extraction is not configured.'), { status: 503, code: 'OCR_DISABLED' });
-
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.ocr.timeoutMs);
   try {
@@ -403,7 +408,6 @@ export async function extractDocument({ buffer, contentType, fileName }) {
     form.append('file', new Blob([buffer], { type: contentType || 'application/octet-stream' }), fileName || 'document');
     const headers = {};
     if (config.ocr.apiKey) headers['X-OCR-Key'] = config.ocr.apiKey;
-
     const resp = await fetch(`${config.ocr.serviceUrl.replace(/\/$/, '')}/extract`, {
       method: 'POST', body: form, headers, signal: controller.signal,
     });
@@ -413,6 +417,19 @@ export async function extractDocument({ buffer, contentType, fileName }) {
     }
     const data = await resp.json();
     const pages = data.pages || [];
+    return { pages, ...flatten(pages) };
+  } catch (e) {
+    if (e.name === 'AbortError') throw Object.assign(new Error('Extraction timed out — try a clearer scan.'), { status: 504, code: 'EXTRACT_TIMEOUT' });
+    if (!e.status) logger.error({ err: e.message }, 'OCR extraction error');
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function extractDocument({ buffer, contentType, fileName }) {
+  const { pages } = await ocrExtractRaw({ buffer, contentType, fileName });
+  try {
     const suggestions = toSuggestions(flatten(pages));
     // Facility fields that need geometry (values sit under their labels).
     const facGeo = parseFacilityGeo(pages);
@@ -423,10 +440,7 @@ export async function extractDocument({ buffer, contentType, fileName }) {
     await enrichFacilityFromRegistry(suggestions);
     return suggestions;
   } catch (e) {
-    if (e.name === 'AbortError') throw Object.assign(new Error('Extraction timed out — try a clearer scan.'), { status: 504, code: 'EXTRACT_TIMEOUT' });
-    if (!e.status) logger.error({ err: e.message }, 'OCR extraction error');
+    if (!e.status) logger.error({ err: e.message }, 'OCR mapping error');
     throw e;
-  } finally {
-    clearTimeout(timer);
   }
 }

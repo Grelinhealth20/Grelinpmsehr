@@ -39,12 +39,13 @@ function toConfig(r) {
     outgoingNumber: r.fax_outgoing_number || null,
     enabled: r.fax_referrals_enabled == null ? true : !!Number(r.fax_referrals_enabled), // faxing (send/receive)
     referralsEnabled: r.referrals_enabled == null ? true : !!Number(r.referrals_enabled), // the Referrals feature
+    autoCreatePatients: r.fax_auto_create_patients == null ? true : !!Number(r.fax_auto_create_patients), // auto-create a patient from an inbound fax
     updatedAt: r.fax_updated_at || null,
   };
 }
 
 const FAX_COLS = `f.uuid, f.name, f.npi, f.status,
-  f.fax_incoming_number, f.fax_outgoing_number, f.fax_referrals_enabled, f.referrals_enabled,
+  f.fax_incoming_number, f.fax_outgoing_number, f.fax_referrals_enabled, f.fax_auto_create_patients, f.referrals_enabled,
   DATE_FORMAT(f.fax_updated_at, '%Y-%m-%dT%H:%i:%sZ') AS fax_updated_at`;
 
 /** The platform's provisioned Fax.Plus numbers — shown to the admin as REFERENCE only (a number an
@@ -123,6 +124,7 @@ export async function setFacilityFaxConfig(uuid, patch = {}, adminId = null) {
   }
   if (patch.enabled !== undefined) { sets.push('fax_referrals_enabled = :en'); params.en = patch.enabled ? 1 : 0; }
   if (patch.referralsEnabled !== undefined) { sets.push('referrals_enabled = :re'); params.re = patch.referralsEnabled ? 1 : 0; }
+  if (patch.autoCreatePatients !== undefined) { sets.push('fax_auto_create_patients = :ac'); params.ac = patch.autoCreatePatients ? 1 : 0; }
 
   try {
     await execute(`UPDATE facilities SET ${sets.join(', ')} WHERE id = :id`, params);
@@ -197,6 +199,17 @@ export async function facilityByIncomingFaxNumber(number) {
   if (!n) return null;
   const map = await routingMap();
   return map.get(n) || null;
+}
+
+/** FACILITY-SPECIFIC, LIVE read (no cache): may this facility auto-create a patient from an inbound fax?
+ *  Read straight from the column so a Super Admin toggle takes effect immediately (real time). Default ON
+ *  for an unknown/missing facility is NOT applied here — a null facilityId returns false (no facility, no
+ *  auto-create), which the caller already enforces. */
+export async function facilityFaxAutoCreateEnabled(facilityId) {
+  if (!facilityId) return false;
+  const [rows] = await execute('SELECT fax_auto_create_patients AS ac FROM facilities WHERE id = :id LIMIT 1', { id: facilityId });
+  if (!rows[0]) return false;
+  return rows[0].ac == null ? true : !!Number(rows[0].ac);
 }
 
 // --- Per-facility REFERRAL FEATURE gate (Super Admin) ---------------------------------------------

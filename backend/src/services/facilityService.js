@@ -47,7 +47,7 @@ async function inlineLogo(facility, rawKey) {
 
 const FAC_COLS = `f.uuid, f.npi, f.name, f.address, f.city, f.state, f.zip, f.phone, f.fax,
   f.taxonomy, f.taxonomy_code, f.tax_id, f.authorized_official, f.enumeration_date, f.mailing_address,
-  f.nppes_status, f.logo, f.status, f.coding_enabled, f.eligibility_enabled, f.source,
+  f.nppes_status, f.logo, f.status, f.coding_enabled, f.eligibility_enabled, f.fax_auto_create_patients, f.source,
   DATE_FORMAT(f.created_at, '%Y-%m-%dT%H:%i:%sZ') AS created_at`;
 const boolFlag = (v) => v == null ? true : !!Number(v); // per-facility flags default ON
 
@@ -69,6 +69,7 @@ function toFacility(r) {
     status: r.status, source: r.source,
     codingEnabled: boolFlag(r.coding_enabled),
     eligibilityEnabled: boolFlag(r.eligibility_enabled),
+    autoCreatePatients: boolFlag(r.fax_auto_create_patients), // auto-create a patient from an inbound fax (per-facility)
     providerCount: r.provider_count != null ? Number(r.provider_count) : undefined,
     createdAt: r.created_at,
   };
@@ -199,6 +200,7 @@ export async function setFacilityFlags(uuid, flags = {}) {
   const sets = []; const params = { uuid };
   if (flags.codingEnabled !== undefined) { sets.push('coding_enabled = :ce'); params.ce = flags.codingEnabled ? 1 : 0; }
   if (flags.eligibilityEnabled !== undefined) { sets.push('eligibility_enabled = :ee'); params.ee = flags.eligibilityEnabled ? 1 : 0; }
+  if (flags.autoCreatePatients !== undefined) { sets.push('fax_auto_create_patients = :ac'); params.ac = flags.autoCreatePatients ? 1 : 0; }
   if (!sets.length) return getFacility(uuid);
   const [res] = await execute(`UPDATE facilities SET ${sets.join(', ')} WHERE uuid = :uuid`, params);
   if (!res.affectedRows) return null;

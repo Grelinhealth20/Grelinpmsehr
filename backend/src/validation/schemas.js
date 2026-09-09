@@ -416,5 +416,5 @@ export const setUserFacilitiesSchema = z.object({ facilityUuids: z.array(z.strin
 
 // System settings (super-admin feature flags). Only known boolean flags accepted.
 export const updateSettingsSchema = z
-  .object({ eligibilityEnabled: z.boolean().optional() })
+  .object({ eligibilityEnabled: z.boolean().optional(), faxAutoCreatePatients: z.boolean().optional() })
   .strict();
