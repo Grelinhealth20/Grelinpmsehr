@@ -10,7 +10,12 @@ const GENESIS = '0'.repeat(64);
 function stableStringify(v) {
   if (v === null || typeof v !== 'object') return JSON.stringify(v === undefined ? null : v);
   if (Array.isArray(v)) return `[${v.map(stableStringify).join(',')}]`;
-  return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${stableStringify(v[k])}`).join(',')}}`;
+  // Drop keys whose value is `undefined` — mirrors JSON.stringify AND the MySQL JSON column, which both
+  // OMIT such keys. Without this, a row hashed at WRITE time over metadata containing an undefined value
+  // (e.g. appointment.create's `{ procedureCode: procedureCode || undefined }`) serialised it as `null`,
+  // but VERIFY re-reads the stored JSON (key already dropped) and recomputes a different hash → a false
+  // "content altered" break that drifted the whole chain out of verifiability. Absent key ≡ undefined value.
+  return `{${Object.keys(v).sort().filter((k) => v[k] !== undefined).map((k) => `${JSON.stringify(k)}:${stableStringify(v[k])}`).join(',')}}`;
 }
 
 /** Canonical, order-stable content string for one audit row — the pre-image of its row_hash. */
