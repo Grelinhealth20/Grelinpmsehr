@@ -110,12 +110,15 @@ async function modifierFindings(lines) {
     "SELECT hcpcs FROM mpfs_rvu WHERE year=2026 AND modifier='' AND hcpcs IN (?) AND global_days IN ('000','010')", [codes]);
   const minor = rows.map((r) => r.hcpcs).filter((p) => !em.includes(p));
   if (!minor.length) return findings;
-  const emCode = em[0];
-  const already = lines.some((l) => norm(l.cpt) === emCode && /\b25\b/.test(l.modifiers || ''));
-  if (already) return findings;
-  findings.push({ type: 'MODIFIER_25', severity: 'warning', code: emCode, suggestedModifier: '25',
-    message: `E/M ${emCode} is billed with a minor procedure (${minor.join(', ')}) — append modifier 25 to ${emCode} if it was a significant, separately identifiable E/M service, or it may be denied as bundled.`,
-    source: 'mpfs global period + CMS modifier 25 rule' });
+  // Evaluate EVERY E/M line, not just the first — each E/M billed alongside a minor procedure needs its
+  // own modifier-25 to avoid a bundling denial.
+  for (const emCode of [...new Set(em)]) {
+    const already = lines.some((l) => norm(l.cpt) === emCode && /\b25\b/.test(l.modifiers || ''));
+    if (already) continue;
+    findings.push({ type: 'MODIFIER_25', severity: 'warning', code: emCode, suggestedModifier: '25',
+      message: `E/M ${emCode} is billed with a minor procedure (${minor.join(', ')}) — append modifier 25 to ${emCode} if it was a significant, separately identifiable E/M service, or it may be denied as bundled.`,
+      source: 'mpfs global period + CMS modifier 25 rule' });
+  }
   return findings;
 }
 
@@ -135,6 +138,38 @@ async function knownModifiers() {
   return m;
 }
 const splitModifiers = (s) => String(s || '').split(/[\s,;+/|]+/).map((x) => norm(x)).filter(Boolean);
+/**
+ * MPFS modifier-POLICY validity (deterministic, dataset-driven) — the denial-preventers beyond modifier
+ * 25 & the NCCI 59/X guidance. Uses the MPFS bilateral-surgery (bilat_surg) and PC/TC (pctc_ind)
+ * indicators so a laterality or professional/technical modifier that CMS will reject is caught before
+ * submission. Fires ONLY when the specific modifier is present on an incompatible code (no false-positive
+ * noise), and only for modifiers actually billed.
+ */
+async function modifierPolicyFindings(lines) {
+  const findings = [];
+  const withMod = lines.filter((l) => l && l.cpt && splitModifiers(l.modifiers).length);
+  const codes = [...new Set(withMod.map((l) => norm(l.cpt)).filter(Boolean))];
+  if (!codes.length) return findings;
+  const [rows] = await pool.query(
+    "SELECT hcpcs, bilat_surg, pctc_ind FROM mpfs_rvu WHERE year=2026 AND modifier='' AND hcpcs IN (?)", [codes]);
+  const pol = new Map(rows.map((r) => [r.hcpcs, r]));
+  for (const l of withMod) {
+    const c = norm(l.cpt); const p = pol.get(c); if (!p) continue;
+    const mods = splitModifiers(l.modifiers).map((m) => String(m).toUpperCase());
+    const push = (severity, modifier, message) => findings.push({ type: 'MODIFIER_POLICY', severity, code: c, modifier, message, source: 'mpfs bilat_surg/pctc_ind' });
+    // Bilateral modifier 50 must match the code's MPFS bilateral-surgery indicator.
+    if (mods.includes('50')) {
+      if (p.bilat_surg === '0') push('error', '50', `Modifier 50 is not payable on ${c} — its MPFS bilateral indicator is 0 (bilateral adjustment does not apply); appended, it will deny. Use the correct laterality (RT/LT) or unilateral coding.`);
+      else if (p.bilat_surg === '2') push('warning', '50', `${c} is inherently bilateral (MPFS bilateral indicator 2) — modifier 50 is inappropriate and reduces/denies payment; report the code once without 50.`);
+      else if (p.bilat_surg === '9') push('warning', '50', `The bilateral concept does not apply to ${c} (MPFS bilateral indicator 9) — modifier 50 may deny.`);
+    }
+    // Professional (26) / Technical (TC) component must exist for the code.
+    if (mods.includes('26') && p.pctc_ind === '3') push('error', '26', `Modifier 26 is invalid on ${c} — it is a technical-component-only service (PC/TC indicator 3); there is no professional component to bill.`);
+    if (mods.includes('TC') && p.pctc_ind === '2') push('error', 'TC', `Modifier TC is invalid on ${c} — it is a professional-component-only service (PC/TC indicator 2); there is no technical component to bill.`);
+  }
+  return findings;
+}
+
 async function modifierValidityFindings(lines) {
   const findings = [];
   const pairs = [];
@@ -157,17 +192,35 @@ async function mueFindings(lines) {
   const findings = [];
   const codes = lines.map((l) => norm(l.cpt)).filter(Boolean);
   if (!codes.length) return findings;
-  const [rows] = await pool.query('SELECT code, mue_value, mai FROM ncci_mue WHERE code IN (?)', [codes]);
+  const [rows] = await pool.query('SELECT code, mue_value, mai FROM ncci_mue WHERE code IN (?)', [[...new Set(codes)]]);
   const mue = new Map(rows.map((r) => [r.code, r]));
+  // MAI 2/3 are DATE-OF-SERVICE edits: the same CPT split across multiple lines, each under the MUE but
+  // SUMMING over it, must still fire. MAI 1 is a per-line edit. So sum units per code for the DOS edits
+  // and compare the total, while keeping per-line adjudication for MAI 1.
+  const perCodeUnits = new Map();
+  for (const l of lines) { const c = norm(l.cpt); if (!c) continue; perCodeUnits.set(c, (perCodeUnits.get(c) || 0) + Number(l.units || 1)); }
+  const reportedDos = new Set();
   for (const l of lines) {
-    const m = mue.get(norm(l.cpt));
-    const units = Number(l.units || 1);
-    if (m && units > Number(m.mue_value)) {
-      findings.push({
-        type: 'NCCI_MUE', severity: 'error', code: norm(l.cpt), units, mueValue: Number(m.mue_value), mai: m.mai,
-        message: `Units billed (${units}) exceed the MUE of ${m.mue_value} for ${norm(l.cpt)} (MAI ${m.mai}).`,
-        source: 'ncci_mue',
-      });
+    const c = norm(l.cpt);
+    const m = mue.get(c);
+    if (!m) continue;
+    const mai = String(m.mai);
+    if (mai === '2' || mai === '3') {
+      if (reportedDos.has(c)) continue; // one finding per code for a date-of-service edit
+      reportedDos.add(c);
+      const total = perCodeUnits.get(c);
+      if (total > Number(m.mue_value)) {
+        findings.push({ type: 'NCCI_MUE', severity: 'error', code: c, units: total, mueValue: Number(m.mue_value), mai: m.mai,
+          message: `Total units billed (${total}) across the date of service exceed the MUE of ${m.mue_value} for ${c} (MAI ${m.mai}, date-of-service edit).`,
+          source: 'ncci_mue' });
+      }
+    } else {
+      const units = Number(l.units || 1);
+      if (units > Number(m.mue_value)) {
+        findings.push({ type: 'NCCI_MUE', severity: 'error', code: c, units, mueValue: Number(m.mue_value), mai: m.mai,
+          message: `Units billed (${units}) exceed the MUE of ${m.mue_value} for ${c} (MAI ${m.mai}).`,
+          source: 'ncci_mue' });
+      }
     }
   }
   return findings;
@@ -498,6 +551,7 @@ export async function scrubClaim(claim = {}) {
     aocFindings(codes),
     modifierFindings(lines),
     modifierValidityFindings(lines),
+    modifierPolicyFindings(lines),
     icdBillableFindings(diagnoses),
     ageSexFindings(diagnoses, claim.patient),
     specificityFindings(diagnoses),

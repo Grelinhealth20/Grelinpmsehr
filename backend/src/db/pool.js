@@ -111,7 +111,9 @@ export async function withTransaction(fn) {
   try {
     await conn.beginTransaction();
     const exec = async (sql, params = {}) => { const [rows] = await conn.execute(sql, params); return [rows]; };
-    const result = await fn(exec);
+    // Pass the raw connection too (2nd arg) for callers that need conn.query — e.g. the bulk
+    // `INSERT ... VALUES ?` array form, which the prepared-statement `exec` path does not support.
+    const result = await fn(exec, conn);
     await conn.commit();
     return result;
   } catch (err) {

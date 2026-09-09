@@ -128,10 +128,28 @@ function enumeratedDxLines(text) {
   return out;
 }
 
+/**
+ * Note content is persisted as `{ sections: { key: text }, checks, vitals, prescriptions, ... }`, but the
+ * predictor's extractors read FLAT top-level keys (assessment / hpi / procedures / …). Surface the section
+ * text at the top level so prediction works on real stored notes. Without this, every real record yielded
+ * ZERO diagnoses (→ no medical-necessity linkage → coding denials). Idempotent; a note already flat is
+ * returned unchanged. Reserved keys (checks/vitals/prescriptions/…) are preserved.
+ */
+export function withFlatSections(content = {}) {
+  if (!content || typeof content !== 'object' || !content.sections || typeof content.sections !== 'object') return content || {};
+  return { ...content, ...content.sections };
+}
+
 /** Extract candidate diagnosis phrases from the diagnosis-bearing sections. Each list item is one
  *  problem; the condition head is taken (before status/etiology). Negated items are flagged. */
-export function extractProblemPhrases(content = {}, noteType = 'hp') {
-  const sources = ['assessment', 'dischargeDiagnoses', 'chiefComplaint', 'reasonForVisit'];
+export function extractProblemPhrases(rawContent = {}, noteType = 'hp') {
+  const content = withFlatSections(rawContent);
+  // Diagnosis-bearing sections across ALL service lines: SNF (assessment/…), Pain (pnDiagnoses),
+  // PI (piDiagnoses/piComplaints). PLUS any section key that names diagnoses (…Diagnoses/…Diagnosis)
+  // so a new template's diagnosis section is picked up automatically — dynamic, not hard-coded per type.
+  const explicit = ['assessment', 'dischargeDiagnoses', 'chiefComplaint', 'reasonForVisit',
+    'pnDiagnoses', 'piDiagnoses', 'piComplaints'];
+  const sources = [...new Set([...explicit, ...Object.keys(content).filter((k) => /diagnos[ei]s$/i.test(k))])];
   const seen = new Set();
   const items = [];
   const push = (parsed, section) => {
@@ -535,10 +553,18 @@ function documentedMinutes(content = {}) {
  * note is not pushed up by an incidental word. The coder confirms and can raise the level.
  */
 function mdmProxyLevel(content = {}, problemCount = 0, fam) {
-  // Clinical reasoning for THIS visit lives in assessment/plan/subjective — scope acuity detection there
-  // (avoids historical narrative in the HPI inflating the level).
-  const acuityText = [content.assessment, content.plan, content.subjective, content.objective, content.mdm,
-    content.chiefComplaint].filter((v) => typeof v === 'string').join('  ').toLowerCase();
+  // Clinical reasoning for THIS visit lives in the assessment/plan/diagnoses/MDM/complaint sections —
+  // scope acuity detection there (deliberately EXCLUDING the HPI/history narrative, which would inflate
+  // the level with past events). Match those sections by NAME PATTERN so it works across every service
+  // line dynamically: SNF (assessment/plan), Pain (pnDiagnoses/pnPlan/pnResponse), PI (piDiagnoses/
+  // piPlanWork/piCausation) — no per-note-type hard-coding, and a new template's plan/assessment section
+  // is picked up automatically. (HPI-type keys like pnPainStory / piMechanism don't match, by design.)
+  const ACUITY_KEY = /assess|plan|diagnos|impression|\bmdm\b|subjective|objective|complaint|causation|response|reeval|decompensat|disposition/i;
+  const acuityText = Object.keys(content)
+    .filter((k) => ACUITY_KEY.test(k))
+    .map((k) => content[k])
+    .filter((v) => typeof v === 'string')
+    .join('  ').toLowerCase();
   // HIGH is reserved for genuine instability / threat to life — NOT a documented-but-managed acute
   // illness (professional coders level a managed acute respiratory failure at 99309 moderate, not high).
   const highSig = /(threat to life|life.?threaten|hemodynamic instab|septic shock|respiratory arrest|cardiac arrest|status epilepticus|code (blue|status)|rapid response|icu transfer|impending (respiratory|cardiac|arrest|herniation)|actively dying|comfort care transition)/.test(acuityText);
@@ -582,19 +608,21 @@ export function predictEM(content = {}, noteType = 'hp', problemCount = 0, posHi
     idx = (minutes != null && minutes > 30) ? 1 : 0;
     basis = minutes != null ? `documented time ${minutes} min` : 'default (30 min or less)';
     confirm = minutes == null;
-  } else if (minutes != null) {
-    for (let i = 0; i < fam.times.length; i += 1) if (minutes >= fam.times[i]) idx = i;
-    basis = `documented time ${minutes} min`;
   } else {
-    // No documented time → MDM proxy per the current AMA/CMS "Number & Complexity of Problems Addressed"
-    // table. The discriminator is the ACUITY of THIS visit, not raw problem count: a monthly SNF visit
-    // for multiple STABLE chronic illnesses is LOW (professional coders level these at 99308, POS 32),
-    // and we escalate to MODERATE only when the note documents current acuity (exacerbation / progression,
-    // an acute systemic illness, a new/undiagnosed problem, or a hospital transfer), and to HIGH for
-    // documented instability or a threat to life. Under-coding is the compliance-safe direction — over-
-    // coding E/M is the #1 audit risk — and the coder confirms and can raise the level when supported.
+    // Level by the HIGHER of the two CMS-permitted criteria — MDM proxy AND documented total time — since
+    // a provider may select the E/M level on EITHER (2021 AMA/CMS). Using time alone (as before) under-
+    // coded when MDM supported a higher level; using MDM alone ignored a longer documented visit. Both are
+    // legitimate, documented, defensible criteria, so code to whichever supports the higher level; always
+    // confirm (E/M leveling is provider-attested). Under-coding is only avoided WITHIN documented support.
     const em = mdmProxyLevel(content, problemCount, fam);
-    idx = em.idx; basis = em.basis; confirm = true;
+    idx = em.idx; basis = em.basis;
+    if (minutes != null) {
+      let timeIdx = 0; for (let i = 0; i < fam.times.length; i += 1) if (minutes >= fam.times[i]) timeIdx = i;
+      if (timeIdx > idx) { idx = timeIdx; basis = `documented total time ${minutes} min (time-based; MDM proxy supports ${fam.codes[em.idx]})`; }
+      else if (timeIdx === idx) basis = `${em.basis}; corroborated by documented time ${minutes} min`;
+      else basis = `${em.basis} (documented time ${minutes} min alone supports only ${fam.codes[timeIdx]}; MDM level used)`;
+    }
+    confirm = true;
   }
   // Hospice ATTENDING visit → modifier GV (attending physician, not employed by the hospice, care
   // related to the terminal condition). Coder confirms GV vs GW (services unrelated to the terminal dx).
@@ -633,8 +661,12 @@ export function predictProcedures(content = {}) {
   const ct = spineRegionCT(t);
   const push = (cpt, extra = {}) => out.push({ cpt, units: 1, modifiers: latMod, confirm: true, ...extra });
 
-  // Transforaminal epidural steroid injection (TFESI) — imaging-inclusive codes.
-  if (/transforaminal|\btfesi\b|selective nerve root block|\bsnrb\b/.test(t) && /(epidural|steroid|injection|block)/.test(t)) {
+  // Transforaminal epidural steroid injection (TFESI) — imaging-inclusive codes. The abbreviations
+  // TFESI/SNRB inherently denote the injection, so they alone suffice; the spelled-out forms still
+  // require an action word (injection/steroid/epidural/block/nerve root).
+  const tfesiHit = /\btfesi\b|\bsnrb\b/.test(t)
+    || ((/transforaminal|selective nerve root block/.test(t)) && /(epidural|steroid|injection|inject|block|nerve root)/.test(t));
+  if (tfesiHit) {
     push(ct ? '64479' : '64483', { basis: `transforaminal epidural, ${ct ? 'cervical/thoracic' : 'lumbar/sacral'} (add ${ct ? '64480' : '64484'} per additional level)` });
   } else if (/(interlaminar|caudal|epidural steroid|\besi\b)/.test(t) && /(epidural|steroid|injection|block)/.test(t)) {
     // Interlaminar/caudal epidural steroid injection (with imaging guidance).
@@ -654,13 +686,23 @@ export function predictProcedures(content = {}) {
     if (/(radiofrequency|\brfa\b|ablation|neurotomy)/.test(t)) push('64625', { basis: 'radiofrequency ablation, SI joint nerves (imaging-inclusive)' });
     else if (/(injection|inject|block|arthrogram)/.test(t)) push('27096', { basis: 'sacroiliac joint injection with imaging guidance' });
   }
-  // Trigger point injection(s) — by muscle count.
-  if (/trigger point/.test(t) && /(injection|inject|\btpi\b)/.test(t)) {
+  // Trigger point injection(s) — by muscle count. The abbreviation "TPI" alone denotes the injection;
+  // otherwise require "trigger point" + an injection action word.
+  if (/\btpi\b/.test(t) || (/trigger point/.test(t) && /(injection|inject)/.test(t))) {
     const three = /\b(three|four|five|3|4|5)\b[^.]{0,20}muscle|\bmultiple muscles\b/.test(t);
     out.push({ cpt: three ? '20553' : '20552', units: 1, modifiers: '', confirm: true, basis: `trigger point injection, ${three ? '3 or more' : '1-2'} muscle(s)` });
   }
-  // Major/intermediate/small joint or bursa injection/aspiration (non-spine).
-  if (/(joint|bursa)/.test(t) && /(injection|inject|aspiration|arthrocentesis)/.test(t) && !/(facet|sacroiliac|si joint|epidural|spine|spinal|paravertebral)/.test(t)) {
+  // Major/intermediate/small PERIPHERAL joint or bursa injection/aspiration. No blanket spine-exclusion:
+  // the specific peripheral-joint names below (knee/shoulder/hip/elbow/…) never overlap with spine terms,
+  // so a facet/SI/epidural note simply matches none of them — while a note documenting BOTH a spine
+  // procedure AND a peripheral joint injection now correctly predicts the peripheral joint too.
+  // Peripheral joint/bursa injection or aspiration. Gate on an injection ACTION + a JOINT-CONTEXT term
+  // (the word joint/bursa/arthrocentesis/aspiration OR a joint-type/abbreviation like TMJ, interphalangeal,
+  // subacromial, glenohumeral…) + a specific joint name. This catches real phrasings that omit the literal
+  // word "joint" ("TMJ injection", "great toe interphalangeal injection") WITHOUT false-firing on an
+  // unrelated procedure that merely mentions a joint diagnosis (e.g. an epidural with a "knee OA" dx).
+  const jointCtx = /(joint|bursa|arthrocentesis|aspiration|interphalangeal|metacarpophalangeal|glenohumeral|acromioclavicular|\btmj\b|temporomandibular|subacromial|trochanteric|\bmcp\b|\bpip\b|\bdip\b)/.test(t);
+  if (/(injection|inject|aspiration|arthrocentesis)/.test(t) && jointCtx) {
     if (/\b(knee|shoulder|hip|glenohumeral)\b/.test(t)) push('20610', { basis: 'major joint/bursa injection or aspiration (knee/shoulder/hip)' });
     else if (/\b(elbow|wrist|ankle|acromioclavicular|\btmj\b|temporomandibular)\b/.test(t)) push('20605', { basis: 'intermediate joint/bursa injection or aspiration' });
     else if (/\b(finger|toe|interphalangeal|metacarpophalangeal|\bmcp\b|\bpip\b|\bdip\b)\b/.test(t)) push('20600', { basis: 'small joint/bursa injection or aspiration' });
@@ -669,6 +711,9 @@ export function predictProcedures(content = {}) {
 }
 
 export async function predictEncounterCoding(content = {}, { noteType = 'hp', pos } = {}) {
+  // Surface section text to the flat keys the extractors (diagnoses, E/M, procedures) read — real notes
+  // store text under content.sections, so without this the whole prediction ran on empty input.
+  content = withFlatSections(content);
   const { diagnoses, unmatched } = await predictDiagnosesFromNote(content, { noteType });
   // `pos` is the facility Place of Service (authoritative when provided); otherwise the setting is
   // detected from the note text so an Assisted-Living / home visit bills the home-or-residence family.
@@ -815,6 +860,7 @@ async function applyLinkage(diagnoses, content) {
 
 /** Predict billable ICD-10-CM diagnoses for a note → { diagnoses:[...], unmatched:[...] }. */
 export async function predictDiagnosesFromNote(content = {}, { noteType = 'hp' } = {}) {
+  content = withFlatSections(content); // real notes store text under .sections; flatten so linkage sees it too
   const items = extractProblemPhrases(content, noteType);
   const diagnoses = [];
   const unmatched = [];

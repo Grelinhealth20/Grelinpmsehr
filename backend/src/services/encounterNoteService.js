@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { execute, pool } from '../db/pool.js';
+import { execute, pool, withTransaction } from '../db/pool.js';
 import { scrubClaim } from './codingService.js';
 import { predictEncounterCoding } from './codePredictionService.js';
 import { calcRaf, deriveSegment } from './hccRafService.js';
@@ -294,22 +294,32 @@ export async function saveNoteCodes(noteUuid, providerId, { diagnoses = [], proc
   const r = await findDraft(noteUuid, providerId);
   if (!r) return null;
   if (r.status === 'signed') return { locked: true }; // signed notes are immutable
-  await execute('DELETE FROM encounter_note_codes WHERE note_id = :id', { id: r.id });
+  // Build the replacement rows FIRST (so any bad input fails before we touch the DB), coercing units
+  // safely: Number({}) / Number('x') → NaN, which must become NULL (never a NaN INSERT).
   const rows = [];
   (Array.isArray(diagnoses) ? diagnoses : []).forEach((d, i) => {
-    if (d && d.icd) rows.push([r.id, 'dx', 'ICD10CM', String(d.icd).slice(0, 20), (d.description || '').slice(0, 512) || null,
-      d.snomedCode ? String(d.snomedCode).slice(0, 20) : null, (d.snomedTerm || '').slice(0, 512) || null, null, null,
+    if (d && d.icd) rows.push([r.id, 'dx', 'ICD10CM', String(d.icd).slice(0, 20), (String(d.description ?? '')).slice(0, 512) || null,
+      d.snomedCode ? String(d.snomedCode).slice(0, 20) : null, (String(d.snomedTerm ?? '')).slice(0, 512) || null, null, null,
       d.primary ? 1 : 0, i]);
   });
   (Array.isArray(procedures) ? procedures : []).forEach((p, i) => {
-    if (p && p.cpt) rows.push([r.id, 'proc', 'CPT', String(p.cpt).slice(0, 20), (p.description || '').slice(0, 512) || null,
-      null, null, (p.modifiers || '').slice(0, 20) || null, p.units != null ? Number(p.units) : null, 0, i]);
+    if (p && p.cpt) {
+      const units = Number(p.units);
+      rows.push([r.id, 'proc', 'CPT', String(p.cpt).slice(0, 20), (String(p.description ?? '')).slice(0, 512) || null,
+        null, null, (String(p.modifiers ?? '')).slice(0, 20) || null, Number.isFinite(units) ? units : null, 0, i]);
+    }
   });
-  if (rows.length) {
-    await pool.query(
-      `INSERT INTO encounter_note_codes (note_id, kind, code_system, code, description, snomed_code, snomed_term, modifiers, units, is_primary, seq)
-       VALUES ?`, [rows]);
-  }
+  // Replace codes ATOMICALLY: the old delete-then-insert was not transactional, so an INSERT error
+  // (bad row, oversized batch) left the note's codes permanently deleted while returning 500. A
+  // transaction rolls back the delete on any failure, so codes are never lost.
+  await withTransaction(async (exec, conn) => {
+    await exec('DELETE FROM encounter_note_codes WHERE note_id = :id', { id: r.id });
+    if (rows.length) {
+      await conn.query(
+        `INSERT INTO encounter_note_codes (note_id, kind, code_system, code, description, snomed_code, snomed_term, modifiers, units, is_primary, seq)
+         VALUES ?`, [rows]);
+    }
+  });
   return { saved: rows.length };
 }
 
