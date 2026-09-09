@@ -538,6 +538,15 @@ async function start() {
     // Plain-HTTP listener that permanently redirects to HTTPS.
     http
       .createServer((req, res) => {
+        // Liveness on the HTTP port too. In TLS mode the app (and its /healthz) is bound to the
+        // HTTPS server only, so a container/ALB health probe against the plain-HTTP port would get a
+        // 301 to the canonical HTTPS host — which does NOT resolve from inside the container/target,
+        // failing the probe and crash-looping the service. Answer /healthz directly here so health
+        // checks succeed on the HTTP port without following a cross-host redirect.
+        if (req.method === 'GET' && (req.url === '/healthz' || req.url === '/healthz/')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ status: 'ok', service: 'grelin-pms-gateway' }));
+        }
         // Redirect to a CONFIGURED canonical host — never blindly reflect the client-controlled Host
         // header (a reflected open-redirect / cache-poisoning vector). When GATEWAY_CANONICAL_HOST is
         // unset, fall back to the request Host but strip it to hostname/port chars only (defeats header

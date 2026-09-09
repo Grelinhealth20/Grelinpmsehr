@@ -1,4 +1,7 @@
-version: "3.8"
+# Grelin Health — PMS & EHR · AWS production stack (single EC2, gateway terminates TLS)
+# Deploy: see DEPLOY_pms.grelinhealth.com.md
+# NOTE: the `version:` key is intentionally omitted — the Compose Spec deprecated it
+# (modern `docker compose` warns on it). Behaviour is unchanged.
 
 services:
 
@@ -11,7 +14,7 @@ services:
       - "6003"
     environment:
       - OCR_WARMUP=true
-      - OCR_API_KEY=
+      - OCR_API_KEY=${OCR_API_KEY}
     volumes:
       - ocr-paddle:/root/.paddleocr
       - ocr-doctr:/root/.cache/doctr
@@ -57,7 +60,11 @@ services:
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_NAME=${DB_NAME:-grelin_pmsehr}
       - DB_CONNECTION_LIMIT=25
-      - DB_SSL=false
+      # PHI DB traffic MUST be encrypted. Pinned-CA TLS to the self-managed MySQL
+      # (or point DB_SSL_CA at the RDS CA bundle for RDS). CA mounted read-only below.
+      - DB_SSL=true
+      - DB_SSL_CA=/app/certs/db-ca.pem
+      - DB_SSL_REJECT_UNAUTHORIZED=true
       # --- Cryptography (AES-256-GCM PHI encryption + HMAC blind index) ---
       - PHI_ENC_KEY=${PHI_ENC_KEY}
       - BLIND_INDEX_KEY=${BLIND_INDEX_KEY}
@@ -88,6 +95,9 @@ services:
       - STEDI_API_KEY=${STEDI_API_KEY}
       - STEDI_BASE_URL=https://healthcare.us.stedi.com/2024-04-01
       - STEDI_TIMEOUT_MS=20000
+    volumes:
+      # Pinned DB CA (public cert, read-only) so DB_SSL can verify the MySQL chain.
+      - ./backend/certs:/app/certs:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
@@ -99,18 +109,31 @@ services:
     depends_on:
       - grelin-ehr-pms-backend
       - grelin-ehr-pms-frontend
+    # Single-EC2 topology: the gateway TERMINATES TLS with the real Sectigo cert.
+    # Host 443→container 6004 (HTTPS) and host 80→container 6002 (HTTP→HTTPS 301).
+    # Mapping privileged host ports to unprivileged container ports avoids needing
+    # CAP_NET_BIND_SERVICE inside the container. EC2 security group must allow 443/80.
     ports:
-      - "6002:6002"
-      - "6004:6004"
+      - "443:6004"
+      - "80:6002"
     environment:
       - NODE_ENV=production
       - GATEWAY_HOST=0.0.0.0
       - GATEWAY_PORT=6002
       - GATEWAY_HTTPS_PORT=6004
+      - GATEWAY_TLS=true
+      - GATEWAY_CANONICAL_HOST=pms.grelinhealth.com
+      - TLS_CERT_PATH=/app/certs/pms_grelinhealth_fullchain.crt
+      - TLS_KEY_PATH=/app/certs/pms_grelinhealth.key
+      - TRUST_PROXY=false
       - INTERNAL_API_URL=http://grelin-ehr-pms-backend:6000
       - FRONTEND_ORIGIN=http://grelin-ehr-pms-frontend:6001
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - GATEWAY_ORIGIN=${GATEWAY_ORIGIN}
+    volumes:
+      # Real wildcard cert + private key (read-only). The container user must be able
+      # to read the key — keep it 0644 on the host, or chown to the image's uid.
+      - ./gateway/certs:/app/certs:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
