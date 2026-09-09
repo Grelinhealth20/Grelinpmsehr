@@ -13,6 +13,7 @@ Node API (never expose it publicly).
 import os
 import logging
 from fastapi import FastAPI, UploadFile, File, Header, HTTPException
+from fastapi.responses import JSONResponse
 import extractor
 
 logging.basicConfig(level=logging.INFO)
@@ -37,13 +38,15 @@ app = FastAPI(title="Grelin OCR Service", version="1.0.0")
 
 @app.on_event("startup")
 def _startup():
-    # Warm the models unless explicitly deferred (keeps first request fast).
+    # Warm the models unless explicitly deferred (keeps first request fast). A warmup failure
+    # is NOT swallowed as merely cosmetic: it means the OCR engine cannot run, which /health
+    # then reports as unavailable (503) so the service is never routed traffic it will 500 on.
     if os.environ.get("OCR_WARMUP", "true").lower() == "true":
-        try:
-            extractor.warmup()
-            log.info("Models warmed up (PP-StructureV2 + docTR).")
-        except Exception as e:  # non-fatal; first request will load lazily
-            log.warning("Warmup skipped: %s", e)
+        ready, detail = extractor.probe_ready()
+        if ready:
+            log.info("OCR engine ready: %s", detail)
+        else:
+            log.error("OCR engine FAILED to load — /health will report unavailable: %s", detail.get("error"))
 
 
 def _auth(x_ocr_key):
@@ -57,7 +60,15 @@ def _auth(x_ocr_key):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "models": ["pp-structure-v2", "doctr"]}
+    # HONEST, BINARY readiness: 200 only if the OCR engine can actually run; otherwise 503.
+    # No "degraded" middle state — the caller (and any container orchestrator) gets a truthful
+    # up/down signal, so a process whose engine failed to load is never treated as healthy.
+    ready, detail = extractor.probe_ready()
+    if not ready:
+        return JSONResponse(status_code=503, content={"status": "unavailable", "error": detail.get("error"),
+                                                       "engines": {k: detail[k] for k in ("ppocr", "ppStructure", "doctr")}})
+    return {"status": "ok", "engines": {k: detail[k] for k in ("ppocr", "ppStructure", "doctr")},
+            "models": ["pp-structure-v2", "pp-ocrv4", "doctr"]}
 
 
 @app.post("/extract")

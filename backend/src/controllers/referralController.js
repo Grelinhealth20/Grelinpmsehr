@@ -51,8 +51,8 @@ export async function nppesLookup(req, res, next) {
     const wantProv = type === 'provider' || type === 'both';
     const wantFac = type === 'facility' || type === 'both';
     const [provs, facs] = await Promise.all([
-      wantProv ? searchProviders({ q, npi, state }).catch(() => []) : Promise.resolve([]),
-      wantFac ? searchFacilities({ q, npi, state, city }).catch(() => []) : Promise.resolve([]),
+      wantProv ? searchProviders({ q, npi, state }).catch((e) => { logger.warn({ err: e.message }, 'NPPES provider lookup failed (degraded to local results)'); return []; }) : Promise.resolve([]),
+      wantFac ? searchFacilities({ q, npi, state, city }).catch((e) => { logger.warn({ err: e.message }, 'NPPES facility lookup failed (degraded to local results)'); return []; }) : Promise.resolve([]),
     ]);
     // Unify into referral-counterparty candidates the form can apply directly.
     const candidates = [

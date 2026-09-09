@@ -1,9 +1,17 @@
 # Grelin Health PMS & EHR — AWS Production Deployment Guide
 
-This guide takes the three-tier application (gateway → backend → MySQL, plus the OCR
-microservice and S3 for documents) to a hardened, HIPAA-oriented AWS deployment. It is
-specific to **this** codebase: every environment variable, port, and control below maps
-to real code, not a generic template.
+> **Topology note (current):** the standalone gateway has been **folded into the backend**
+> (`COMBINED_EDGE=true`). The backend is now the **single public edge** — it terminates TLS,
+> runs the WAF + hardened headers + rate limits, serves `/api` in-process, and reverse-proxies
+> the SPA to the private frontend container. There is no separate gateway container and no
+> `INTERNAL_API_KEY` handshake. For the exact single-EC2 go-live steps see
+> **[DEPLOY_pms.grelinhealth.com.md](DEPLOY_pms.grelinhealth.com.md)**. The AWS/ECS patterns
+> below (RDS TLS, IAM roles, Secrets Manager, ElastiCache rate-limit store, observability) still
+> apply — read "gateway" as "the backend edge", and put the backend behind the ALB directly.
+
+This guide takes the application (backend edge → MySQL, plus the OCR microservice and S3 for
+documents) to a hardened, HIPAA-oriented AWS deployment. It is specific to **this** codebase:
+every environment variable, port, and control below maps to real code, not a generic template.
 
 > **Scope.** The application code is production-grade (AES-256-GCM PHI encryption, RBAC,
 > CSRF, audit logging, key rotation, WAF). What this guide adds is the **deployment
@@ -22,19 +30,19 @@ to real code, not a generic template.
                     │  Application   │◄──────────────
                     │  Load Balancer │   HTTPS :443
                     └───────┬────────┘
-                            │  HTTP/HTTPS to gateway (private subnet)
+                            │  HTTP/HTTPS to the backend edge (private subnet)
             ┌───────────────▼──────────────────────────┐
             │  ECS Fargate service (private subnets)    │
-            │  ┌─────────────┐  loopback  ┌───────────┐ │
-            │  │  gateway     │──127.0.0.1─►  backend  │ │
-            │  │  :6002/:6004 │            │  :6000    │ │
-            │  │  WAF+Helmet  │            └─────┬─────┘ │
-            │  └─────────────┘   ┌──────────────►│       │
-            │                    │  ocr :6003    │       │
-            │              ┌─────┴──────┐        │       │
-            │              │ ocr-service│        │       │
-            │              └────────────┘        │       │
-            └──────────────────────────────────┬─┼───────┘
+            │  ┌───────────────────────┐  loopback      │
+            │  │  backend EDGE          │──127.0.0.1─┐   │
+            │  │  :6002 HTTP/:6004 HTTPS│            ▼   │
+            │  │  WAF+Helmet+/api+proxy │      ┌───────────┐
+            │  └───────────┬───────────┘      │ frontend  │
+            │              │  ocr :6003        │  :6001    │
+            │        ┌─────▼──────┐            └───────────┘
+            │        │ ocr-service│                        │
+            │        └────────────┘                        │
+            └──────────────────────────────────┬─┼─────────┘
                      Task IAM role              │ │
              (S3 + Secrets, no static keys)     │ │
                             ┌───────────────────┘ │
@@ -49,10 +57,12 @@ to real code, not a generic template.
               CloudWatch Logs/Alarms · CloudTrail (data events) · GuardDuty
 ```
 
-**Isolation invariant (already enforced in code):** only the gateway is reachable from
-the ALB. The backend binds `127.0.0.1:6000` and, when `NODE_ENV=production`, rejects any
-request missing the gateway-injected `INTERNAL_API_KEY`. Keep the backend and OCR
-containers off the ALB target groups entirely.
+**Isolation invariant (already enforced in code):** the ALB targets the **backend edge**
+(`:6004` HTTPS / `:6002` HTTP) — the only internet-facing service. The frontend and OCR
+containers have **no host/ALB exposure**; the browser reaches the SPA only through the backend's
+reverse-proxy, so the WAF / CSP / rate-limits sit in front of every request. Behind an ALB that
+terminates TLS, set `TRUST_PROXY=1` so `X-Forwarded-For` is honored (and cannot be spoofed).
+Keep the frontend and OCR containers off the ALB target groups entirely.
 
 ---
 
@@ -136,20 +146,22 @@ an entrypoint that fetches them).
 
 | Variable | Recommended value |
 |----------|-------------------|
-| `NODE_ENV` | `production` (enables Secure cookies, HSTS, gateway-key enforcement) |
-| `INTERNAL_API_KEY` | strong random; the gateway↔backend shared secret |
+| `NODE_ENV` | `production` (enables Secure cookies + HSTS) |
+| `COMBINED_EDGE` | `true` (the backend is the public edge — WAF + TLS + /api + SPA proxy) |
+| `FRONTEND_ORIGIN` | internal URL of the private frontend container, e.g. `http://frontend:6001` |
 | `DB_SSL` | `true` |
 | `DB_SSL_CA` | path to the RDS CA bundle (or the pinned `backend/certs/db-ca.pem`) |
 | `DB_SSL_REJECT_UNAUTHORIZED` | `true` |
 | `GATEWAY_ORIGIN` | the public origin, e.g. `https://app.grelinhealth.com` |
-| `GATEWAY_TLS` | `true` if the gateway terminates TLS; `false` if the ALB does |
-| `TRUST_PROXY` | `true` behind the ALB (correct client IPs in audit logs / rate limits) |
+| `GATEWAY_TLS` | `true` if the backend edge terminates TLS; `false` if the ALB does |
+| `TLS_CERT_PATH` / `TLS_KEY_PATH` | cert + key paths (required when `GATEWAY_TLS=true`) |
+| `TRUST_PROXY` | `1` behind the ALB (correct client IPs in audit logs / rate limits); `false` with direct TLS |
 | `WAF_BLOCKING` | `true` (blocking mode, not monitor) |
 
-**Tunables (have safe defaults):** `API_HOST` `API_PORT` `DB_CONNECTION_LIMIT`
+**Tunables (have safe defaults):** `DB_CONNECTION_LIMIT`
 `ACCESS_TOKEN_TTL` `REFRESH_TOKEN_TTL` `KEY_ROTATION_SECONDS` `MAX_FAILED_LOGINS`
 `ACCOUNT_LOCK_MINUTES` `PASSWORD_MIN_LENGTH` `PASSWORD_HISTORY_SIZE`
-`GATEWAY_PORT` `GATEWAY_HTTPS_PORT` `WAF_IP_ALLOWLIST` `WAF_IP_BLOCKLIST`.
+`GATEWAY_HOST` `GATEWAY_PORT` `GATEWAY_HTTPS_PORT` `GATEWAY_CANONICAL_HOST` `WAF_IP_ALLOWLIST` `WAF_IP_BLOCKLIST`.
 
 **Integrations:** `STEDI_API_KEY` (`STEDI_BASE_URL` `STEDI_TIMEOUT_MS`),
 `OCR_SERVICE_URL` `OCR_API_KEY` `OCR_TIMEOUT_MS`, `NPPES_ENABLED` `NPPES_BASE_URL`.
@@ -188,36 +200,35 @@ task role a least-privilege policy scoped to `arn:aws:s3:::pms-ehr/*` and
 ## 7. Compute — containerize and run under ECS Fargate
 
 **Container artifacts already exist in the repo:** `backend/Dockerfile`,
-`gateway/Dockerfile`, `frontend/Dockerfile` (+ `frontend/nginx.conf`),
-`ocr-service/Dockerfile`, plus `docker-compose.yml` (local) and
-`docker-compose.aws.yml` (AWS). Ports follow the merged internal scheme:
+`frontend/Dockerfile` (+ `frontend/nginx.conf`), `ocr-service/Dockerfile`, plus
+`docker-compose.yml` (local) and `docker-compose.aws.yml` (AWS). There is no gateway image.
+Ports:
 
 | Service  | Internal port | Notes |
 |----------|---------------|-------|
-| backend  | **6000**      | loopback / private (`API_PORT`) |
-| frontend | **6001**      | static SPA (nginx), private |
-| gateway  | **6002** (HTTP) / **6004** (HTTPS) | the only public tier |
+| **backend (edge)** | **6002** (HTTP) / **6004** (HTTPS) | the ONLY public service — WAF + TLS + /api + SPA proxy |
+| frontend | **6001**      | static SPA (nginx), private (reached only via the backend proxy) |
 | ocr      | **6003**      | private |
 
 Build the frontend (`vite build`) and serve `dist/` — the compose does this via the
-frontend image + `nginx.conf`. Run the tiers as one ECS task (so the gateway reaches the
-backend over loopback) or as separate services behind service discovery; either way, only
-the gateway (`:6002`/`:6004`) is mapped into the ALB target group.
+frontend image + `nginx.conf`. Run the services as one ECS task (so the backend reaches the
+frontend/ocr over loopback) or as separate services behind service discovery; either way, only
+the **backend edge** (`:6002`/`:6004`) is mapped into the ALB target group.
 
 **ECS task definition notes:**
 
-- Put `gateway`, `backend`, and `ocr-service` as containers in one task so
-  `127.0.0.1` loopback holds between them (matches the code's isolation model). The
-  gateway is the only container mapped into the ALB target group.
+- Put `backend`, `frontend`, and `ocr-service` as containers in one task so
+  `127.0.0.1` loopback holds between them (the backend edge proxies to the frontend and calls
+  ocr over loopback). Only the **backend edge** is mapped into the ALB target group.
 - Inject secrets via the task definition `secrets` block (from Secrets Manager).
 - Attach the **task role** (S3 + Secrets read); attach a separate **execution role** for
   image pull + log writes.
-- Health checks: `GET /api/health` on the gateway; `GET /api/health` on the backend
-  (loopback). Both already exist and return `{"status":"ok"}`.
-- Graceful shutdown is implemented (SIGTERM/SIGINT in both `server.js`); set a stop
+- Health checks: `GET /healthz` on the backend edge (HTTP port `:6002`) — returns
+  `{"status":"ok"}` without a 301; `/api/health` also exists.
+- Graceful shutdown is implemented (SIGTERM/SIGINT in `server.js`); set a stop
   timeout ≥ 30s so in-flight requests drain.
 
-> Alternative: EC2 + `systemd` units (`grelin-backend.service`, `grelin-gateway.service`,
+> Alternative: EC2 + `systemd` units (`grelin-backend.service`, `grelin-frontend.service`,
 > `grelin-ocr.service`) with `Restart=always`. Deploy from a path **without spaces or `&`**
 > — the repo's own folder name breaks `npm`'s script runner, so on a server use a clean
 > path like `/opt/grelin`.

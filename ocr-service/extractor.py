@@ -146,6 +146,42 @@ def warmup():
         _get_ppstructure()
 
 
+# --- Readiness probe (backs an HONEST /health) ------------------------------
+_ready_cache = None  # set once the mandatory engine has loaded, so /health stays cheap
+
+
+def probe_ready():
+    """Return (ready: bool, detail: dict) reflecting whether the OCR engine can ACTUALLY run.
+
+    Readiness = the MANDATORY text engine (PP-OCR) loads. PP-Structure and docTR are
+    supplementary (docTR self-disables on Windows w/o the torch runtime), so their absence
+    does not make the service unready — but a missing/broken PaddleOCR does, and /health must
+    say so rather than reporting a green light while every /extract 500s."""
+    global _ready_cache
+    if _ready_cache is not None:
+        return True, _ready_cache
+    detail = {"ppocr": False, "ppStructure": False, "doctr": False, "error": None}
+    try:
+        _get_ppocr()
+        detail["ppocr"] = True
+        if _USE_STRUCTURE:
+            try:
+                _get_ppstructure()
+                detail["ppStructure"] = True
+            except Exception as e:  # noqa: BLE001 — structure is supplementary; note but don't fail readiness
+                detail["ppStructure"] = False
+                detail["error"] = f"ppStructure unavailable: {e}"
+        try:
+            detail["doctr"] = _get_doctr() is not None
+        except Exception:  # noqa: BLE001 — docTR is optional
+            detail["doctr"] = False
+        _ready_cache = detail
+        return True, detail
+    except Exception as e:  # noqa: BLE001 — mandatory engine failed to load → NOT ready
+        detail["error"] = str(e)
+        return False, detail
+
+
 # --- Input decoding ---------------------------------------------------------
 def image_bytes_to_array(data: bytes) -> np.ndarray:
     try:

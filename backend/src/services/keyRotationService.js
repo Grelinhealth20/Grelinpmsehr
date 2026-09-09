@@ -118,7 +118,7 @@ async function maybeRotate() {
       { a: JSON.stringify(next.access), r: JSON.stringify(next.refresh), i: JSON.stringify(next.internal), ttl: ROTATE_S },
     );
     if (res.affectedRows === 1) { ring = next; logger.info('Security keys rotated'); }
-    else { await loadFromDb().catch(() => {}); } // another instance rotated, or not due
+    else { await loadFromDb().catch((e) => logger.warn({ err: e.message }, 'key-ring reload after CAS miss failed (keeping current ring; will retry next cycle)')); } // another instance rotated, or not due
   } catch (err) {
     logger.error({ err: err.message }, 'Key rotation CAS failed');
   }

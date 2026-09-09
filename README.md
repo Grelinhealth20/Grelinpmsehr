@@ -1,7 +1,7 @@
 # Grelin Health — PMS & EHR
 
 Enterprise-grade, HIPAA-oriented Patient Management System / EHR platform.
-**MySQL** database · **Node.js** backend · **React** frontend · hardened security gateway with a built-in **WAF**.
+**MySQL** database · **Node.js** backend (with a built-in edge: **WAF**, TLS, hardened headers, SPA proxy) · **React** frontend.
 
 > ⚠️ **Folder-name note (Windows):** this project lives in a folder whose name
 > contains a space and an `&` (`Grelin Health PMS & EHR`). On Windows, `npm`
@@ -19,32 +19,29 @@ Enterprise-grade, HIPAA-oriented Patient Management System / EHR platform.
 Browser (React SPA)
       │  HTTPS
       ▼
-┌──────────────────────────────────────────┐
-│  gateway/  — PUBLIC service (port 8080)   │
-│  • WAF (SQLi/XSS/traversal/RCE/scanner)   │
-│  • Helmet CSP, HSTS, rate limiting        │
-│  • Serves the React build                 │
-│  • Injects internal API key, proxies /api │
-└───────────────┬──────────────────────────┘
-                │  loopback only (127.0.0.1)
-                ▼
-┌──────────────────────────────────────────┐
-│  backend/  — INTERNAL API (port 4000)     │
-│  • Never publicly exposed (loopback bind) │
-│  • Argon-class scrypt password hashing    │
-│  • AES-256-GCM PHI field encryption       │
-│  • JWT (httpOnly cookies) + CSRF + RBAC   │
-│  • Audit logging, account lockout         │
-└───────────────┬──────────────────────────┘
-                │
-                ▼
-        MySQL  (grelin_pmsehr @ 3.130.239.42)
+┌────────────────────────────────────────────────────────┐
+│  backend/  — SINGLE PUBLIC EDGE (COMBINED_EDGE)         │
+│  • Terminates TLS (443) + HTTP→HTTPS redirect (80)      │
+│  • WAF (SQLi/XSS/traversal/RCE/scanner) + IP lists      │
+│  • Helmet strict SPA CSP, HSTS, rate limiting           │
+│  • Serves /api IN-PROCESS (no proxy hop):               │
+│      scrypt passwords · AES-256-GCM PHI encryption ·    │
+│      JWT (httpOnly cookies) + CSRF + RBAC · audit log   │
+│  • Reverse-proxies every non-/api request to frontend   │
+└───────────┬───────────────────────────────┬────────────┘
+            │ non-/api (SPA)                 │
+            ▼                                ▼
+   ┌──────────────────┐              MySQL (grelin_pmsehr)
+   │ frontend/ (:6001)│              (PHI over TLS, pinned CA)
+   │ React SPA (nginx)│
+   └──────────────────┘
 ```
 
-The three tiers are isolated: **only the gateway is internet-facing.** The API
-binds to `127.0.0.1` and, in production, additionally rejects any request that
-does not carry the shared `INTERNAL_API_KEY` the gateway injects — so no API
-endpoint is ever directly reachable.
+There is **one internet-facing service** — the backend edge. The frontend and OCR
+containers are private (no host ports); the browser only ever reaches them through
+the backend's reverse-proxy, so the WAF / CSP / rate-limits sit in front of every
+request and `/api` shares the SPA's origin. Unknown `/api/*` paths return a JSON 404
+(never proxied to the SPA). *(The former standalone gateway has been folded in.)*
 
 ---
 
@@ -62,7 +59,7 @@ endpoint is ever directly reachable.
 | **Input** | Zod schema validation, strict unknown-field rejection, small body caps |
 | **Auditing** | Append-only audit log (§164.312(b)) + login-attempt forensics |
 | **Frontend** | Idle auto-logout (§164.312(a)(2)(iii)), no secrets in JS storage, React auto-escaping (no `dangerouslySetInnerHTML`), client password-policy feedback |
-| **Rate limiting** | Edge (gateway) + per-endpoint (auth) limits |
+| **Rate limiting** | In-process edge global limit + stricter per-endpoint (auth) limits |
 
 ---
 
@@ -72,7 +69,6 @@ Install dependencies (works despite the folder name — no native builds):
 
 ```bash
 cd "backend"  && npm install
-cd "../gateway" && npm install
 cd "../frontend" && npm install
 ```
 
@@ -84,43 +80,30 @@ the MySQL credentials. (Regenerate secrets any time with
 
 ## Running (from this folder — use `node` directly)
 
-Open three terminals:
+The backend is the single edge (WAF + `/api` + SPA proxy). Two terminals:
 
-**1 · Backend API** (auto-creates the 5 MySQL tables + seeds the master admin on first boot)
+**1 · Backend edge + API** (auto-creates the MySQL tables + seeds the master admin on first boot)
 ```bash
 cd "backend"
-node src/server.js
+COMBINED_EDGE=true GATEWAY_TLS=false GATEWAY_PORT=8080 FRONTEND_ORIGIN=http://localhost:5173 node src/server.js
 ```
+> Serves `/api` in-process and reverse-proxies everything else to the frontend dev server.
+> `GATEWAY_TLS=false` runs plain HTTP for dev; set it `true` (with `TLS_CERT_PATH`/`TLS_KEY_PATH`) for HTTPS.
 
-**2 · Build the frontend** (once, or after UI changes)
-```bash
-cd "frontend"
-node node_modules/vite/bin/vite.js build
-```
-
-**3 · Gateway** (serves the built SPA + WAF + proxy)
-```bash
-cd "gateway"
-node src/server.js
-```
-
-Then open **http://localhost:8080**.
-
-> On a normally-named path you can instead use `npm start` (backend, gateway)
-> and `npm run build` (frontend).
-
-### Optional: hot-reload dev mode
+**2 · Frontend dev server** (React, hot-reload)
 ```bash
 cd "frontend" && node node_modules/vite/bin/vite.js   # http://localhost:5173
 ```
-The dev server proxies `/api` to the gateway, so requests still pass through the
-WAF/proxy layer exactly as in production.
+The Vite dev server serves the SPA and proxies `/api` to the backend edge (`:8080`), so every
+request passes through the WAF exactly as in production. Open **http://localhost:5173**.
+
+> On a normally-named path you can instead use `npm start` (backend) and `npm run dev` (frontend).
 
 ---
 
 ## First login
 
-1. Go to **http://localhost:8080**
+1. Go to **http://localhost:5173** (dev) — or the backend edge origin directly if you built the SPA.
 2. Sign in with the master administrator:
    - **Email:** `git@grelinhealth.com`
    - **Password:** `Grelin@2026!!`
@@ -148,9 +131,9 @@ blank — header + session only — ready for clinical modules).
 > posture already applied, ElastiCache-backed rate limiting, CloudWatch/CloudTrail).
 
 - [ ] Deploy from a path without spaces/`&`; run via `npm start` or a process manager (pm2/systemd).
-- [ ] Set `NODE_ENV=production` in both `.env` files (enables Secure cookies, HSTS, and gateway-key enforcement).
-- [ ] Terminate TLS in front of the gateway (nginx/ALB) or add TLS to it; set `DB_SSL=true`.
-- [ ] Rotate all secrets in the `.env` files; store them in a secrets manager, not on disk.
+- [ ] Set `NODE_ENV=production` in `.env` (enables Secure cookies + HSTS) and `COMBINED_EDGE=true`.
+- [ ] Terminate TLS at the backend edge (`GATEWAY_TLS=true` + `TLS_CERT_PATH`/`TLS_KEY_PATH`) or an ALB in front (`TRUST_PROXY=1`); set `DB_SSL=true`.
+- [ ] Rotate all secrets in the `.env` file; store them in a secrets manager, not on disk.
 - [ ] Restrict the MySQL security group to the backend host only.
-- [ ] Ship gateway/audit logs to a SIEM; review the audit trail regularly.
+- [ ] Ship edge/audit logs to a SIEM; review the audit trail regularly.
 ```

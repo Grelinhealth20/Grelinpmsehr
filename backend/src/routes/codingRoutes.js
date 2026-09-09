@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authenticate, requirePasswordSettled } from '../middleware/authenticate.js';
+import { csrfProtection } from '../middleware/csrf.js';
 import { scrubClaim, lookupPdpm, lookupHcc, estimatePayment, lookupNcd } from '../services/codingService.js';
 import { calcRaf, deriveSegment } from '../services/hccRafService.js';
 
@@ -7,7 +8,9 @@ const router = Router();
 router.use(authenticate, requirePasswordSettled);
 
 // CMS-HCC V28 risk-adjustment (RAF) for a diagnosis list. Body: { diagnoses|icds, age, sex, segment }
-router.post('/raf', async (req, res, next) => {
+// Read-only compute (no persistence), but CSRF-guarded for uniform double-submit enforcement across
+// every state-transferring POST — the SPA already sends X-CSRF-Token on all non-GET requests.
+router.post('/raf', csrfProtection, async (req, res, next) => {
   try {
     const b = req.body || {};
     let segment = b.segment; let segmentBasis = b.segment ? 'explicit' : null;
@@ -18,7 +21,7 @@ router.post('/raf', async (req, res, next) => {
 
 // Scrub a claim against NCCI PTP/MUE, ICD age-sex & specificity edits, LCD/Article coverage,
 // and PDPM primary-diagnosis acceptability. Body: { lines, diagnoses, primaryDx, patient, fiscalYear }
-router.post('/scrub', async (req, res, next) => {
+router.post('/scrub', csrfProtection, async (req, res, next) => {
   try { return res.json(await scrubClaim(req.body || {})); } catch (err) { return next(err); }
 });
 

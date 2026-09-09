@@ -10,7 +10,7 @@ node_modules/
 frontend/dist/
 
 # TLS certificates (never commit private keys)
-gateway/certs/
+certs/
 *.crt
 *.key
 *.pem

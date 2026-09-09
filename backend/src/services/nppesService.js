@@ -203,7 +203,7 @@ export async function lookupFacility({ name, city, state }) {
 
   // Best-effort auto-fill: a registry outage must never block facility creation,
   // so treat "unreachable" as "no match" here (unlike the explicit search endpoints).
-  const safe = (p) => query(p).catch(() => []);
+  const safe = (p) => query(p).catch((e) => { logger.warn({ err: e.message }, 'NPPES registry query failed during auto-fill (treated as no match)'); return []; });
   let results = await safe(new URLSearchParams({ ...base, organization_name: `${cleanName}*` }));
   if (!results.length) {
     // Fallback: first significant tokens only (handles trailing OCR noise).

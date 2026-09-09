@@ -1,48 +1,51 @@
 # ============================================================================
-# Grelin Health — PMS & EHR  ·  four images, one command
+# Grelin Health — PMS & EHR  ·  three images, one command
 #
 #   docker compose up --build -d
 #
-#   gateway   PUBLIC edge — WAF, CSP, rate limiting, reverse proxy.
-#             The ONLY service mapped to the host.
+#   backend   PUBLIC edge — TLS, WAF, CSP, rate limiting, /api in-process,
+#             and the SPA reverse-proxy. The ONLY service mapped to the host.
 #   frontend  React SPA served by nginx.        private
-#   backend   Internal API (MySQL, PHI, auth).  private
 #   ocr       Python document-AI microservice.  private
 #
 #            browser
 #               │
 #               ▼
-#          [ gateway :8080 ]
-#           ┌────┴─────┐
-#           ▼          ▼
-#      [ frontend ] [ backend ] ──► [ ocr ]
-#        :8081        :4000          :8600
+#      [ backend :6002/:6004  (edge + API) ] ──► [ ocr :6003 ]
+#           │ reverse-proxies non-/api
+#           ▼
+#      [ frontend :6001 ]
 #                       └──► external MySQL (DB_* in .env)
 #
-# The database is EXTERNAL — connection details come from your .env.
+# The gateway has been folded into the backend (COMBINED_EDGE) — there is no
+# separate gateway service. The database is EXTERNAL — details come from .env.
 # ============================================================================
 
 services:
-  # --- PUBLIC edge ---------------------------------------------------------
-  gateway:
+  # --- PUBLIC edge = backend (API + WAF + TLS + SPA proxy) -----------------
+  backend:
     build:
-      context: ./gateway
-    image: grelin-gateway
+      context: ./backend
+    image: grelin-backend
     restart: unless-stopped
     depends_on:
-      - backend
+      - ocr
       - frontend
     env_file:
       - .env
     environment:
+      COMBINED_EDGE: "true"
       GATEWAY_HOST: 0.0.0.0
-      GATEWAY_PORT: "6002"
-      # Route by service name over the private compose network.
-      INTERNAL_API_URL: http://backend:6000
+      GATEWAY_PORT: "6002"          # HTTP  (redirects to HTTPS when GATEWAY_TLS=true)
+      GATEWAY_HTTPS_PORT: "6004"    # HTTPS (used when GATEWAY_TLS=true)
       FRONTEND_ORIGIN: http://frontend:6001
+      OCR_SERVICE_URL: http://ocr:6003
     ports:
-      - "6002:6002"     # HTTP  (redirects to HTTPS when NODE_ENV=production)
-      - "6004:6004"     # HTTPS (only used when NODE_ENV=production)
+      - "6002:6002"
+      - "6004:6004"
+    volumes:
+      - ./certs:/app/tls:ro                # TLS cert+key (only read when GATEWAY_TLS=true)
+      - ./backend/certs:/app/db-certs:ro   # pinned DB CA (db-ca.pem) when DB_SSL=true
 
   # --- private services (no host port mappings) ----------------------------
   frontend:
@@ -53,24 +56,6 @@ services:
     expose:
       - "6001"
 
-  backend:
-    build:
-      context: ./backend
-    image: grelin-backend
-    restart: unless-stopped
-    depends_on:
-      - ocr
-    env_file:
-      - .env
-    environment:
-      # Inside a container the API must bind 0.0.0.0 so the gateway can reach
-      # it. It stays private because no port is published to the host.
-      API_HOST: 0.0.0.0
-      API_PORT: "6000"
-      OCR_SERVICE_URL: http://ocr:6003
-    expose:
-      - "6000"
-
   ocr:
     build:
       context: ./ocr-service
@@ -78,12 +63,9 @@ services:
     restart: unless-stopped
     environment:
       OCR_WARMUP: "true"
-      # Must match OCR_API_KEY in .env so the backend authenticates to it.
       OCR_API_KEY: ${OCR_API_KEY:-}
     expose:
       - "6003"
-    # The PaddleOCR / docTR weights are downloaded on first boot (~minutes).
-    # Persist them so recreating the container does not re-download everything.
     volumes:
       - ocr-paddle:/root/.paddleocr
       - ocr-doctr:/root/.cache/doctr
@@ -92,7 +74,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 300s   # generous: first boot downloads the model weights
+      start_period: 300s
 
 volumes:
   ocr-paddle:

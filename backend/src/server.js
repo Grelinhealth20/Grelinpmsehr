@@ -1,3 +1,7 @@
+import http from 'node:http';
+import https from 'node:https';
+import tls from 'node:tls';
+import fs from 'node:fs';
 import { createApp } from './app.js';
 import { config } from './config/env.js';
 import { logger } from './config/logger.js';
@@ -30,12 +34,8 @@ async function bootstrap() {
   warmPool().catch((e) => logger.warn({ err: e?.message }, 'pool warm error'));
   warmMedSafetyIndex().catch((e) => logger.warn({ err: e?.message }, 'med-safety index warm error'));
 
-  // Bind to loopback ONLY — the API is never publicly reachable; the gateway is.
-  const server = app.listen(config.api.port, config.api.host, () => {
-    logger.info(
-      `Internal API listening on http://${config.api.host}:${config.api.port} (env=${config.env})`,
-    );
-  });
+  // Single public edge (API + WAF + TLS + SPA proxy) — there is no separate internal/loopback tier.
+  const server = startCombinedEdge(app);
 
   const shutdown = async (signal) => {
     logger.info({ signal }, 'Shutting down…');
@@ -47,6 +47,51 @@ async function bootstrap() {
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
+}
+
+/**
+ * COMBINED-EDGE listener: this process is the single public service (API + WAF + TLS + SPA proxy).
+ * FAIL-LOUD, no fallback: with TLS enabled the real cert+key MUST be present and matching, else the
+ * process refuses to start (never self-signs a browser-rejected cert).
+ */
+function startCombinedEdge(app) {
+  const e = config.edge;
+  if (e.tls) {
+    if (!e.certPath || !e.keyPath || !fs.existsSync(e.certPath) || !fs.existsSync(e.keyPath)) {
+      throw new Error(
+        `COMBINED_EDGE with TLS requires TLS_CERT_PATH + TLS_KEY_PATH to exist (${e.certPath || '<unset>'} / ${e.keyPath || '<unset>'}). `
+        + 'Copy the real certificate + private key into place before starting — refusing to self-sign in production.');
+    }
+    let creds;
+    try {
+      creds = { key: fs.readFileSync(e.keyPath), cert: fs.readFileSync(e.certPath), minVersion: 'TLSv1.2' };
+      tls.createSecureContext(creds); // fail HERE if the key does not match the cert
+    } catch (err) {
+      throw new Error(`TLS cert/key at ${e.certPath} + ${e.keyPath} could not be loaded (${err.message}). Verify the key MATCHES the cert (modulus md5 must be equal).`);
+    }
+    const srv = https.createServer(creds, app).listen(e.httpsPort, e.host, () => {
+      logger.info(`Combined edge (API + WAF + TLS + SPA) listening on https://${e.host}:${e.httpsPort} (env=${config.env})`);
+      logger.info(`Reverse-proxying SPA from ${e.frontendOrigin}`);
+    });
+    // Plain-HTTP listener → permanent redirect to HTTPS, but answer /healthz directly (a container/LB
+    // health probe on the HTTP port must not be 301'd to an unresolvable canonical host).
+    http.createServer((req, res) => {
+      if (req.method === 'GET' && (req.url === '/healthz' || req.url === '/healthz/')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ status: 'ok', service: 'grelin-pms' }));
+      }
+      const raw = e.canonicalHost || (req.headers.host || `localhost:${e.httpsPort}`).replace(/[^A-Za-z0-9.:-]/g, '');
+      const host = raw.replace(/:\d+$/, `:${e.httpsPort}`);
+      const path = String(req.url || '/').replace(/[\r\n]/g, '');
+      res.writeHead(301, { Location: `https://${host}${path}` });
+      res.end();
+    }).listen(e.httpPort, e.host, () => logger.info(`HTTP :${e.httpPort} → HTTPS :${e.httpsPort} redirect active`));
+    return srv;
+  }
+  // Combined, but TLS terminated by an upstream LB → serve public HTTP (set TRUST_PROXY behind the LB).
+  return app.listen(e.httpPort, e.host, () => {
+    logger.info(`Combined edge (API + WAF + SPA, TLS upstream) listening on http://${e.host}:${e.httpPort} (env=${config.env})`);
+  });
 }
 
 bootstrap().catch((err) => {

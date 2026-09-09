@@ -358,7 +358,7 @@ export async function verifyNow(req, res, next) {
   } catch (err) {
     // A manual verify that reaches the payer and errors is a LIVE call — log it by user.
     if (err.code && String(err.code).startsWith('STEDI')) {
-      recordAudit({ actorUserId: req.authUserId, action: 'patient.eligibility.verify', entityType: 'patient', entityId: req.params.uuid, outcome: 'error', ...ctx(req), metadata: { manual: true, live: true, error: err.message, code: err.code } }).catch(() => {});
+      recordAudit({ actorUserId: req.authUserId, action: 'patient.eligibility.verify', entityType: 'patient', entityId: req.params.uuid, outcome: 'error', ...ctx(req), metadata: { manual: true, live: true, error: err.message, code: err.code } }).catch((e) => logger.error({ err: e.message, patient: req.params.uuid }, 'audit write failed (eligibility.verify error outcome) — investigate'));
     }
     if (err.code === 'STEDI_US_IP_REQUIRED') {
       return res.status(502).json({

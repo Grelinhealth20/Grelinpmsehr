@@ -1,5 +1,6 @@
 import { searchPayers, upsertPayers } from '../services/payerDirectoryService.js';
 import { searchPayersLive } from '../services/stediService.js';
+import { logger } from '../config/logger.js';
 
 /**
  * Typeahead search over the Stedi payer network for the face-sheet Payer picker.
@@ -45,7 +46,7 @@ export async function search(req, res, next) {
     const fresh = live.filter((p) => p.stediId && !localIds.has(p.stediId));
     if (fresh.length) {
       const rows = fresh.map((p) => [p.stediId, p.primaryPayerId, p.name, p._raw?.names || '', p._raw?.aliases || '', p.eligibilitySupported ? 1 : 0, p._raw?.coverageTypes || '', p._raw?.operatingStates || '']);
-      upsertPayers(rows).catch(() => {});
+      upsertPayers(rows).catch((e) => logger.warn({ err: e.message, count: rows.length }, 'payer directory cache upsert failed (non-fatal; search unaffected)'));
     }
 
     res.json({ payers: merged });

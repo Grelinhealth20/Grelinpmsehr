@@ -54,6 +54,23 @@ export const config = {
     internalKey: process.env.INTERNAL_API_KEY || '',
   },
 
+  // EDGE (single public service): the public edge — TLS, WAF, hardened headers, edge rate limits, and
+  // the SPA reverse-proxy — is folded INTO this backend process. There is no separate gateway tier.
+  // `combined` stays as a config surface (always on) so a bare run still starts the edge, not a
+  // now-removed loopback-only mode. Set GATEWAY_PORT for local dev (port 80 needs privilege).
+  edge: {
+    combined: bool('COMBINED_EDGE', true),
+    host: process.env.GATEWAY_HOST || '0.0.0.0', // public bind
+    httpPort: int('GATEWAY_PORT', 80),
+    httpsPort: int('GATEWAY_HTTPS_PORT', 443),
+    tls: bool('GATEWAY_TLS', isProd),
+    certPath: process.env.TLS_CERT_PATH || '',
+    keyPath: process.env.TLS_KEY_PATH || '',
+    canonicalHost: process.env.GATEWAY_CANONICAL_HOST || '',
+    // Non-/api requests are reverse-proxied here (the frontend SPA container).
+    frontendOrigin: process.env.FRONTEND_ORIGIN || 'http://127.0.0.1:6001',
+  },
+
   db: {
     host: required('DB_HOST'),
     port: int('DB_PORT', 3306),
