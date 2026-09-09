@@ -350,7 +350,7 @@ export const SCHEMA_STATEMENTS = [
     provider_id   BIGINT UNSIGNED NOT NULL,
     note_type     VARCHAR(60)     NOT NULL,
     reason        VARCHAR(120)    NULL,
-    content_enc   MEDIUMBLOB      NULL,
+    content_enc   LONGBLOB        NULL,  -- dynamic long-form records (500k+ words); LONGBLOB removes the 16MB ceiling
     status        ENUM('draft','signed') NOT NULL DEFAULT 'draft',
     billing_ready TINYINT(1)      NOT NULL DEFAULT 0,
     signed_by     BIGINT UNSIGNED NULL,

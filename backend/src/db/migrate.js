@@ -258,7 +258,20 @@ export async function runMigrations() {
       logger.info({ table, column }, 'Enlarged encrypted column → MEDIUMBLOB');
     }
   };
-  await ensureMediumblob('encounter_notes', 'content_enc');
+  // encounter_notes.content_enc holds DYNAMIC long-form records that can exceed 500k words.
+  // Promote it to LONGBLOB so a very large encrypted note can never hit the 16 MB MEDIUMBLOB
+  // ceiling and lose the save. Widening only — safe on existing rows.
+  const ensureLongblob = async (table, column) => {
+    const [c] = await pool.query(
+      `SELECT DATA_TYPE FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`, [table, column],
+    );
+    if (c[0] && String(c[0].DATA_TYPE).toLowerCase() !== 'longblob') {
+      await pool.query(`ALTER TABLE \`${table}\` MODIFY COLUMN \`${column}\` LONGBLOB NULL`);
+      logger.info({ table, column }, 'Enlarged encrypted column → LONGBLOB');
+    }
+  };
+  await ensureLongblob('encounter_notes', 'content_enc');
   await ensureMediumblob('patients', 'insurance_enc');
   await ensureMediumblob('patients', 'emergency_enc');
 

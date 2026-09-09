@@ -277,12 +277,22 @@ app.get('/healthz', (req, res) => res.json({ status: 'ok', service: 'grelin-pms-
 // /api — WAF, then reverse-proxy to the internal API on loopback.
 // ---------------------------------------------------------------------------
 // Parse the JSON body ONLY for /api so the WAF can inspect it; fixRequestBody
-// re-streams it to the upstream. The cap MIRRORS the backend (6 MB) so long clinical
-// notes (a 100k-word record is ~0.6 MB) and facility-logo data URIs pass through — a
-// smaller cap here would 413 large notes at the gateway before they ever reach the API.
-// Multipart file uploads are streamed RAW to the backend — never JSON-parsed,
-// WAF-buffered, or re-emitted — so the upload stream reaches multer intact.
-const jsonParser = express.json({ limit: '6mb' });
+// re-streams it to the upstream. The cap MIRRORS the backend (16 MB) so DYNAMIC long-form
+// clinical notes (a record can exceed 500k words ≈ ~11 MB JSON) and facility-logo data URIs pass
+// through — a smaller cap here would 413 large notes at the gateway before they reach the API.
+// The endpoints that carry such bodies are all authenticated + EHR-gated + edge-rate-limited, so
+// the larger cap is not a meaningful DoS surface. Multipart file uploads are streamed RAW to the
+// backend — never JSON-parsed, WAF-buffered, or re-emitted — so the upload stream reaches multer intact.
+// DoS-surface reduction: only the NOTE-WRITE endpoints legitimately carry dynamic large (>500k word,
+// up to ~11 MB JSON) bodies. Everything else keeps the smaller 6 MB cap, so an unauthenticated client
+// cannot force a 16 MB buffer through non-note paths at the edge (the body is parsed here for WAF
+// inspection BEFORE the backend can authenticate). The note paths that get the larger cap are still
+// authenticated + EHR-gated + CSRF-checked + edge-rate-limited downstream.
+const jsonSmall = express.json({ limit: '6mb' });
+const jsonLarge = express.json({ limit: '16mb' });
+// POST /api/encounters/:enc/notes | PATCH /api/encounters/notes/:id | POST …/notes/:id/(sign|amend)
+const NOTE_WRITE_RE = /^\/api\/encounters\/[^/?]+\/notes(?:[/?]|$)|^\/api\/encounters\/notes\/[^/?]+(?:\/(?:sign|amend))?(?:[/?]|$)/i;
+const jsonParser = (req, res, next) => (NOTE_WRITE_RE.test(req.originalUrl) ? jsonLarge : jsonSmall)(req, res, next);
 // The API also legitimately consumes application/x-www-form-urlencoded (the SMART OAuth token
 // endpoint). Parse it too so the WAF INSPECTS its fields instead of streaming them past unscanned.
 const urlencodedParser = express.urlencoded({ extended: false, limit: '6mb' });

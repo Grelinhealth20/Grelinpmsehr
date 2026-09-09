@@ -57,7 +57,7 @@ export function createApp() {
   // gateway-rate-limited, so the larger cap is not a meaningful DoS surface.
   // Capture the RAW body for the Fax.Plus (Svix) webhook so its HMAC signature can be verified over the
   // exact bytes — signature verification must run on the unparsed payload, not the re-serialized JSON.
-  app.use(express.json({ limit: '6mb', verify: (req, _res, buf) => { if ((req.originalUrl || '').includes('/fax/webhook')) req.rawBody = buf; } }));
+  app.use(express.json({ limit: '16mb', verify: (req, _res, buf) => { if ((req.originalUrl || '').includes('/fax/webhook')) req.rawBody = buf; } }));
   // Form-urlencoded parsing (bounded) — required by the OAuth 2.0 / SMART token endpoint, which per spec
   // receives application/x-www-form-urlencoded. Small cap: these are short token/credential payloads.
   app.use(express.urlencoded({ extended: false, limit: '64kb' }));

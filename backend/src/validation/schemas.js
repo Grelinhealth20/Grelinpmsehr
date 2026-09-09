@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ROLE_VALUES, USER_STATUS } from '../config/env.js';
+import { NOTE_TYPE_TEMPLATES } from '../services/noteTemplateService.js';
 
 const email = z.string().trim().toLowerCase().email('A valid email is required.').max(254);
 const password = z.string().min(1, 'Password is required.').max(200);
@@ -249,8 +250,13 @@ export const updateEncounterSchema = z
 
 // CMS-compliant SNF MD note types.
 // SNF provider-focused, free-form note types: Admission H&P, SOAP, Progress, Discharge.
-export const NOTE_TYPES = ['hp', 'soap', 'progress', 'discharge',
-  'acuteChange', 'acp', 'hospice', 'telehealth', 'custom'];
+// Note types accepted on save = EVERY type in the live template registry (SNF + PI + Pain +
+// any future service line) PLUS the special free-form 'custom' type (built from a provider's
+// custom template, carried in customSections). DERIVED from the registry so this validator can
+// never drift out of sync with the picker again — a stale hardcoded list previously rejected
+// all 29 PI/Pain note types on save (a 400), silently blocking those records entirely.
+// The controller still gates each type per-provider via providerCanUseNoteType (service-line scope).
+export const NOTE_TYPES = [...new Set([...NOTE_TYPE_TEMPLATES.map((t) => t.noteType), 'custom'])];
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be YYYY-MM-DD')
   .refine(isRealCalendarDate, 'Date is not a valid calendar date.');
 // Structured note body (PHI, encrypted at rest): narrative sections + Rx list.
@@ -274,8 +280,12 @@ const vitalsSchema = z
 // 500k words ≈ 3.25M chars, so 4.5M chars leaves ~40% headroom.)
 // 500k words ≈ 4.3M chars worst-case (long clinical terms). Caps set so a full 500k-word record fits
 // in ONE section OR spread across sections, with headroom, and the JSON body stays under the 6 MB cap.
-const NOTE_SECTION_MAX = 4_800_000; // chars per section — a single section can hold a full 500k-word narrative
-const NOTE_TOTAL_MAX = 4_800_000;   // chars per note (~500k+ words); encrypted ~4.8 MB < 16 MB, body < 6 MB
+// Dynamic long-form records: a note may hold well OVER 500k words. Caps sized for ~1.5M words
+// worst-case (avg clinical word ≈ 6.5 chars incl. spacing → 500k≈3.25M chars, 1.5M≈~10M chars).
+// content_enc is LONGBLOB (no 16 MB ceiling); the JSON body cap (gateway + backend) is 16 MB, which
+// carries a ~10M-char note (~11 MB JSON) with headroom. An over-cap note is a clean 400 (never truncated).
+const NOTE_SECTION_MAX = 10_000_000; // chars per section — one section can hold a whole ~1.5M-word narrative
+const NOTE_TOTAL_MAX = 10_000_000;   // chars per note (~1.5M words); encrypted ≈10 MB (LONGBLOB), body ≈11 MB < 16 MB
 const noteContentSchema = z
   .object({
     vitals: vitalsSchema.optional(),
