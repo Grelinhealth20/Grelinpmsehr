@@ -247,6 +247,8 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   const [reason, setReason] = useState('');
   const [pharmacy, setPharmacy] = useState(null);   // pharmacy/PBM vendor from benefits
   const [rxCarry, setRxCarry] = useState(null);      // carry-forward source info
+  const [billing, setBilling] = useState(null);      // live coding-engine predictions (ICD/CPT/modifiers)
+  const [billingLoading, setBillingLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [autoState, setAutoState] = useState('idle'); // idle | saving | saved
   const [amending, setAmending] = useState(false); // MD editing a signed note
@@ -352,6 +354,34 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   }
   useEffect(() => { if (encounter?.encounterUuid) loadNotes({ autoOpen: true }); /* eslint-disable-next-line */ }, [encounter?.encounterUuid]);
 
+  // BILLING coding-engine prediction — run at two DETERMINISTIC points only, NEVER on every keystroke
+  // (mid-edit prediction hammered the engine, added latency, and coded a not-yet-finished note):
+  //   1. ON OPEN — when a note is opened, so the provider sees the predicted codes for review; and
+  //   2. AT FINALIZE — refreshed against the final saved content in sign()/finalize, so the Billing
+  //      heading is accurate BEFORE the signature is applied.
+  // The engine reads the PERSISTED note server-side, so it always predicts the saved content (not an
+  // in-flight keystroke). Deterministic + CMS-validated server-side; advisory — a failure never blocks
+  // the note (the last good prediction is kept).
+  const runBillingPrediction = useCallback(async () => {
+    if (!active?.uuid) { setBilling(null); return null; }
+    try {
+      setBillingLoading(true);
+      const { data } = await encountersApi.predictCodes(active.uuid);
+      setBilling(data);
+      return data;
+    } catch { return null; /* advisory suggestion — never blocks writing/signing */ }
+    finally { setBillingLoading(false); }
+  }, [active?.uuid]);
+
+  // ON OPEN: predict once per opened note. Keyed on the note UUID ONLY, so it never re-runs while the
+  // provider edits — no mid-edit triggering. Stale codes from the previously-open note are cleared first.
+  useEffect(() => {
+    if (!active?.uuid) { setBilling(null); return; }
+    setBilling(null);
+    runBillingPrediction();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active?.uuid]);
+
   async function openNote(uuid) {
     try {
       const { data } = await encountersApi.getNote(uuid);
@@ -402,7 +432,20 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
       // order — so the provider sees the complete template (not a progressive reveal).
       const bodySecs = secs.filter((s) => s.key !== 'chiefComplaint' && s.key !== 'vitals');
       const seed = bodySecs.map((s) => s.key);
-      const initContent = { vitals: {}, sections: {}, checks: {}, prescriptions: [], sectionOrder: seed };
+      // CARRY-FORWARD: seed Vitals + Medications from this patient's most-recent note (deterministic,
+      // access-scoped server-side — never static). The provider edits freely; edits save to THIS note,
+      // so the NEXT note carries the updated values. Best-effort — a lookup failure just starts empty.
+      let carryVitals = {}; let carryRx = []; let carry = null;
+      if (encounter.patientUuid) {
+        try {
+          const { data: rc } = await encountersApi.rxContext(encounter.patientUuid);
+          carryVitals = rc.vitals && Object.keys(rc.vitals).length ? { ...rc.vitals } : {};
+          carryRx = Array.isArray(rc.prescriptions) ? rc.prescriptions.map((p) => ({ ...p })) : [];
+          const vN = Object.keys(carryVitals).length; const rN = carryRx.length;
+          if (vN || rN) carry = { vN, rN, rxDate: rc.sourceDate || null, vitalsDate: rc.vitalsDate || null };
+        } catch { /* carry-forward is best-effort — start empty, never block the new note */ }
+      }
+      const initContent = { vitals: carryVitals, sections: {}, checks: {}, prescriptions: carryRx, sectionOrder: seed };
       if (tpl) { initContent.templateName = tpl.label; initContent.customSections = secs.map((s) => ({ ...s })); }
       const { data } = await encountersApi.createNote(encounter.encounterUuid, { noteType: tpl ? 'custom' : noteType, content: initContent });
       skipSave.current = true;
@@ -412,8 +455,9 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
       setContent(initContent);
       setPharmacy(null);
       setRxCarry(null);
-      setShowVitals(false); // vitals auto-show only if this note already has vitals data
+      setShowVitals(Object.keys(carryVitals).length > 0); // show the vitals card when carried values seeded it
       setReason('');
+      if (carry) toast.success(`Carried forward ${carry.vN ? 'vitals' : ''}${carry.vN && carry.rN ? ' + ' : ''}${carry.rN ? `${carry.rN} medication${carry.rN === 1 ? '' : 's'}` : ''} from the previous note — edit as needed.`);
       setTab('note');
       await loadNotes();
       onChanged?.();
@@ -530,6 +574,11 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
     if (!canSign) { toast.error('Only a physician (MD or DO) can sign off and finalize a note for billing.'); return; }
     setBusy(true);
     try {
+      // FINALIZE trigger: persist the final content, then run the coding engine ONCE on that saved
+      // content so the Billing heading reflects the completed note BEFORE the signature is applied.
+      const okSaved = await flushSave();
+      if (!okSaved) { toast.error('Your changes could not be saved yet — please try again before signing.'); return; }
+      await runBillingPrediction();
       const { data } = await encountersApi.signNote(active.uuid, { content, reason });
       setActive(data.note);
       toast.success('Note signed — finalized and saved to the patient folder for billing.');
@@ -956,7 +1005,20 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
                           )}
                         </div>
                       ) : (
-                        <div className="pf-sec" key={s.key}>
+                        <Fragment key={s.key}>
+                        {/* BILLING — a FREE-FORM note section (saved in content.sections.billing) PLUS the
+                            live coding-engine predictions, rendered directly ABOVE Attestation & Signature
+                            on every template. */}
+                        {s.key === 'attestation' && (
+                          <BillingSection
+                            value={content.sections?.billing || ''}
+                            onChange={(v) => setSection('billing', v)}
+                            readOnly={readOnly}
+                            billing={billing}
+                            loading={billingLoading}
+                          />
+                        )}
+                        <div className="pf-sec">
                           <div className="pf-sec-h">
                             <span className="pf-sec-hl"><span className="pf-sec-tick" aria-hidden="true" /><span className="pf-sec-t">{s.label}</span></span>
                             {!readOnly && (
@@ -1027,6 +1089,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
                             />
                           )}
                         </div>
+                        </Fragment>
                       ))) : <div className="pf-body"><span className="pf-muted">This note has no documentation.</span></div>}
 
                       {signed && (
@@ -1523,6 +1586,78 @@ function RxSafetyPanel({ safety, checking, onClose }) {
  * (name, credentials, NPI) and, when a non-physician practitioner performed the visit, names them as
  * the rendering practitioner. A draft shows what will be captured; a signed note shows the real one.
  */
+/**
+ * BILLING — appears on every note, directly above Attestation & Signature. It is a normal FREE-FORM note
+ * section (its text saves to content.sections.billing, so it persists, autosaves, and is included in the
+ * signed PDF/DOCX like any other heading) PLUS a live, read-only readout of the CODING ENGINE predictions:
+ *  - Diagnoses: ICD-10-CM code + authoritative description + SNOMED CT ID (primary marked).
+ *  - Procedures: CPT/HCPCS code + modifiers (no description, per spec) + units.
+ * Predictions are advisory suggestions from the deterministic, CMS-validated engine; the free-form field
+ * is the provider's own billing note. Nothing here is fabricated — an empty engine result shows a prompt.
+ */
+function BillingSection({ value, onChange, readOnly, billing, loading }) {
+  const dx = [...(billing?.diagnoses || [])].sort((a, b) => (b.primary ? 1 : 0) - (a.primary ? 1 : 0));
+  const px = billing?.procedures || [];
+  const mods = (m) => (Array.isArray(m) ? m.filter(Boolean).join(', ') : String(m || '').trim());
+  return (
+    <div className="pf-sec pf-billing">
+      <div className="pf-sec-h">
+        <span className="pf-sec-hl"><span className="pf-sec-tick" aria-hidden="true" /><span className="pf-sec-t">Billing</span></span>
+        <span className="pf-billing-src">Coding engine · CMS-validated{loading ? <span className="spinner dark pf-billing-spin" /> : null}</span>
+      </div>
+      {readOnly
+        ? ((value || '').trim() ? <div className="pf-body">{value.split('\n').map((ln, li) => <p key={li}>{ln || ' '}</p>)}</div> : null)
+        : <AutoText id="sec-billing" rows={2} value={value} placeholder="Billing notes (free-form) — the predicted codes below are advisory suggestions from the coding engine." onChange={onChange} />}
+      <div className="pf-billing-pred">
+        <div className="pf-bill-grp">
+          <div className="pf-bill-lbl">Predicted diagnoses — ICD-10-CM</div>
+          {dx.length ? dx.map((d, i) => (
+            <div className="pf-bill-row" key={`${d.icd}-${i}`}>
+              <span className="pf-bill-code">{d.icd}</span>
+              {d.primary ? <span className="pf-bill-primary">Primary</span> : null}
+              <span className="pf-bill-desc">{d.description || '—'}</span>
+              {d.snomedCode ? <span className="pf-bill-snomed">SNOMED CT {d.snomedCode}</span> : null}
+            </div>
+          )) : <div className="pf-bill-empty">No diagnoses predicted yet — document the assessment.</div>}
+        </div>
+        <div className="pf-bill-grp">
+          <div className="pf-bill-lbl">Predicted procedures — CPT / HCPCS</div>
+          {px.length ? px.map((p, i) => (
+            <div className="pf-bill-row" key={`${p.cpt}-${i}`}>
+              <span className="pf-bill-code">{p.cpt}</span>
+              {mods(p.modifiers) ? <span className="pf-bill-mod">Mod {mods(p.modifiers)}</span> : null}
+              {p.units > 1 ? <span className="pf-bill-units">×{p.units}</span> : null}
+            </div>
+          )) : <div className="pf-bill-empty">No procedures predicted.</div>}
+        </div>
+        {(() => {
+          // denialSummary is a COUNT object { errors, warnings, info } — never render it directly (that
+          // throws "Objects are not valid as a React child"). Surface only actionable error/warning
+          // findings, each as its own line with the code + message from the CMS claim-scrub.
+          const risks = (billing?.denialRisks || []).filter((r) => r && (r.severity === 'error' || r.severity === 'warning'));
+          if (!risks.length) return null;
+          const s = billing?.denialSummary || {};
+          const parts = [];
+          if (s.errors) parts.push(`${s.errors} error${s.errors === 1 ? '' : 's'}`);
+          if (s.warnings) parts.push(`${s.warnings} warning${s.warnings === 1 ? '' : 's'}`);
+          return (
+            <div className="pf-bill-grp pf-bill-denials">
+              <div className="pf-bill-lbl">Denial-risk checks{parts.length ? ` — ${parts.join(', ')}` : ''}</div>
+              {risks.slice(0, 8).map((r, i) => (
+                <div className={`pf-bill-denial ${r.severity}`} key={`${r.type || 'risk'}-${r.code || i}-${i}`}>
+                  <span className="pf-bill-denial-sev">{r.severity === 'error' ? '✕' : '⚠'}</span>
+                  {r.code ? <span className="pf-bill-code sm">{r.code}</span> : null}
+                  <span className="pf-bill-denial-msg">{typeof r.message === 'string' ? r.message : 'Coding edit flagged — verify before billing.'}</span>
+                </div>
+              ))}
+            </div>
+          );
+        })()}
+      </div>
+    </div>
+  );
+}
+
 function AttestationPanel({ signed, attestation, signedByName, signedAt, physician }) {
   if (signed && attestation?.statement) {
     const r = attestation.rendering;

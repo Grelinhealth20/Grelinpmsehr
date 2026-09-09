@@ -1,10 +1,12 @@
 import {
   listFacilities, getFacility, createFacility, updateFacility,
   setFacilityStatus, setFacilityFlags, deleteFacility, assignProvider, unassignProvider,
+  masterWipeFacility,
 } from '../services/facilityService.js';
 import { listFacilityFaxConfigs, setFacilityFaxConfig } from '../services/facilityFaxService.js';
 import { searchFacilities, nppesEnabled } from '../services/nppesService.js';
 import { recordAudit } from '../services/auditService.js';
+import { ROLES } from '../config/env.js';
 
 const ctx = (req) => ({ ip: req.ip, userAgent: req.get('user-agent') });
 
@@ -112,6 +114,31 @@ export async function remove(req, res, next) {
     if (!ok) return res.status(404).json({ error: 'Facility not found.', code: 'NOT_FOUND' });
     await recordAudit({ actorUserId: req.authUserId, action: 'facility.delete', entityType: 'facility', entityId: req.params.uuid, ...ctx(req) });
     res.json({ ok: true });
+  } catch (err) { next(err); }
+}
+
+/**
+ * MASTER-ONLY: completely wipe ALL data for a facility (patients, charts/encounters/notes,
+ * appointments, referrals, documents in DB + S3, and the facility-scoped audit trail). Providers
+ * that belong solely to this facility are retired; shared providers are only unlinked — never any
+ * cross-facility deletion. The caller must re-type the facility name in `confirmName`.
+ */
+export async function masterWipe(req, res, next) {
+  try {
+    // Route already gates to admins; this action is restricted to the MASTER admin specifically.
+    if (req.user?.role !== ROLES.MASTER_ADMIN) {
+      return res.status(403).json({ error: 'Only the master administrator can wipe a facility.', code: 'MASTER_ONLY' });
+    }
+    const result = await masterWipeFacility(req.params.uuid, {
+      actorId: req.authUserId,
+      confirmName: req.body?.confirmName,
+      deleteFacility: req.body?.deleteFacility === true,
+    });
+    if (result.notFound) return res.status(404).json({ error: 'Facility not found.', code: 'NOT_FOUND' });
+    if (result.confirmMismatch) {
+      return res.status(400).json({ error: 'Confirmation failed — the typed facility name does not match.', code: 'CONFIRM_MISMATCH' });
+    }
+    res.json(result);
   } catch (err) { next(err); }
 }
 

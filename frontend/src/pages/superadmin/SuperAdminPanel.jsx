@@ -229,7 +229,7 @@ export default function SuperAdminPanel() {
         ) : isAiLogs ? (
           <AiLogs />
         ) : isLogs ? (
-          <AuditLogs users={all} facilities={facilities} />
+          <AuditLogs users={rows} facilities={facilities} />
         ) : isFacilities ? (
           <FacilitiesView
             facilities={facilities}

@@ -326,6 +326,12 @@ export async function listPatientEncounters(providerId, patientUuid, { page = 1,
  * accessible patient (own patients, or facility-wide for an MD) — never cross-patient.
  * Returns null when the patient is not accessible.
  */
+// CARRY-FORWARD source for a NEW note: the patient's MOST-RECENT prescriptions AND vitals, each taken
+// from the latest note (across DOS) that actually recorded them. Deterministic (real stored data, never a
+// static default) and STRICTLY patient- + access-scoped via viewerScope/patientScopeWhere — a patient not
+// accessible to this provider returns null (no cross-patient/cross-facility leakage). When a provider
+// updates meds/vitals in a note, that note becomes the most recent, so the NEXT note carries the update.
+// (Name kept as latestPrescriptions for its existing caller; now also returns vitals/vitalsDate.)
 export async function latestPrescriptions(providerId, patientUuid) {
   const scope = await viewerScope(providerId);
   const sc = patientScopeWhere(scope, providerId, 'p');
@@ -341,18 +347,33 @@ export async function latestPrescriptions(providerId, patientUuid) {
       ORDER BY n.created_at DESC LIMIT 40`,
     params,
   );
-  for (const r of rows) {
-    const c = jsonFromEnc(r.content_enc);
-    const rx = Array.isArray(c?.prescriptions) ? c.prescriptions.filter((p) => p && p.drug) : [];
-    if (rx.length) {
-      return {
-        patientId,
-        prescriptions: rx.map((p) => ({ drug: p.drug || '', dose: p.dose || '', route: p.route || '', frequency: p.frequency || '', quantity: p.quantity || '', refills: p.refills || '', sig: p.sig || '' })),
-        sourceDate: r.created_at,
-      };
+  const cf = pickCarryForward(rows.map((r) => ({ content: jsonFromEnc(r.content_enc), date: r.created_at })));
+  return { patientId, ...cf };
+}
+
+// PURE carry-forward selection (exported for testing): given the patient's notes NEWEST-FIRST, return the
+// most-recent non-empty prescriptions and the most-recent non-empty vitals — each from the first note that
+// has them. Deterministic; never fabricates. Each is independent (vitals and meds may come from different
+// notes). Empty input or nothing recorded → empty (never a static default).
+export function pickCarryForward(orderedNotes = []) {
+  const list = Array.isArray(orderedNotes) ? orderedNotes : []; // tolerate null/non-array → empty (never throw)
+  const vitalHasValue = (v) => v && typeof v === 'object' && !Array.isArray(v) && Object.values(v).some((x) => x != null && String(x).trim() !== '');
+  let prescriptions = null; let sourceDate = null; let vitals = null; let vitalsDate = null;
+  for (const n of list) { // newest-first → the FIRST hit for each is the most recent
+    const c = n?.content;
+    if (!prescriptions) {
+      // A prescription counts only when it has a NON-BLANK drug name — a whitespace-only "drug" is not a
+      // real med and must not be carried (nor block skipping to an older note that has real meds).
+      const rx = Array.isArray(c?.prescriptions) ? c.prescriptions.filter((p) => p && p.drug && String(p.drug).trim()) : [];
+      if (rx.length) {
+        prescriptions = rx.map((p) => ({ drug: p.drug || '', dose: p.dose || '', route: p.route || '', frequency: p.frequency || '', quantity: p.quantity || '', refills: p.refills || '', sig: p.sig || '' }));
+        sourceDate = n.date;
+      }
     }
+    if (!vitals && vitalHasValue(c?.vitals)) { vitals = { ...c.vitals }; vitalsDate = n.date; }
+    if (prescriptions && vitals) break; // both found — stop early
   }
-  return { patientId, prescriptions: [], sourceDate: null };
+  return { prescriptions: prescriptions || [], sourceDate, vitals: vitals || {}, vitalsDate };
 }
 
 /** Create a standalone encounter (select patient + date) not tied to an appointment. */

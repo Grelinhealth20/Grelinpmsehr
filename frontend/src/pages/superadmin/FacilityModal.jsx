@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Modal from '../../components/Modal.jsx';
 import { useToast } from '../../components/Toast.jsx';
+import { useAuth } from '../../context/AuthContext.jsx';
 import { facilitiesApi, usersApi, toApiError } from '../../lib/api.js';
 
 const BLANK = { npi: '', name: '', address: '', city: '', state: '', zip: '', phone: '', fax: '', taxonomy: '', taxonomyCode: '', taxId: '', authorizedOfficial: '', enumerationDate: '', mailingAddress: '', nppesStatus: '', logo: '' };
@@ -15,8 +16,16 @@ const initials = (n = '') => n.split(' ').filter(Boolean).slice(0, 2).map((w) =>
  */
 export default function FacilityModal({ facility = null, onClose, onSaved }) {
   const toast = useToast();
+  const { user } = useAuth();
+  const isMaster = user?.role === 'master_admin';
   const editing = !!facility;
   const [uuid, setUuid] = useState(facility?.uuid || null);
+
+  // --- MASTER-only Danger Zone: complete facility data wipe ---
+  const [wipeOpen, setWipeOpen] = useState(false);
+  const [wipeName, setWipeName] = useState('');
+  const [wipeAlsoDelete, setWipeAlsoDelete] = useState(false);
+  const [wiping, setWiping] = useState(false);
 
   // --- NPPES lookup (add mode) ---
   const [term, setTerm] = useState('');
@@ -144,9 +153,26 @@ export default function FacilityModal({ facility = null, onClose, onSaved }) {
     } catch (e) { toast.error(toApiError(e).message); }
   }
 
+  // MASTER-ONLY: permanently wipe ALL of this facility's data. Requires the exact facility name typed
+  // back (defense against a mis-click). Shows the deletion summary and closes on success.
+  async function doWipe() {
+    if (!uuid) return;
+    if (wipeName.trim().toLowerCase() !== String(form.name || '').trim().toLowerCase()) {
+      toast.error('The typed name does not match the facility name.'); return;
+    }
+    setWiping(true);
+    try {
+      const { data } = await facilitiesApi.masterWipe(uuid, { confirmName: wipeName.trim(), deleteFacility: wipeAlsoDelete });
+      toast.success(`Facility wiped — ${data.patients} patients, ${data.encounters} encounters, ${data.appointments} appointments, ${data.referrals} referrals, ${data.auditLogs} audit rows, ${data.s3ObjectsDeleted ?? 0} files. Providers: ${data.providersDeleted} removed, ${data.providersUnlinked} unlinked.`);
+      onSaved?.();
+      onClose?.();
+    } catch (e) { toast.error(toApiError(e).message); } finally { setWiping(false); }
+  }
+
   const setF = (k, v) => setForm((f) => ({ ...f, [k]: v }));
   const assignedSet = useMemo(() => new Set(providers.map((p) => p.uuid)), [providers]);
   const available = allProviders.filter((p) => !assignedSet.has(p.uuid));
+  const wipeArmed = wipeName.trim().toLowerCase() === String(form.name || '').trim().toLowerCase() && wipeName.trim().length > 0;
 
   return (
     <Modal
@@ -274,6 +300,53 @@ export default function FacilityModal({ facility = null, onClose, onSaved }) {
                     <button className="act danger" onClick={() => unassign(p.uuid)}>Remove</button>
                   </div>
                 ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* MASTER-ONLY Danger Zone — complete facility data wipe. */}
+        {isMaster && editing && uuid && (
+          <div className="fac-danger">
+            <div className="fac-danger-head">
+              <span className="fac-danger-title">Danger Zone — Master delete</span>
+              <span className="fac-danger-hint">
+                Permanently and irreversibly wipes ALL of this facility's data: every patient, chart,
+                encounter, note, appointment, referral, and document (database + secure file storage),
+                plus this facility's audit trail. Providers who serve only this facility are removed;
+                providers shared with other facilities are only unlinked. Nothing in any other facility
+                is touched.
+              </span>
+            </div>
+            {!wipeOpen ? (
+              <button type="button" className="btn danger" onClick={() => setWipeOpen(true)}>
+                Wipe all facility data…
+              </button>
+            ) : (
+              <div className="fac-danger-confirm">
+                <label className="fac-lbl">
+                  Type the facility name <b>{form.name}</b> to confirm:
+                </label>
+                <input
+                  className="input"
+                  value={wipeName}
+                  onChange={(e) => setWipeName(e.target.value)}
+                  placeholder={form.name}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <label className="fac-danger-check">
+                  <input type="checkbox" checked={wipeAlsoDelete} onChange={(e) => setWipeAlsoDelete(e.target.checked)} />
+                  Also delete the facility record itself (not just its data)
+                </label>
+                <div className="fac-danger-actions">
+                  <button type="button" className="btn ghost" onClick={() => { setWipeOpen(false); setWipeName(''); setWipeAlsoDelete(false); }} disabled={wiping}>
+                    Cancel
+                  </button>
+                  <button type="button" className="btn danger" onClick={doWipe} disabled={!wipeArmed || wiping}>
+                    {wiping ? <span className="spinner" /> : 'Permanently wipe this facility'}
+                  </button>
+                </div>
               </div>
             )}
           </div>

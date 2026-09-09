@@ -259,5 +259,30 @@ export async function deleteObjects(keys) {
   }));
 }
 
+/**
+ * Delete EVERY object under a prefix (paginated list → batched delete; S3 caps DeleteObjects at
+ * 1000 keys per call). Used by the Master facility wipe: because keys are hierarchical under
+ * facilityPrefix(), passing that prefix removes all of the facility's patient/encounter/referral/
+ * provider objects in one pass. Returns the number of objects deleted. No-op if S3 is off or the
+ * prefix is empty/blank (a blank prefix is REFUSED so a wipe can never target the whole bucket).
+ */
+export async function deleteByPrefix(prefix) {
+  if (!client) return 0;
+  const p = String(prefix || '').trim();
+  if (!p || p === '/' || !p.endsWith('/')) throw new Error(`deleteByPrefix refused unsafe prefix: ${JSON.stringify(prefix)}`);
+  let deleted = 0; let token;
+  do {
+    const res = await client.send(new ListObjectsV2Command({ Bucket: config.s3.bucket, Prefix: p, ContinuationToken: token }));
+    const keys = (res.Contents || []).map((o) => o.Key).filter(Boolean);
+    for (let i = 0; i < keys.length; i += 1000) {
+      const batch = keys.slice(i, i + 1000);
+      await client.send(new DeleteObjectsCommand({ Bucket: config.s3.bucket, Delete: { Objects: batch.map((Key) => ({ Key })) } }));
+      deleted += batch.length;
+    }
+    token = res.IsTruncated ? res.NextContinuationToken : undefined;
+  } while (token);
+  return deleted;
+}
+
 if (!client) logger.warn('S3 not configured — patient document uploads are disabled.');
 else ensureMasterFolder(); // create the master upload folder on boot (best-effort)

@@ -48,7 +48,9 @@ const LAY_CLASS = [
   { terms: ['ppi', 'ppis', 'proton pump inhibitor'], atc: ['A02BC'] },
   { terms: ['ssri', 'ssris'], atc: ['N06AB'] },
   { terms: ['snri', 'snris'], atc: ['N06AX'] },
-  { terms: ['benzodiazepine', 'benzodiazepines', 'benzo'], atc: ['N05BA', 'N05CD'] },
+  // N05BA anxiolytic + N05CD hypnotic benzodiazepines, PLUS N03AE (benzodiazepine-derivative
+  // antiepileptics: clonazepam, clobazam) — clinically benzodiazepines, so a benzo allergy must flag them.
+  { terms: ['benzodiazepine', 'benzodiazepines', 'benzo'], atc: ['N05BA', 'N05CD', 'N03AE'] },
   // `ingredients`: true opioids WHO-ATC files OUTSIDE N02A (codeine R05DA04, hydrocodone R05DA03 are
   // classed as antitussives by indication) — they are mu-agonists cross-reactive with a morphine/opioid
   // allergy, so recognise them by ingredient. Scoped to genuine opioids only: dextromethorphan (R05DA09)
@@ -87,14 +89,37 @@ async function ensureIndex() {
       }
       const index = new Map();
       for (const [key, rs] of byIng) index.set(key, buildInfo(rs));
-      logger.info({ ingredients: index.size, rows: rows.length }, 'medSafety: drug-class index loaded into memory');
-      return index;
+      // BASE index: class rows grouped by the SALT-STRIPPED base ingredient, so a base name written
+      // WITHOUT its salt/ester ("olmesartan") inherits the class the dataset only carries on the ester
+      // ("olmesartan medoxomil" → ATC C09CA), and every salt form inherits the base — class resolution
+      // is symmetric and never silently misses because of a salt. Distinct drugs never collapse here:
+      // stripSalts only removes known salt/ester/hydrate suffixes, so only true salt-siblings share a base.
+      const byBase = new Map();
+      for (const [key, rs] of byIng) {
+        const base = stripSalts(key) || key;
+        let g = byBase.get(base); if (!g) { g = []; byBase.set(base, g); }
+        for (const r of rs) g.push(r);
+      }
+      const baseIndex = new Map();
+      for (const [base, rs] of byBase) baseIndex.set(base, buildInfo(rs));
+      logger.info({ ingredients: index.size, bases: baseIndex.size, rows: rows.length }, 'medSafety: drug-class index loaded into memory');
+      return { ing: index, base: baseIndex };
     })().catch((e) => { indexPromise = null; throw e; }); // clear on failure so the next call retries
   }
   return indexPromise;
 }
 
-const STRENGTH = /\b\d+(?:\.\d+)?\s*(?:MG|MCG|UG|NG|G|ML|UNT|UNIT|%|MEQ|MMOL|IU|BAU|AU|PNU|IR|SQCM|CELLS|MCI)\b/i;
+// A strength token, optionally a RANGE ("5-325 MG", "25-50 mg") so a combination-product dose pair or a
+// single-drug titration range is consumed WHOLE — leaving a clean ingredient, not a trailing "5-".
+const STRENGTH = /\b\d+(?:\.\d+)?(?:\s*[-–]\s*\d+(?:\.\d+)?)?\s*(?:MG|MCG|UG|NG|G|ML|UNT|UNIT|%|MEQ|MMOL|IU|BAU|AU|PNU|IR|SQCM|CELLS|MCI)\b/i;
+// A numeric DOSE RANGE next to a unit ("5-325 MG") reliably signals a COMBINATION product written in the
+// "drugA-drugB dose1-dose2 form" pharmacy shorthand — used to convert the drug-name hyphen to '/' below.
+const DOSE_RANGE = /\d+(?:\.\d+)?\s*[-\/–]\s*\d+(?:\.\d+)?(?:\s*(?:MG|MCG|UG|NG|G|ML|UNT|UNIT|MEQ|MMOL|IU))?\b/i;
+// Provider ORDER decorations that are NOT part of the drug name — stripped from the LEADING edge of a
+// free-text order so the ingredient (and its allergy/duplicate class) still resolves: "start atorvastatin
+// 40 mg" → atorvastatin, "d/c lisinopril" → lisinopril, "pt to begin losartan" → losartan. Defense-in-depth
+// mirroring the frontend RX_VERB, but iterative (stacked words) and tolerant of the "d/c"/"d.c." shorthand.
+const ORDER_LEAD = /^\s*(?:d\s*[\/.]\s*c|start(?:ed|ing)?|beginning|begin|begun|continued|continue|cont|changed|change|increased|increase|decreased|decrease|discontinued|discontinue|dc|stopped|stop|hold|held|added|add|resumed|resume|tapered|taper|given|give|ordered|order|initiated|initiate|prescribed|prescribe|rx|patient|pt|please|will|may|then|now|to|on|the)\b[\s.:,-]*/i;
 const FORM_TAIL = /\s+(?:oral|injectable|topical|ophthalmic|otic|nasal|rectal|vaginal|inhalation|sublingual|buccal|transdermal|chewable|extended release|delayed release|prefilled|metered|auto-?injector|tablet|capsule|solution|suspension|syrup|elixir|cream|ointment|lotion|gel|patch|suppository|powder|granules?|lozenge|film|spray|drops?|aerosol|pack|kit)\b.*$/i;
 
 const INERT = /^(inert ingredients?|placebo|inert|diluent)$/i;
@@ -102,11 +127,24 @@ const INERT = /^(inert ingredients?|placebo|inert|diluent)$/i;
 /** Ingredient candidates from one "ingredient strength [/ ingredient strength] form" string. */
 function extractIngredients(str) {
   let s = String(str || '').replace(/\[.*?\]/g, ' ').replace(/\s+/g, ' ').trim();
+  // Strip LEADING provider order verbs/decorations ("start ", "d/c ", "pt to begin ") iteratively BEFORE
+  // the '/' split, so "d/c" isn't torn apart and the real ingredient resolves for allergy/duplicate.
+  let prevLead; do { prevLead = s; s = s.replace(ORDER_LEAD, ''); } while (s !== prevLead && s);
   s = s.replace(/^\s*\d+(?:\.\d+)?\s*(?:%|ML)\s+/i, '');   // strip leading fill volume / concentration ("0.9 % ")
+  // COMBINATION shorthand ("hydrocodone-acetaminophen 5-325 MG …"): when a numeric dose RANGE is present
+  // (a reliable combination-product signal), convert a hyphen BETWEEN TWO DRUG-NAME letters to the same
+  // '/' separator RxNorm uses, so each ingredient (and its allergy/duplicate class) is recognised — e.g.
+  // the opioid component of an analgesic combo. Never touches a hyphen adjacent to a digit (the dose
+  // range itself) so "5-325" is preserved; gated on the dose range so single hyphenated ingredient names
+  // without a range are left intact.
+  if (DOSE_RANGE.test(s)) s = s.replace(/([a-z])\s*-\s*([a-z])/gi, '$1 / $2');
   const out = [];
   for (const seg of s.split('/')) {
     const m = seg.match(STRENGTH);
     let ing = (m ? seg.slice(0, m.index) : seg).replace(FORM_TAIL, '').trim();
+    // Drop a trailing connector word left between the drug and its dose ("gabapentin to 600 mg" → the head
+    // is "gabapentin to" → "gabapentin"; "warfarin by mouth" handled by FORM_TAIL/route elsewhere).
+    ing = ing.replace(/\s+(?:to|x|for|by|per|at|q\w*)\s*$/i, '').trim();
     ing = ing.replace(/[.,;:]+$/, '').replace(/\s+/g, ' ').trim().toLowerCase();
     if (ing && ing.length >= 3 && !INERT.test(ing) && !out.includes(ing)) out.push(ing);
   }
@@ -140,7 +178,7 @@ export function ingredientOf(name) { return ingredientsFromName(name)[0] || Stri
 // allergy). We strip these to also resolve the base ingredient and MERGE its class info.
 // Salt + ester/prodrug + hydrate suffixes carried by real prescription / RxNorm names.
 const SALT_SUFFIX_RE = /\b(sulfate|sulphate|hydrochloride|dihydrochloride|hydrobromide|hbr|hcl|bitartrate|tartrate|besylate|besilate|mesylate|maleate|hydrogen\s+maleate|succinate|hemisuccinate|fumarate|hemifumarate|phosphate|diphosphate|sodium|potassium|calcium|magnesium|citrate|acetate|gluconate|lactate|valerate|propionate|dipropionate|furoate|xinafoate|pamoate|embonate|nitrate|bromide|chloride|carbonate|bicarbonate|palmitate|decanoate|enanthate|caproate|monohydrate|dihydrate|anhydrous|micronized|base|oxalate|cilexetil|medoxomil|axetil|proxetil|mofetil|erbumine|etexilate|trometamol|tromethamine|arginine|olamine|meglumine|disoproxil|dinitrate|mononitrate)\b/gi;
-function stripSalts(ing) {
+export function stripSalts(ing) {
   let s = ing; let prev;
   do { prev = s; s = s.replace(SALT_SUFFIX_RE, ' ').replace(/\s+/g, ' ').trim(); } while (s !== prev);
   return s;
@@ -161,15 +199,15 @@ function mergeInfo(a, b) {
  *  ("morphine") and merges the class info, so allergy/duplicate checks never silently miss the
  *  real drug class just because the name carries a salt. */
 async function classInfoForIngredient(ingredient) {
-  const index = await ensureIndex();
+  const { ing: index, base: baseIndex } = await ensureIndex();
   const key = String(ingredient || '').toLowerCase().trim();
   const direct = index.get(key) || EMPTY_INFO;
-  const baseKey = stripSalts(key);
-  if (baseKey && baseKey !== key) {
-    const base = index.get(baseKey);
-    if (base && base.has) return mergeInfo(direct, base);
-  }
-  return direct;
+  // Merge the SALT-STRIPPED base's class (the union across every salt/ester sibling). This resolves BOTH
+  // directions: a salt form → its base ("morphine sulfate" → morphine's opioid class) AND a base written
+  // without its ester → the ester's class ("olmesartan" → "olmesartan medoxomil" ARB class). Never a
+  // silent class miss because of how the name carries (or omits) a salt.
+  const baseInfo = baseIndex.get(stripSalts(key) || key);
+  return (baseInfo && baseInfo.has) ? mergeInfo(direct, baseInfo) : direct;
 }
 
 /** Pre-build the in-memory drug-class index at boot so the FIRST prescription safety check is instant

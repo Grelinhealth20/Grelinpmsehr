@@ -214,7 +214,7 @@ export async function rxContext(req, res, next) {
       const checks = await listChecks(out.patientId);
       for (const c of (checks || [])) { if (c.summary?.pharmacy) { pharmacy = c.summary.pharmacy; break; } }
     } catch { /* pharmacy is best-effort — never blocks the med list */ }
-    res.json({ prescriptions: out.prescriptions, sourceDate: out.sourceDate, pharmacy });
+    res.json({ prescriptions: out.prescriptions, sourceDate: out.sourceDate, vitals: out.vitals || {}, vitalsDate: out.vitalsDate || null, pharmacy });
   } catch (err) { next(err); }
 }
 

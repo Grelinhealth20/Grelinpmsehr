@@ -32,6 +32,10 @@ router.post('/:uuid/flags', csrfProtection, validate(uuidParam, 'params'), ctrl.
 // Per-facility referral FAX numbers: { incomingNumber?, outgoingNumber?, enabled? }
 router.put('/:uuid/fax-config', csrfProtection, validate(uuidParam, 'params'), ctrl.faxConfigSet);
 router.delete('/:uuid', csrfProtection, validate(uuidParam, 'params'), ctrl.remove);
+// MASTER-ONLY: completely wipe all of a facility's data (patients/charts/encounters/appointments/
+// referrals/documents in DB + S3 + facility-scoped audit trail). The controller enforces master_admin;
+// body: { confirmName (must equal the facility name), deleteFacility? }.
+router.post('/:uuid/master-wipe', authorize(ROLES.MASTER_ADMIN), csrfProtection, validate(uuidParam, 'params'), ctrl.masterWipe);
 
 // Provider ⇄ facility assignment.
 router.post('/:uuid/providers', csrfProtection, validate(uuidParam, 'params'), validate(assignProviderSchema), ctrl.assign);

@@ -283,6 +283,37 @@ export async function snomedToIcd10cm(conceptId) {
   return { primary, candidates };
 }
 
+/**
+ * REVERSE lookup: SNOMED CT concept(s) that officially map TO a given ICD-10-CM code, using the same
+ * SNOMED CT US → ICD-10-CM complex map (snomed_map_icd10cm). Used only when the PROVIDER wrote an
+ * explicit ICD code: the code is authoritative, and we attach the SNOMED CT ID whose source concept
+ * best matches the provider's phrasing. Returns candidate {snomedCode, snomedTerm} rows (unconditional
+ * TRUE/OTHERWISE TRUE rules only, so no age/sex-conditional map is silently attached); the caller ranks
+ * by phrase overlap and may attach none. Never fabricates — only official map rows are returned.
+ */
+export async function snomedConceptsForIcd10cm(icdCode) {
+  const code = String(icdCode || '').trim().toUpperCase();
+  if (!/^[A-TV-Z]\d[A-Z0-9](?:\.[A-Z0-9]{1,4})?$/.test(code)) return [];
+  // Resolve the SNOMED term from snomed_descriptions (indexed on concept_id, same key type as snomed_id).
+  // NOTE: joining terminology_cache here instead was ~20x slower (2.1M rows + a code/collation mismatch
+  // that defeated its (source,code) index → full scan per probe). This join is index-backed (~1 RTT).
+  // Rows come ordered preferred-first; we dedupe to one term per concept in JS (a handful of rows).
+  const [rows] = await pool.query(
+    `SELECT m.snomed_id, d.term AS snomed_term
+       FROM snomed_map_icd10cm m
+       LEFT JOIN snomed_descriptions d ON d.concept_id = m.snomed_id AND d.active = 1
+      WHERE m.icd_code = ?
+        AND (UPPER(TRIM(m.map_rule)) = 'TRUE' OR UPPER(TRIM(m.map_rule)) = 'OTHERWISE TRUE')
+        AND m.snomed_id IS NOT NULL AND m.snomed_id <> ''
+      ORDER BY d.us_preferred DESC, CHAR_LENGTH(d.term)`, [code]);
+  const seen = new Map();
+  for (const r of rows) {
+    const id = String(r.snomed_id);
+    if (!seen.has(id)) seen.set(id, { snomedCode: id, snomedTerm: r.snomed_term || null });
+  }
+  return [...seen.values()];
+}
+
 /** Rows currently cached for a source (what has been loaded into the DB so far). */
 export async function cachedCount(source) {
   const [rows] = await pool.query(

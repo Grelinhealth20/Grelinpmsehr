@@ -1,5 +1,6 @@
 import { useAuth } from './context/AuthContext.jsx';
 import Brand from './components/Brand.jsx';
+import ErrorBoundary from './components/ErrorBoundary.jsx';
 import Login from './pages/Login.jsx';
 import ForcePasswordReset from './pages/ForcePasswordReset.jsx';
 import MfaEnroll from './pages/MfaEnroll.jsx';
@@ -10,6 +11,14 @@ import Workspace from './pages/Workspace.jsx';
 const ADMIN_ROLES = new Set(['master_admin', 'super_admin']);
 
 export default function App() {
+  return (
+    <ErrorBoundary>
+      <AppRoutes />
+    </ErrorBoundary>
+  );
+}
+
+function AppRoutes() {
   const { user, mustReset, mfaStage, loading } = useAuth();
 
   if (loading) {

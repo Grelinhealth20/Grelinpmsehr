@@ -323,6 +323,54 @@ export async function saveNoteCodes(noteUuid, providerId, { diagnoses = [], proc
   return { saved: rows.length };
 }
 
+/**
+ * Persist the coding engine's DETERMINISTIC prediction as the note's structured billing codes at sign
+ * time — so the finalized record, the downloaded PDF/DOCX, and the FHIR Condition/Procedure resources
+ * all carry the SAME codes shown under the note's Billing heading. Called inside signNote, by note id
+ * (the signer is already authorized). It NEVER overwrites codes that already exist (e.g. hand-curated in
+ * the Billing Module) — the automatic prediction only fills an empty set. Best-effort: a failure here is
+ * logged and must not break the (already-committed) signature. The prediction is server-recomputed on
+ * the final signed content, so it is authoritative (not client-supplied) and, being deterministic,
+ * matches exactly what the provider reviewed before signing.
+ */
+async function persistPredictedCodes(noteId, content, noteType, { replace = false } = {}) {
+  if (!replace) {
+    const [existing] = await execute('SELECT COUNT(*) AS n FROM encounter_note_codes WHERE note_id = :id', { id: noteId });
+    if (Number(existing[0]?.n) > 0) return { skipped: 'codes already present' };
+  }
+  const pred = await predictEncounterCoding(content || {}, { noteType });
+  const rows = [];
+  (pred.diagnoses || []).forEach((d, i) => {
+    if (d && d.icd) rows.push([noteId, 'dx', 'ICD10CM', String(d.icd).slice(0, 20), (String(d.description ?? '')).slice(0, 512) || null,
+      d.snomedCode ? String(d.snomedCode).slice(0, 20) : null, (String(d.snomedTerm ?? '')).slice(0, 512) || null, null, null,
+      d.primary ? 1 : 0, i]);
+  });
+  (pred.procedures || []).forEach((p, i) => {
+    if (p && p.cpt) {
+      const units = Number(p.units);
+      const mod = Array.isArray(p.modifiers) ? p.modifiers.filter(Boolean).join(',') : String(p.modifiers ?? '');
+      rows.push([noteId, 'proc', 'CPT', String(p.cpt).slice(0, 20), (String(p.description ?? '')).slice(0, 512) || null,
+        null, null, mod.slice(0, 20) || null, Number.isFinite(units) ? units : null, 0, i]);
+    }
+  });
+  // On REPLACE (amend) with an empty prediction, still clear stale codes so the record can't carry codes
+  // for diagnoses the amendment removed. On fill-if-empty (sign) with nothing to save, do nothing.
+  if (!rows.length) {
+    if (replace) await execute('DELETE FROM encounter_note_codes WHERE note_id = :id', { id: noteId });
+    return { saved: 0 };
+  }
+  await withTransaction(async (exec, conn) => {
+    // delete-then-insert is atomic in this transaction. On sign we only reach here when the set was empty
+    // (nothing curated is lost); on amend (replace) the codes are deliberately re-derived from the
+    // corrected content so the downloaded record and FHIR stay in sync with the amended diagnoses.
+    await exec('DELETE FROM encounter_note_codes WHERE note_id = :id', { id: noteId });
+    await conn.query(
+      `INSERT INTO encounter_note_codes (note_id, kind, code_system, code, description, snomed_code, snomed_term, modifiers, units, is_primary, seq)
+       VALUES ?`, [rows]);
+  });
+  return { saved: rows.length };
+}
+
 // Server-authoritative patient context for RAF/edits: age at DOS, sex, insurance (dual), SNF facility.
 function ageAt(dob, asOf) {
   if (!dob) return null;
@@ -464,6 +512,11 @@ export async function signNote(noteUuid, providerId, { content, reason } = {}) {
   const [res] = await execute(`UPDATE encounter_notes SET ${sets.join(', ')} WHERE id = :id AND status = 'draft'`, params);
   if (res.affectedRows === 0) return { locked: true }; // already signed by a concurrent request
   const signed = await getNote(noteUuid, providerId);
+  // Persist the coding-engine prediction as the note's structured billing codes (only if none exist), so
+  // the downloaded PDF/DOCX and FHIR carry exactly the codes shown under the Billing heading. Best-effort
+  // and BEFORE doc generation (which reads these rows); a failure here never un-signs the note.
+  try { await persistPredictedCodes(r.id, finalContent, r.note_type); }
+  catch (e) { logger.error({ err: e.message, noteId: r.id }, 'sign-time billing-code persistence failed (note IS signed; codes can be regenerated)'); }
   // Document generation is BEST-EFFORT: the note is already committed as signed, so a transient failure
   // here (e.g. a DB hiccup in the metadata/code fetch, or S3) must NOT 500 the sign request or skip the
   // caller's sign audit. Log loudly; the doc can be regenerated (amend re-runs this, and it is idempotent).
@@ -558,6 +611,10 @@ export async function amendSignedNote(noteUuid, providerId, { content, reason } 
   const [res] = await execute(`UPDATE encounter_notes SET ${sets.join(', ')} WHERE id = :id AND status = 'signed'`, params);
   if (res.affectedRows === 0) return null;
   const amended = await getNote(noteUuid, providerId);
+  // Re-derive the billing codes from the AMENDED content (replace), so the downloaded record and FHIR
+  // reflect the corrected diagnoses — not the codes captured at the original signature. Best-effort.
+  try { await persistPredictedCodes(r.id, finalContent, r.note_type, { replace: true }); }
+  catch (e) { logger.error({ err: e.message, noteId: r.id }, 'amend-time billing-code refresh failed (amend IS saved; codes can be regenerated)'); }
   // Best-effort (see signNote): the amendment is already committed; a doc-gen failure must not 500 the
   // request or skip the amend audit.
   try { await generateSignedDoc(r.id, amended, signerName); }

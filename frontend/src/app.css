@@ -1561,6 +1561,21 @@
 .fac-assign { border-top: 1px solid var(--c-line); padding-top: 16px; }
 .fac-assign-head { display: flex; flex-direction: column; gap: 3px; margin-bottom: 12px; }
 .fac-assign-hint { font-size: 12px; color: var(--c-ink-3); font-weight: 500; }
+/* App error boundary — shown instead of a blank page on a render crash. */
+.eb { min-height: 60vh; display: grid; place-items: center; padding: 40px 20px; }
+.eb-card { max-width: 520px; width: 100%; background: #fff; border: 1px solid var(--c-line); border-radius: 16px; padding: 28px; box-shadow: 0 8px 30px rgba(20,30,55,.08); text-align: center; }
+.eb-title { font-size: 16px; font-weight: 700; color: var(--c-ink-1, #1a2338); margin-bottom: 10px; }
+.eb-msg { font-size: 13px; color: #a11c1c; background: #fdf5f5; border: 1px solid #e5b3b3; border-radius: 10px; padding: 10px 12px; margin-bottom: 16px; word-break: break-word; text-align: left; font-family: ui-monospace, Menlo, Consolas, monospace; }
+.eb-actions { display: flex; gap: 10px; justify-content: center; margin-bottom: 12px; }
+.eb-hint { font-size: 12px; color: var(--c-ink-3); }
+/* Master-only Danger Zone (facility wipe). */
+.fac-danger { margin-top: 4px; padding: 16px; border: 1px solid #e5b3b3; border-radius: 14px; background: #fdf5f5; display: flex; flex-direction: column; gap: 12px; }
+.fac-danger-head { display: flex; flex-direction: column; gap: 4px; }
+.fac-danger-title { font-size: 13px; font-weight: 700; color: #a11c1c; letter-spacing: .01em; }
+.fac-danger-hint { font-size: 12px; line-height: 1.5; color: #7c3a3a; font-weight: 500; }
+.fac-danger-confirm { display: flex; flex-direction: column; gap: 10px; }
+.fac-danger-check { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: #7c3a3a; font-weight: 500; }
+.fac-danger-actions { display: flex; justify-content: flex-end; gap: 10px; }
 .fac-assign-row { display: flex; gap: 10px; margin-bottom: 12px; }
 .fac-assign-row .select { flex: 1; }
 .fac-prov-list { display: flex; flex-direction: column; gap: 8px; }
@@ -2332,6 +2347,28 @@ input::-ms-clear, input::-ms-reveal { display: none; width: 0; height: 0; }
 .pf-note .pf-soap:last-child { margin-bottom: 0; }
 .pf-soap-h { font-size: 11px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--c-dark-blue); padding-bottom: 5px; margin-bottom: 11px; border-bottom: 2px solid var(--c-dark-blue); }
 .pf-sec { margin-bottom: 26px; }
+/* Billing section — free-form field + live coding-engine predictions. */
+.pf-billing-src { font-size: 11px; font-weight: 600; color: var(--c-ink-3); letter-spacing: .02em; display: inline-flex; align-items: center; gap: 6px; }
+.pf-billing-spin { width: 12px; height: 12px; }
+.pf-billing-pred { margin-top: 10px; border: 1px solid var(--c-line); border-radius: 12px; padding: 12px 14px; background: #f8fafc; display: flex; flex-direction: column; gap: 12px; }
+.pf-bill-grp { display: flex; flex-direction: column; gap: 6px; }
+.pf-bill-lbl { font-size: 11px; font-weight: 700; color: var(--c-ink-2); text-transform: uppercase; letter-spacing: .04em; }
+.pf-bill-row { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; font-size: 13px; padding: 4px 0; border-bottom: 1px dashed var(--c-line); }
+.pf-bill-row:last-child { border-bottom: none; }
+.pf-bill-code { font-family: ui-monospace, Menlo, Consolas, monospace; font-weight: 700; color: var(--c-dark-blue, #1d2c4d); }
+.pf-bill-primary { font-size: 10px; font-weight: 700; color: #0a7d3b; background: #e6f6ec; border-radius: 6px; padding: 1px 6px; }
+.pf-bill-desc { color: var(--c-ink); flex: 1; min-width: 160px; }
+.pf-bill-snomed { font-size: 11px; color: var(--c-ink-3); font-family: ui-monospace, Menlo, Consolas, monospace; }
+.pf-bill-mod { font-size: 11px; font-weight: 700; color: #8a5a00; background: #fdf3e0; border-radius: 6px; padding: 1px 6px; }
+.pf-bill-units { font-size: 11px; color: var(--c-ink-3); }
+.pf-bill-empty { font-size: 12px; color: var(--c-ink-3); font-style: italic; }
+.pf-bill-denials { border-top: 1px dashed var(--c-line); padding-top: 10px; }
+.pf-bill-denial { display: flex; align-items: baseline; gap: 8px; font-size: 12px; border-radius: 8px; padding: 6px 10px; }
+.pf-bill-denial.error { color: #a11c1c; background: #fdf5f5; border: 1px solid #e5b3b3; }
+.pf-bill-denial.warning { color: #8a5a00; background: #fdf9f0; border: 1px solid #ecd9ad; }
+.pf-bill-denial-sev { font-weight: 800; flex: none; }
+.pf-bill-denial-msg { flex: 1; min-width: 160px; }
+.pf-bill-code.sm { font-size: 12px; }
 .pf-sec:last-child { margin-bottom: 0; }
 /* Dynamic (Epic-style) progressive reveal — each heading animates in the first time it mounts, so a
    newly-appended section slides into place as the provider writes. Editing view only. */

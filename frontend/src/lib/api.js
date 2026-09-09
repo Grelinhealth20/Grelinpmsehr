@@ -154,6 +154,9 @@ export const facilitiesApi = {
   remove: (uuid) => api.delete(`/facilities/${uuid}`),
   assignProvider: (uuid, providerUuid) => api.post(`/facilities/${uuid}/providers`, { providerUuid }),
   unassignProvider: (uuid, providerUuid) => api.delete(`/facilities/${uuid}/providers/${providerUuid}`),
+  // MASTER-ONLY: completely wipe all of a facility's data. confirmName MUST equal the facility name.
+  masterWipe: (uuid, { confirmName, deleteFacility = false }) =>
+    api.post(`/facilities/${uuid}/master-wipe`, { confirmName, deleteFacility }),
 };
 
 // --- Audit logs (super admin) ----------------------------------------------

@@ -1,5 +1,5 @@
 import { pool } from '../db/pool.js';
-import { searchSnomed, snomedToIcd10cm, lookupCpt } from './terminologyService.js';
+import { searchSnomed, snomedToIcd10cm, snomedConceptsForIcd10cm, lookupCpt } from './terminologyService.js';
 import { isBillableIcd, icdDescription } from './terminologyCache.js';
 import { scrubClaim } from './codingService.js';
 
@@ -44,7 +44,10 @@ const ABBREV = {
 // billable diagnoses.
 const NEG = /\b(no|not|denies|denied|negative for|r\/o|rule out|ruled out|no evidence of|absence of|free of|unlikely|possible|probable|questionable|differential|history of|h\/o|hx of|status post|s\/p)\b/i;
 // Status/qualifier words trimmed from the tail so the condition phrase matches SNOMED cleanly.
-const STATUS_TAIL = /\b(stable|improving|worsening|resolving|resolved|unchanged|controlled|uncontrolled|well controlled|poorly controlled|ongoing|at goal|new|old|likely|suspected)\b/gi;
+// Trailing clinical-status words that describe the COURSE of a problem, not its identity — stripped so
+// the base condition matches ("Heart failure improved" → "Heart failure"). NOTE: code-changing modifiers
+// (acute / chronic / "with exacerbation") are deliberately NOT here — they alter the ICD and must survive.
+const STATUS_TAIL = /\b(stable|improving|improved|worsening|worsened|deteriorating|resolving|resolved|unchanged|unresolved|controlled|uncontrolled|well controlled|poorly controlled|ongoing|at goal|at baseline|baseline|new|old|likely|suspected)\b/gi;
 // Grammatical stopwords for scoring — clinically significant words (acute, chronic, type, stage…) are kept.
 const STOP = new Set(['the', 'a', 'an', 'of', 'with', 'and', 'due', 'to', 'on', 'in', 'for', 'his', 'her', 'their', 'patient', 'pt', 'by', 'from', 'or', 'at']);
 // Tokens FULLTEXT can't require (its own stopwords + sub-min-length) — excluded from the search query
@@ -72,10 +75,34 @@ function expandAbbrev(phrase) {
  * like "diabetes with CKD" or a single combined code like "nausea and vomiting" is left intact). A
  * combination connector ("with"/"due to"/"secondary to") is preserved WITHIN each fragment.
  */
+// ICD-description continuation vocabulary: a comma that introduces one of these is INTERNAL to a single
+// diagnosis's official description ("Intervertebral disc disorders with radiculopathy, LUMBAR region",
+// "Unilateral primary osteoarthritis, RIGHT knee", "Type 2 diabetes mellitus, WITHOUT complications") —
+// NOT a list separator. A semicolon ALWAYS separates list items; a comma separates items ONLY when it is
+// not followed by one of these site/laterality/episode/severity modifiers. Prevents over-splitting a
+// pasted ICD description into a spurious fragment (which mis-coded to an unspecified code and dropped the
+// real code when two fragments' site tails collided).
+const DX_CONT = /(?:right|left|bilateral|unspecified|lumbar|lumbosacral|thoracolumbar|cervical|cervicothoracic|thoracic|sacral|sacrococcygeal|coccygeal|lumbar region|initial|subsequent|sequela|site|region|part|upper|lower|proximal|distal|with|without|acute|chronic|uncontrolled|controlled|mild|moderate|severe|type\s*\d|stage\s*\w|episode|encounter|not\s+elsewhere|nec|nos|other|specified|in\s+remission|intractable|not\s+intractable)\b/i;
 function splitListLine(line) {
   const s = String(line || '');
-  if (!s.includes(',')) return [s]; // not a list — keep combinations & combined codes whole
-  return s.split(/\s*,\s*(?:and\s+|&\s+)?|\s+&\s+/i).map((x) => x.trim()).filter((x) => x.length >= 3);
+  if (!/[,;]/.test(s)) return [s]; // not a list — keep combinations & combined codes whole
+  // Semicolons always split; commas split only when NOT followed by an ICD-description continuation word
+  // (so "condition, site (CODE)" stays one diagnosis while "dx1 (C1), dx2 (C2)" still splits into two).
+  const parts = [];
+  let buf = '';
+  const re = /([;,])(\s*)/g; let last = 0; let m;
+  while ((m = re.exec(s)) !== null) {
+    const sep = m[1];
+    const rest = s.slice(re.lastIndex);
+    if (sep === ',' && DX_CONT.test(rest.replace(/^(?:and\s+|&\s+)/i, ''))) continue; // intra-description comma
+    buf += s.slice(last, m.index);
+    parts.push(buf);
+    buf = '';
+    last = re.lastIndex;
+  }
+  buf += s.slice(last);
+  parts.push(buf);
+  return parts.map((x) => x.replace(/^(?:and\s+|&\s+)/i, '').trim()).filter((x) => x.length >= 3);
 }
 
 // Normalize one problem line → { text: condition head, full: line, negated } (or null if too short).
@@ -92,8 +119,22 @@ function parseProblemLine(rawLine) {
   const negated = resolved || NEG.test(line);
   // Condition head: cut at the first separator, and at etiology connectors ("due to"/"secondary to"/
   // "from") — but NOT "with" (combination codes like "diabetes WITH CKD" are one concept).
-  let head = line.split(/[:;.–—]|,\s|\s-\s/)[0];
+  // Cut at the first separator — but a period only counts as a boundary when it ENDS a sentence
+  // (followed by whitespace or end), NEVER the decimal inside an ICD code (M54.17) or a value (5.5),
+  // which previously truncated "...(M54.17)" to "...(M54" and killed the match.
+  let head = line.split(/[:;–—]|,\s|\s-\s|\.(?=\s|$)/)[0];
   head = head.split(/\b(?:due to|secondary to|related to|from|attributed to)\b/i)[0].trim();
+  // Capture ANY explicit ICD-10-CM code the provider wrote on the line (with or without parens/label),
+  // e.g. "Lumbar radiculopathy (M54.17)", "Heart failure improved I50.23". The provider's own code is
+  // authoritative — carried through so predictDiagnosesFromNote can trust it directly (after validating
+  // it against the billable dataset) rather than relying solely on the phrase→SNOMED match, which can
+  // miss when a status word ("improved") or unusual phrasing derails the text search.
+  const explicitIcdMatch = line.match(/\b([A-TV-Z]\d[A-Z0-9](?:\.[A-Z0-9]{1,4})?)\b/i);
+  const explicitIcd = explicitIcdMatch ? explicitIcdMatch[1].toUpperCase() : null;
+  // Drop a trailing inline ICD-10 annotation the provider wrote — "Lumbar radiculopathy (M54.17)" →
+  // "Lumbar radiculopathy" — so the code text doesn't derail the SNOMED/description match. (The code is
+  // still surfaced elsewhere; here we only clean the phrase used for matching.)
+  head = head.replace(/\s*\((?:icd[- ]?10)?\s*[A-TV-Z]\d[A-Z0-9]{0,2}(?:\.[A-Z0-9]{1,4})?\)\s*$/i, '').trim();
   // Strip the generic "uncomplicated" specifier tail ("without complication(s)" / "without (acute)
   // exacerbation" / "uncomplicated") — it denotes the BASE/unspecified code (diabetes without
   // complication → E11.9, COPD without exacerbation → J44.9) and, left in, it derails the SNOMED
@@ -104,7 +145,7 @@ function parseProblemLine(rawLine) {
     .replace(/\buncomplicated\b/i, '').trim();
   head = head.replace(STATUS_TAIL, '').replace(/\s+/g, ' ').trim();
   if (head.length < 3) return null;
-  return { text: head, full: line, negated };
+  return { text: head, full: line, negated, explicitIcd };
 }
 
 // Pull EXPLICIT diagnosis enumerations out of narrative fields (HPI / admission reason), e.g.
@@ -154,12 +195,17 @@ export function extractProblemPhrases(rawContent = {}, noteType = 'hp') {
   const items = [];
   const push = (parsed, section) => {
     if (!parsed) return;
-    const dedupeKey = norm(parsed.text);
+    // Dedupe on the condition head PLUS the provider's explicit code: two problems that share a head but
+    // carry DIFFERENT codes are DIFFERENT diagnoses and must both survive — e.g. "Osteoarthritis, right
+    // knee (M17.11)" + "left knee (M17.12)", or a single-episode (F32.9) vs recurrent (F33.1) MDD. When
+    // the same head repeats with the SAME (or no) code it is a true duplicate and is dropped; any residual
+    // same-code duplication is still collapsed later by usedIcd in predictDiagnosesFromNote.
+    const dedupeKey = norm(parsed.text) + (parsed.explicitIcd ? `#${parsed.explicitIcd}` : '');
     if (seen.has(dedupeKey)) return;
     seen.add(dedupeKey);
     // Keep the FULL line alongside the condition head: the head drives the general SNOMED match, while
     // the full line preserves etiology ("pain due to malignancy" → G89.3) the head-truncation drops.
-    items.push({ text: parsed.text, full: parsed.full, negated: parsed.negated, section });
+    items.push({ text: parsed.text, full: parsed.full, negated: parsed.negated, explicitIcd: parsed.explicitIcd, section });
   };
   for (const key of sources) {
     const raw = content?.[key];
@@ -439,9 +485,16 @@ async function resolveIcdForPhrase(phrase, expanded, pTokens, fullLine) {
       || Number(b.disorder) - Number(a.disorder)
       || a.c.name.length - b.c.name.length);
 
+  // Resolve the SNOMED→ICD map for the top candidates CONCURRENTLY (was a sequential await-in-loop of up
+  // to 10 remote round-trips per phrase — the dominant latency cost). Fetching them in one parallel batch
+  // and then folding IN RANK ORDER preserves the exact same deterministic result (first billable primary
+  // in rank order wins; else the best-ranked non-billable becomes the 7th-char-completion base).
+  const top = ranked.slice(0, 10);
+  const maps = await Promise.all(top.map(({ c }) => snomedToIcd10cm(c.code)));
   let seventhFallback = null; // best non-billable injury/7th-char base seen, to complete if nothing billable
-  for (const { c } of ranked.slice(0, 10)) {
-    const map = await snomedToIcd10cm(c.code); // eslint-disable-line no-await-in-loop
+  for (let i = 0; i < top.length; i += 1) {
+    const c = top[i].c;
+    const map = maps[i];
     if (!map.primary) continue;
     if (map.primary.billable) {
       return { icd: map.primary.icd, description: map.primary.description, snomedCode: c.code,
@@ -654,11 +707,21 @@ const spineRegionCT = (t) => /\b(cervical|thoracic|c[3-7]\b|t\d{1,2}\b|neck)\b/.
 const levelCount = (t) => { const m = t.match(/\b(one|two|three|four|1|2|3|4)[\s-]*level/); if (!m) return 1; const w = { one: 1, two: 2, three: 3, four: 4 }; return w[m[1]] || Number(m[1]) || 1; };
 
 export function predictProcedures(content = {}) {
-  const t = Object.values(content).filter((v) => typeof v === 'string').join('  ').toLowerCase();
+  const flat = withFlatSections(content);
+  const t = Object.values(flat).filter((v) => typeof v === 'string').join('  ').toLowerCase();
   if (!t.trim()) return [];
   const out = [];
-  const latMod = detectLateralityMod(t);
-  const ct = spineRegionCT(t);
+  // Procedure ATTRIBUTES — laterality (LT/RT/50), spine region (C/T vs L/S), and level count — are read
+  // ONLY from PROCEDURE-designated sections, NOT the whole note. Otherwise a diagnosis's laterality
+  // ("osteoarthritis, right knee") contaminates an unrelated procedure's modifier (a LEFT TFESI would be
+  // mis-coded 50 instead of LT). Procedure DETECTION still scans the whole note (so a procedure documented
+  // anywhere is caught); only the attributes are procedure-scoped, falling back to the whole note when no
+  // procedure-named section exists. Dynamic (any …procedure… section key), so new templates work too.
+  const procText = Object.keys(flat).filter((k) => /procedure/i.test(k))
+    .map((k) => flat[k]).filter((v) => typeof v === 'string').join('  ').toLowerCase();
+  const attrText = procText.trim() ? procText : t;
+  const latMod = detectLateralityMod(attrText);
+  const ct = spineRegionCT(attrText);
   const push = (cpt, extra = {}) => out.push({ cpt, units: 1, modifiers: latMod, confirm: true, ...extra });
 
   // Transforaminal epidural steroid injection (TFESI) — imaging-inclusive codes. The abbreviations
@@ -674,7 +737,7 @@ export function predictProcedures(content = {}) {
   }
   // Facet joint injection / medial branch block (paravertebral facet).
   if (/(facet|medial branch|zygapophyseal|paravertebral)/.test(t) && /(injection|block|\bmbb\b|inject)/.test(t) && !/(radiofrequency|\brfa\b|ablation|neurotomy)/.test(t)) {
-    const n = Math.min(levelCount(t), 2);
+    const n = Math.min(levelCount(attrText), 2);
     push(ct ? (n >= 2 ? '64491' : '64490') : (n >= 2 ? '64494' : '64493'), { basis: `paravertebral facet joint injection/MBB, ${ct ? 'cervical/thoracic' : 'lumbar/sacral'}, ${n} level(s)` });
   }
   // Radiofrequency ablation / neurotomy of facet (paravertebral) nerves.
@@ -689,7 +752,7 @@ export function predictProcedures(content = {}) {
   // Trigger point injection(s) — by muscle count. The abbreviation "TPI" alone denotes the injection;
   // otherwise require "trigger point" + an injection action word.
   if (/\btpi\b/.test(t) || (/trigger point/.test(t) && /(injection|inject)/.test(t))) {
-    const three = /\b(three|four|five|3|4|5)\b[^.]{0,20}muscle|\bmultiple muscles\b/.test(t);
+    const three = /\b(three|four|five|3|4|5)\b[^.]{0,20}muscle|\bmultiple muscles\b/.test(attrText);
     out.push({ cpt: three ? '20553' : '20552', units: 1, modifiers: '', confirm: true, basis: `trigger point injection, ${three ? '3 or more' : '1-2'} muscle(s)` });
   }
   // Major/intermediate/small PERIPHERAL joint or bursa injection/aspiration. No blanket spine-exclusion:
@@ -858,6 +921,45 @@ async function applyLinkage(diagnoses, content) {
   return out;
 }
 
+/**
+ * Resolve an ICD the PROVIDER wrote explicitly on a problem line. The provider's own code is
+ * authoritative for billing intent, so we trust it — but ONLY after validating it against the billable
+ * ICD-10-CM dataset (isBillableIcd), so a typo or a non-leaf category is never emitted. The description
+ * always comes from the official dataset (never the free-text). The SNOMED CT ID is attached from the
+ * official SNOMED→ICD reverse map: preferring the source concept whose term best overlaps the provider's
+ * phrase, but ALWAYS attaching one when the code has any mapped concept (every concept the reverse map
+ * returns officially maps TO this ICD, so it is a valid SNOMED representation of the code — a 0-overlap
+ * phrase is no reason to drop it). Only a code with NO reverse-map entry leaves snomedCode null.
+ * Returns a match object identical in shape to matchIcdForPhrase's, or null if the code isn't billable.
+ */
+async function resolveExplicitIcd(icd, phrase) {
+  if (!icd || !(await isBillableIcd(icd))) return null;
+  const description = (await icdDescription(icd)) || phrase;
+  let snomedCode = null;
+  let snomedTerm = null;
+  try {
+    const concepts = await snomedConceptsForIcd10cm(icd);
+    if (concepts.length) {
+      const pTokens = scoreTokens(phrase);
+      const pSet = new Set(pTokens);
+      // Rank by how well the concept term is explained by the phrase and vice-versa (prefer the concept
+      // closest to the provider's wording), but attach the best available regardless of overlap.
+      const ranked = concepts
+        .map((c) => {
+          const cTokens = scoreTokens(c.snomedTerm || '');
+          const score = cover(cTokens, pSet) + cover(pTokens, new Set(cTokens));
+          return { c, score };
+        })
+        .sort((a, b) => b.score - a.score || String(a.c.snomedCode).localeCompare(String(b.c.snomedCode)));
+      // Best phrase-overlap when there is one; otherwise the reverse map's preferred concept (concepts[0],
+      // us-preferred/shortest from the query order) — authoritative for the code, never an unrelated one.
+      const pick = (ranked[0] && ranked[0].score > 0) ? ranked[0].c : concepts[0];
+      if (pick) { snomedCode = pick.snomedCode; snomedTerm = pick.snomedTerm || description; }
+    }
+  } catch { /* best-effort SNOMED enrichment only — code + description are already authoritative */ }
+  return { icd: icd.toUpperCase(), description, snomedCode, snomedTerm, contextDependent: false, explicit: true };
+}
+
 /** Predict billable ICD-10-CM diagnoses for a note → { diagnoses:[...], unmatched:[...] }. */
 export async function predictDiagnosesFromNote(content = {}, { noteType = 'hp' } = {}) {
   content = withFlatSections(content); // real notes store text under .sections; flatten so linkage sees it too
@@ -866,12 +968,21 @@ export async function predictDiagnosesFromNote(content = {}, { noteType = 'hp' }
   const unmatched = [];
   const usedIcd = new Set();
   // Match every active problem CONCURRENTLY (each is an independent remote SNOMED lookup); then fold the
-  // results back IN NOTE ORDER so the primary diagnosis and de-duplication stay deterministic.
+  // results back IN NOTE ORDER so the primary diagnosis and de-duplication stay deterministic. In
+  // parallel, resolve any ICD the provider wrote explicitly (authoritative, dataset-validated).
   const active = items.filter((i) => !i.negated);
-  const matches = await Promise.all(active.map((i) => matchIcdForPhrase(i.text, i.full)));
+  // FAST PATH: when the provider wrote an explicit ICD code, resolve it authoritatively (in-memory
+  // billable validation + one small reverse-map query) and SKIP the expensive SNOMED text search for that
+  // problem entirely — the explicit code wins regardless, so running the search would be wasted latency.
+  // The (heavy) text search runs ONLY for problems with no resolving explicit code. This is what makes
+  // coded notes fast enough for real-time, high-volume prediction; prose-only phrases still fall through
+  // to the full deterministic matcher (memoized across records).
+  const explicitMatches = await Promise.all(active.map((i) => (i.explicitIcd ? resolveExplicitIcd(i.explicitIcd, i.text) : null)));
+  const matches = await Promise.all(active.map((i, k) => (explicitMatches[k] ? null : matchIcdForPhrase(i.text, i.full))));
   for (let k = 0; k < active.length; k += 1) {
     const item = active[k];
-    const m = matches[k];
+    // Explicit provider code (fast path) is authoritative; otherwise use the deterministic text match.
+    const m = explicitMatches[k] || matches[k];
     if (!m) { unmatched.push(item.text); continue; }
     if (usedIcd.has(m.icd)) continue;
     usedIcd.add(m.icd);

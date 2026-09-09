@@ -1,9 +1,10 @@
 import { v4 as uuidv4 } from 'uuid';
-import { execute } from '../db/pool.js';
+import { execute, withTransaction } from '../db/pool.js';
 import { decrypt, encrypt } from '../utils/crypto.js';
 import { logger } from '../config/logger.js';
 import { normalizeState, extractStateFromText } from './payerDirectoryService.js';
-import { s3Enabled, uploadFacilityLogo, getObjectBytes, deleteObject } from './s3Service.js';
+import { s3Enabled, uploadFacilityLogo, getObjectBytes, deleteObject, facilityPrefix, deleteByPrefix } from './s3Service.js';
+import { recordAudit, backfillAuditChain } from './auditService.js';
 
 // Decode a data:image/...;base64 URI → { buffer, contentType, ext } (null if not one).
 const EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg' };
@@ -250,6 +251,139 @@ export async function eligibilityEnabledForProvider(providerId) {
 export async function deleteFacility(uuid) {
   const [res] = await execute(`DELETE FROM facilities WHERE uuid = :uuid`, { uuid });
   return res.affectedRows > 0;
+}
+
+/**
+ * MASTER-ONLY facility wipe. Permanently and completely removes ALL data belonging to ONE facility —
+ * its patients and every chart/encounter/note/code, appointments, referrals + attachments, eligibility,
+ * documents (DB + S3), and the facility-scoped audit trail — then either retires the providers that
+ * belonged solely to it or unlinks the ones shared with other facilities.
+ *
+ * HARD SCOPING — NO CROSS-FACILITY DELETION (the invariant this whole function is built around):
+ *  - Clinical data is deleted strictly by `patients.facility_id = fid` (and `referrals.facility_id`).
+ *    Patients with a different (or NULL) facility are never touched.
+ *  - Provider ACCOUNTS are the danger: `patients/encounters/appointments.provider_id → users(id) ON
+ *    DELETE CASCADE`, so deleting a shared provider would cascade-delete their OTHER facilities' data.
+ *    We therefore handle providers AFTER this facility's clinical rows are gone, and delete a provider
+ *    account ONLY when it then has ZERO remaining footprint anywhere (no other facility assignment and no
+ *    remaining patients/encounters/appointments). Any provider with external data is merely UNLINKED.
+ *  - The master/super admins are never deleted.
+ *
+ * Guarded: requires the caller to re-type the facility name (`confirmName`) — a mismatch refuses the wipe.
+ * Atomic: all DB deletes run in one transaction; S3 (not transactional) is emptied after commit; the
+ * audit hash-chain is re-sealed (backfill) afterward; and a single top-level `facility.master_wipe`
+ * audit event (with counts) is written so the destructive action itself is always accountable.
+ */
+export async function masterWipeFacility(facilityUuid, { actorId, confirmName, deleteFacility: alsoDeleteFacility = false } = {}) {
+  const [frows] = await execute('SELECT id, uuid, name FROM facilities WHERE uuid = :u LIMIT 1', { u: facilityUuid });
+  const facility = frows[0];
+  if (!facility) return { notFound: true };
+  // Confirmation gate — the caller must echo the exact facility name (case-insensitive, trimmed).
+  if (String(confirmName || '').trim().toLowerCase() !== String(facility.name || '').trim().toLowerCase()) {
+    return { confirmMismatch: true, expected: facility.name };
+  }
+  const fid = facility.id;
+
+  const summary = await withTransaction(async (exec) => {
+    // 1. Collect the uuids of everything scoped to this facility BEFORE deleting (for audit cleanup).
+    const [pRows] = await exec('SELECT id, uuid FROM patients WHERE facility_id = :fid', { fid });
+    const patientIds = pRows.map((r) => r.id);
+    const uuids = new Set(pRows.map((r) => r.uuid));
+    if (patientIds.length) {
+      const [encRows] = await exec('SELECT uuid FROM encounters WHERE patient_id IN (SELECT id FROM patients WHERE facility_id = :fid)', { fid });
+      for (const r of encRows) uuids.add(r.uuid);
+      const [noteRows] = await exec('SELECT n.uuid FROM encounter_notes n JOIN encounters e ON e.id = n.encounter_id WHERE e.patient_id IN (SELECT id FROM patients WHERE facility_id = :fid)', { fid });
+      for (const r of noteRows) uuids.add(r.uuid);
+      const [apptRows] = await exec('SELECT uuid FROM appointments WHERE patient_uuid IN (SELECT uuid FROM patients WHERE facility_id = :fid)', { fid });
+      for (const r of apptRows) uuids.add(r.uuid);
+    }
+    const [refRows] = await exec('SELECT uuid FROM referrals WHERE facility_id = :fid', { fid });
+    for (const r of refRows) uuids.add(r.uuid);
+
+    // 2. Delete this facility's clinical data (children cascade via FKs). Scoped ONLY by facility_id.
+    //    Order: encounters (→notes→note_codes) and appointments (patient_uuid) and referrals (→attachments)
+    //    then patients (→documents/eligibility/name_tokens/emergency_access).
+    const [encDel] = await exec('DELETE FROM encounters WHERE patient_id IN (SELECT id FROM patients WHERE facility_id = :fid)', { fid });
+    const [apptDel] = await exec('DELETE FROM appointments WHERE patient_uuid IN (SELECT uuid FROM patients WHERE facility_id = :fid)', { fid });
+    const [refDel] = await exec('DELETE FROM referrals WHERE facility_id = :fid', { fid });
+    const [patDel] = await exec('DELETE FROM patients WHERE facility_id = :fid', { fid });
+
+    // 3. Providers/billing assigned to this facility. Clinical rows are already gone, so a remaining
+    //    footprint is necessarily EXTERNAL → delete the account only when nothing remains (safe), else unlink.
+    const [assigned] = await exec('SELECT pf.provider_id AS pid, u.role AS role FROM provider_facilities pf JOIN users u ON u.id = pf.provider_id WHERE pf.facility_id = :fid', { fid });
+    let providersDeleted = 0; let providersUnlinked = 0; const deletedProviderIds = [];
+    for (const { pid, role } of assigned) {
+      if (role !== 'provider' && role !== 'billing') { // never delete admins — unlink only
+        await exec('DELETE FROM provider_facilities WHERE provider_id = :pid AND facility_id = :fid', { pid, fid });
+        providersUnlinked += 1; continue;
+      }
+      const [[ext]] = await exec(
+        `SELECT
+           (SELECT COUNT(*) FROM provider_facilities WHERE provider_id = :pid AND facility_id <> :fid) AS otherFac,
+           (SELECT COUNT(*) FROM patients      WHERE provider_id = :pid) AS pats,
+           (SELECT COUNT(*) FROM encounters    WHERE provider_id = :pid) AS encs,
+           (SELECT COUNT(*) FROM appointments  WHERE provider_id = :pid) AS appts`,
+        { pid, fid },
+      );
+      const safeToDelete = Number(ext.otherFac) === 0 && Number(ext.pats) === 0 && Number(ext.encs) === 0 && Number(ext.appts) === 0;
+      if (safeToDelete) {
+        await exec('DELETE FROM users WHERE id = :pid AND role IN (\'provider\',\'billing\')', { pid });
+        providersDeleted += 1; deletedProviderIds.push(pid);
+      } else {
+        await exec('DELETE FROM provider_facilities WHERE provider_id = :pid AND facility_id = :fid', { pid, fid });
+        providersUnlinked += 1;
+      }
+    }
+
+    // 4. Facility-scoped audit trail: rows whose entity belonged to this facility, plus rows whose actor
+    //    was a provider we just deleted. Batched IN() to stay within param limits at scale.
+    let auditDeleted = 0;
+    const uuidList = [...uuids];
+    for (let i = 0; i < uuidList.length; i += 500) {
+      const batch = uuidList.slice(i, i + 500);
+      const ph = batch.map((_, j) => `:e${j}`).join(',');
+      const params = {}; batch.forEach((v, j) => { params[`e${j}`] = v; });
+      const [d] = await exec(`DELETE FROM audit_logs WHERE entity_id IN (${ph})`, params);
+      auditDeleted += d.affectedRows || 0;
+    }
+    for (let i = 0; i < deletedProviderIds.length; i += 500) {
+      const batch = deletedProviderIds.slice(i, i + 500);
+      const ph = batch.map((_, j) => `:a${j}`).join(',');
+      const params = {}; batch.forEach((v, j) => { params[`a${j}`] = v; });
+      const [d] = await exec(`DELETE FROM audit_logs WHERE actor_user_id IN (${ph})`, params);
+      auditDeleted += d.affectedRows || 0;
+    }
+
+    // 5. Optionally remove the (now-empty) facility record itself.
+    if (alsoDeleteFacility) await exec('DELETE FROM facilities WHERE id = :fid', { fid });
+
+    return {
+      facility: { uuid: facility.uuid, name: facility.name },
+      patients: patDel.affectedRows || 0,
+      encounters: encDel.affectedRows || 0,
+      appointments: apptDel.affectedRows || 0,
+      referrals: refDel.affectedRows || 0,
+      auditLogs: auditDeleted,
+      providersDeleted,
+      providersUnlinked,
+      facilityDeleted: !!alsoDeleteFacility,
+    };
+  });
+
+  // 6. Empty the facility's S3 folder (all patient/encounter/referral/provider objects live under it).
+  //    Non-transactional; a failure is surfaced but the DB wipe already committed.
+  summary.s3ObjectsDeleted = 0;
+  if (s3Enabled()) {
+    try { summary.s3ObjectsDeleted = await deleteByPrefix(facilityPrefix({ facilityUuid: facility.uuid, facilityName: facility.name })); }
+    catch (e) { logger.error({ err: e.message, facility: facility.uuid }, 'facility wipe: S3 prefix delete failed (DB already wiped)'); summary.s3Error = e.message; }
+  }
+
+  // 7. Re-seal the audit hash-chain (rows were removed) and record the destructive action itself.
+  try { await backfillAuditChain(); } catch (e) { logger.error({ err: e.message }, 'facility wipe: audit chain re-seal failed — run backfillAuditChain manually'); summary.auditChainError = e.message; }
+  await recordAudit({ actorUserId: actorId, action: 'facility.master_wipe', entityType: 'facility', entityId: facility.uuid, metadata: summary });
+
+  logger.warn({ actorId, ...summary }, 'MASTER facility wipe completed');
+  return { ok: true, ...summary };
 }
 
 /* --- Provider ⇄ Facility assignments -------------------------------------- */
