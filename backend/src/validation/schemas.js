@@ -163,13 +163,15 @@ export const updateAppointmentSchema = z
 // --- Patients (face sheet) -------------------------------------------------
 const optStr = (n) => z.string().trim().max(n).optional();
 const optEmail = z.union([z.string().trim().email().max(254), z.literal('')]).optional();
-const optDate = z.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.literal('')]).optional();
+const optDate = z.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.literal('')]).optional()
+  .refine((v) => v == null || v === '' || isRealCalendarDate(v), 'Date is not a valid calendar date.');
 
 const demographicsSchema = z
   .object({
     firstName: z.string().trim().min(1, 'First name is required.').max(80),
     lastName: z.string().trim().min(1, 'Last name is required.').max(80),
-    dob: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date of birth must be YYYY-MM-DD.'),
+    dob: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date of birth must be YYYY-MM-DD.')
+      .refine(isRealCalendarDate, 'Date of birth is not a valid calendar date.'),
     gender: z.enum(['male', 'female', 'other', 'unknown'], { required_error: 'Gender is required.' }),
     phone: optStr(40),
     email: optEmail,
@@ -249,7 +251,8 @@ export const updateEncounterSchema = z
 // SNF provider-focused, free-form note types: Admission H&P, SOAP, Progress, Discharge.
 export const NOTE_TYPES = ['hp', 'soap', 'progress', 'discharge',
   'acuteChange', 'acp', 'hospice', 'telehealth', 'custom'];
-const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be YYYY-MM-DD');
+const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be YYYY-MM-DD')
+  .refine(isRealCalendarDate, 'Date is not a valid calendar date.');
 // Structured note body (PHI, encrypted at rest): narrative sections + Rx list.
 const prescriptionItem = z
   .object({
