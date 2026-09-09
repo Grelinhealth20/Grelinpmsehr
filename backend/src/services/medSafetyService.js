@@ -49,7 +49,11 @@ const LAY_CLASS = [
   { terms: ['ssri', 'ssris'], atc: ['N06AB'] },
   { terms: ['snri', 'snris'], atc: ['N06AX'] },
   { terms: ['benzodiazepine', 'benzodiazepines', 'benzo'], atc: ['N05BA', 'N05CD'] },
-  { terms: ['opioid', 'opioids', 'narcotic', 'narcotics'], atc: ['N02A'] },
+  // `ingredients`: true opioids WHO-ATC files OUTSIDE N02A (codeine R05DA04, hydrocodone R05DA03 are
+  // classed as antitussives by indication) — they are mu-agonists cross-reactive with a morphine/opioid
+  // allergy, so recognise them by ingredient. Scoped to genuine opioids only: dextromethorphan (R05DA09)
+  // and noscapine (R05DA08) are NOT in this list, so broadening never false-flags them.
+  { terms: ['opioid', 'opioids', 'narcotic', 'narcotics'], atc: ['N02A'], ingredients: ['codeine', 'hydrocodone', 'dihydrocodeine', 'ethylmorphine'] },
   { terms: ['sulfonylurea', 'sulfonylureas'], atc: ['A10BB'] },
 ];
 
@@ -129,10 +133,43 @@ export function ingredientsFromName(name) {
 /** Legacy single-ingredient helper kept for callers/tests. */
 export function ingredientOf(name) { return ingredientsFromName(name)[0] || String(name || '').trim().toLowerCase(); }
 
-/** Drug-class info for one ingredient — instant in-memory lookup from the preloaded index. */
+// Salt / ester / hydrate suffixes carried by REAL prescription + RxNorm names (morphine SULFATE,
+// metoprolol TARTRATE, hydroxyzine HCl, diclofenac SODIUM, …). The drug-class index is keyed on the
+// BASE ingredient (or maps the salt form to an incomplete class), so a salt-form lookup would MISS the
+// real structural/ATC class — a silent safety gap (e.g. "morphine sulfate" not flagged for an opioid
+// allergy). We strip these to also resolve the base ingredient and MERGE its class info.
+// Salt + ester/prodrug + hydrate suffixes carried by real prescription / RxNorm names.
+const SALT_SUFFIX_RE = /\b(sulfate|sulphate|hydrochloride|dihydrochloride|hydrobromide|hbr|hcl|bitartrate|tartrate|besylate|besilate|mesylate|maleate|hydrogen\s+maleate|succinate|hemisuccinate|fumarate|hemifumarate|phosphate|diphosphate|sodium|potassium|calcium|magnesium|citrate|acetate|gluconate|lactate|valerate|propionate|dipropionate|furoate|xinafoate|pamoate|embonate|nitrate|bromide|chloride|carbonate|bicarbonate|palmitate|decanoate|enanthate|caproate|monohydrate|dihydrate|anhydrous|micronized|base|oxalate|cilexetil|medoxomil|axetil|proxetil|mofetil|erbumine|etexilate|trometamol|tromethamine|arginine|olamine|meglumine|disoproxil|dinitrate|mononitrate)\b/gi;
+function stripSalts(ing) {
+  let s = ing; let prev;
+  do { prev = s; s = s.replace(SALT_SUFFIX_RE, ' ').replace(/\s+/g, ' ').trim(); } while (s !== prev);
+  return s;
+}
+function mergeInfo(a, b) {
+  if (!b || !b.has) return a || EMPTY_INFO;
+  if (!a || !a.has) return b;
+  return {
+    has: true,
+    display: [...new Set([...(a.display || []), ...(b.display || [])])],
+    atc4: [...new Set([...(a.atc4 || []), ...(b.atc4 || [])])],
+    allergyLabels: [...new Set([...(a.allergyLabels || []), ...(b.allergyLabels || [])])],
+  };
+}
+
+/** Drug-class info for one ingredient — instant in-memory lookup from the preloaded index.
+ *  Salt-aware: a salt/ester form (e.g. "morphine sulfate") also resolves its base ingredient
+ *  ("morphine") and merges the class info, so allergy/duplicate checks never silently miss the
+ *  real drug class just because the name carries a salt. */
 async function classInfoForIngredient(ingredient) {
   const index = await ensureIndex();
-  return index.get(ingredient.toLowerCase()) || EMPTY_INFO;
+  const key = String(ingredient || '').toLowerCase().trim();
+  const direct = index.get(key) || EMPTY_INFO;
+  const baseKey = stripSalts(key);
+  if (baseKey && baseKey !== key) {
+    const base = index.get(baseKey);
+    if (base && base.has) return mergeInfo(direct, base);
+  }
+  return direct;
 }
 
 /** Pre-build the in-memory drug-class index at boot so the FIRST prescription safety check is instant
@@ -173,7 +210,12 @@ export async function checkRxSafety({ name, rxcui = '', allergies = '', currentD
     .filter((t) => t.length >= 4 && t.length <= 40 && !/^(nkda|none|known|no|reviewed|emr|environmental|latex|drug|drugs|food|foods|allergy|allergies|reaction|rash|hives|itching|swelling|nausea|intolerance|seasonal|the|and|beta|alpha|blocker|blockers|channel|channels|acid|agent|agents|receptor|receptors|inhibitor|inhibitors|antagonist|antagonists|agonist|agonists|calcium|sodium|potassium|selective|systemic|other|plain|modifying|proton|pump)$/.test(t));
 
   const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const inName = (t) => new RegExp(`\\b${esc(t)}`, 'i').test(nameHay);
+  // Salt COUNTERIONS are not allergens: a "sulfa" (sulfonamide) allergy must NOT match the salt
+  // "sulfate" in morphine SULFATE / ferrous SULFATE / albuterol SULFATE (a dangerous false positive),
+  // yet must still match real sulfonamides (sulfamethoxazole, sulfasalazine — not salt words, so kept).
+  // So the direct-name allergen check runs against a salt-stripped haystack.
+  const nameAllergenHay = stripSalts(nameHay);
+  const inName = (t) => new RegExp(`\\b${esc(t)}`, 'i').test(nameAllergenHay);
   const classRe = (t) => new RegExp(`\\b${esc(t)}(?:s|es)?\\b`, 'i');   // whole-word + plural, never a loose substring
   const inClass = (t) => classHay.some((lbl) => classRe(t).test(lbl));
   const allergyAlerts = [];
@@ -191,8 +233,13 @@ export async function checkRxSafety({ name, rxcui = '', allergies = '', currentD
   // class matches the mapped code, so 3-char lay terms (PPI/ARB) work without a length-filter and there
   // are no string-coincidence false hits. Checked against the raw allergies text (whole-word).
   const allergyText = allergies.toLowerCase();
+  const baseIngs = ingredients.map(stripSalts);
   for (const lay of LAY_CLASS) {
-    if (!lay.atc.some((pre) => [...allAtc4].some((c) => c.startsWith(pre)))) continue;
+    const atcMatch = lay.atc.some((pre) => [...allAtc4].some((c) => c.startsWith(pre)));
+    // Ingredient allow-list (opioids misfiled outside N02A) — exact base-ingredient membership, so it
+    // fires for codeine/hydrocodone but never for a look-alike or an unrelated R05DA antitussive.
+    const ingMatch = Array.isArray(lay.ingredients) && baseIngs.some((bi) => lay.ingredients.includes(bi));
+    if (!atcMatch && !ingMatch) continue;
     const hit = lay.terms.find((term) => new RegExp(`\\b${esc(term)}\\b`, 'i').test(allergyText));
     if (hit && !seen.has(`lay:${lay.terms[0]}`)) {
       seen.add(`lay:${lay.terms[0]}`);
@@ -202,11 +249,16 @@ export async function checkRxSafety({ name, rxcui = '', allergies = '', currentD
 
   const duplicates = [];
   const dupSeen = new Set();
+  // Salt-aware ingredient set for the prescribed drug: "metoprolol tartrate" and "metoprolol succinate"
+  // are the SAME ingredient clinically, so compare on the salt-stripped base too — otherwise a same-drug
+  // duplicate ordered as a different salt would be silently missed.
+  const baseIngredients = ingredients.map(stripSalts);
   for (const raw of (Array.isArray(currentDrugs) ? currentDrugs : [])) {
     const d = String(raw == null ? '' : raw).slice(0, 500);   // elements may be non-strings — coerce safely
     if (!d || d.toLowerCase() === name.toLowerCase()) continue;
     const dIngs = ingredientsFromName(d);
-    if (dIngs.some((di) => ingredients.includes(di))) {
+    const dBase = dIngs.map(stripSalts);
+    if (dIngs.some((di) => ingredients.includes(di)) || dBase.some((di) => di && baseIngredients.includes(di))) {
       if (!dupSeen.has(`i:${d}`)) { duplicates.push(`Duplicate therapy — already prescribing ${d} (same ingredient).`); dupSeen.add(`i:${d}`); }
       continue;
     }
