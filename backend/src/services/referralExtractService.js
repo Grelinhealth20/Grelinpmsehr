@@ -12,6 +12,11 @@ import { logger } from '../config/logger.js';
 
 const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim();
 const titleCase = (s) => clean(s).toLowerCase().replace(/\b([a-z])/g, (m) => m.toUpperCase());
+// Strip trailing sentence/OCR punctuation ("Maria Elena.", "Humana Advantage.") — a common OCR artifact —
+// while PRESERVING an internal comma (so a "Last, First" name survives).
+const trimEnds = (s) => clean(s).replace(/[.,;:\s]+$/, '').trim();
+// After title-casing, restore UPPERCASE for a trailing clinical credential ("Whitfield, Md" → "…, MD").
+const fixCred = (s) => clean(s).replace(/([,\s])(md|do|np|pa|dds|dpm|rn|phd|faan|facp)\b\.?$/i, (a, sep, c) => `${sep}${c.toUpperCase()}`);
 
 /** Normalize a date token (MM/DD/YYYY, MM-DD-YY, YYYY-MM-DD, "Jan 2, 1950") → ISO YYYY-MM-DD, else ''. */
 function normDate(raw) {
@@ -73,7 +78,7 @@ export function parseReferralText({ kv = [], text = '' } = {}) {
   const rawName = field(kv, text, /patient|resident|member|pt\s*name|name of patient/, 'patient(?:\\s*name)?|resident(?:\\s*name)?|pt\\.?\\s*name|name of (?:patient|resident)', /provider|physician|doctor|referr|facility|guarantor|emergency|contact|pharmacy/);
   // Strip a trailing DOB/MRN/number/# accidentally glued onto the name line, but PRESERVE an internal
   // comma so a "Last, First" name survives intact (the downstream splitter needs both parts).
-  let patientName = titleCase(String(rawName).replace(/\b(dob|d\.o\.b|mrn|ssn|age|sex)\b.*$/i, '').replace(/\s+\d.*$/, '').replace(/#.*$/, '').trim());
+  let patientName = trimEnds(titleCase(String(rawName).replace(/\b(dob|d\.o\.b|mrn|ssn|age|sex)\b.*$/i, '').replace(/\s+\d.*$/, '').replace(/#.*$/, '').trim()));
   // LETTER-STYLE fallback: referral letters have no "Patient:" label — the patient's name appears in prose
   // immediately BEFORE their date of birth, e.g. "referring Ms. Patricia Gomez (DOB 07/12/1958)". Anchor on
   // the following DOB (a strong, low-false-positive signal that the preceding name IS the patient). Only
@@ -81,7 +86,7 @@ export function parseReferralText({ kv = [], text = '' } = {}) {
   if (!patientName) {
     const m = text.match(/\b(?:mr|mrs|ms|miss|mx|dr)\.?\s+([A-Z][a-zA-Z'.-]+(?:\s+[A-Z][a-zA-Z'.-]*){0,2})\s*[(,]?\s*(?:dob|d\.?o\.?b|born|date of birth)\b/i)
       || text.match(/\b([A-Z][a-zA-Z'.-]+(?:\s+[A-Z][a-zA-Z'.-]*){1,2})\s*\(\s*(?:dob|d\.?o\.?b|born)\b/i);
-    if (m && m[1]) patientName = titleCase(m[1].replace(/\b(dob|mrn|age)\b.*$/i, '').trim());
+    if (m && m[1]) patientName = trimEnds(titleCase(m[1].replace(/\b(dob|mrn|age)\b.*$/i, '').trim()));
   }
   const dob = normDate(field(kv, text, /d\.?o\.?b|date of birth|birth\s*date/, 'd\\.?o\\.?b\\.?|date of birth|birth\\s*date'));
   const mrn = clean(field(kv, text, /\bmrn\b|medical record|record\s*(?:no|number|#)|chart\s*(?:no|number|#)/, 'mrn|medical record(?:\\s*(?:no|number|#))?|chart\\s*(?:no|number|#)')).replace(/[^A-Za-z0-9-]/g, '').slice(0, 32);
@@ -89,23 +94,23 @@ export function parseReferralText({ kv = [], text = '' } = {}) {
   const sex = /^m|male/.test(sexRaw) ? 'M' : /^f|female/.test(sexRaw) ? 'F' : '';
   const patientPhone = normPhone(field(kv, text, /patient.{0,8}(phone|tel)|home\s*(phone|tel)|^phone$|^tel/, 'patient\\s*(?:phone|telephone|tel)|home\\s*phone'));
 
-  const referringProvider = titleCase(field(kv, text, /referring\s*(?:physician|provider|doctor|md|dr|clinician)|ordering\s*(?:physician|provider)|from\s*(?:physician|provider|dr)|\bpcp\b|requesting\s*(?:physician|provider)/, 'referring\\s*(?:physician|provider|doctor|md|dr|clinician)|ordering\\s*(?:physician|provider)|requesting\\s*(?:physician|provider)|\\bpcp\\b').replace(/\b(md|do|np|pa|dds|dpm)\b.*$/i, (m) => m.split(/\s/)[0]));
+  const referringProvider = fixCred(trimEnds(titleCase(field(kv, text, /referring\s*(?:physician|provider|doctor|md|dr|clinician)|ordering\s*(?:physician|provider)|from\s*(?:physician|provider|dr)|\bpcp\b|requesting\s*(?:physician|provider)/, 'referring\\s*(?:physician|provider|doctor|md|dr|clinician)|ordering\\s*(?:physician|provider)|requesting\\s*(?:physician|provider)|\\bpcp\\b').replace(/\bnpi\b.*$/i, ''))));
   const referringNpi = normNpi(field(kv, text, /npi/, 'npi(?:\\s*(?:no|number|#))?'));
-  const referringOrg = titleCase(field(kv, text, /referring\s*(?:facility|clinic|practice|office|hospital|group)|from\s*(?:facility|clinic|practice)|facility\s*name|clinic\s*name|practice\s*name|sending\s*facility/, 'referring\\s*(?:facility|clinic|practice|office|hospital|group)|facility\\s*name|clinic\\s*name|practice\\s*name|sending\\s*facility'));
+  const referringOrg = trimEnds(titleCase(field(kv, text, /referring\s*(?:facility|clinic|practice|office|hospital|group)|from\s*(?:facility|clinic|practice)|facility\s*name|clinic\s*name|practice\s*name|sending\s*facility/, 'referring\\s*(?:facility|clinic|practice|office|hospital|group)|facility\\s*name|clinic\\s*name|practice\\s*name|sending\\s*facility')));
   const referringFax = normPhone(field(kv, text, /(?:referring|from|sender).{0,10}fax|^fax\b|fax\s*(?:no|number|#)/, '(?:referring|from|sender)\\s*fax|fax\\s*(?:no|number|#)?'));
 
   const reason = clean(field(kv, text, /reason for (?:referral|consult|visit)|referral reason|reason\b/, 'reason for (?:referral|consult(?:ation)?|visit)|referral reason')).slice(0, 500);
   const diagnosisText = clean(field(kv, text, /diagnos[ei]s|\bdx\b|impression|assessment|clinical\s*(?:info|indication)/, 'diagnos[ei]s|\\bdx\\b|impression|assessment|clinical\\s*(?:information|indication)')).slice(0, 500);
   // Specialty/service requested — from an explicit "Referred To/Service Requested/Consult to" field only
   // (NOT a bare "Specialty" word, which false-matches a form's "SPECIALTY REFERRAL FORM" title).
-  const specialty = titleCase(field(kv, text, /referred\s*to|refer\s*to|service\s*requested|requested\s*(?:specialty|service)|consult(?:ation)?\s*(?:to|with)|type of (?:consult|referral)/, 'referred\\s*to|refer\\s*to|service\\s*requested|requested\\s*(?:specialty|service)|consult(?:ation)?\\s*(?:to|with)|type of (?:consult|referral)')).slice(0, 100);
+  const specialty = trimEnds(titleCase(field(kv, text, /referred\s*to|refer\s*to|service\s*requested|requested\s*(?:specialty|service)|consult(?:ation)?\s*(?:to|with)|type of (?:consult|referral)/, 'referred\\s*to|refer\\s*to|service\\s*requested|requested\\s*(?:specialty|service)|consult(?:ation)?\\s*(?:to|with)|type of (?:consult|referral)'))).slice(0, 100);
 
   // ICD-10-CM codes anywhere in the diagnosis text or (fallback) the whole document.
   const icdSource = `${diagnosisText} ${reason}`.trim() || text;
   const icdCodes = [...new Set((icdSource.match(ICD_RE) || []).map((c) => c.toUpperCase()))].slice(0, 20);
 
   // Insurance: payer + member id (best-effort, deterministic labels).
-  const insurancePayer = titleCase(field(kv, text, /insurance|payer|payor|health\s*plan|coverage|carrier/, 'insurance(?:\\s*(?:carrier|company|plan))?|payer|payor|health\\s*plan|coverage')).slice(0, 120);
+  const insurancePayer = trimEnds(titleCase(field(kv, text, /insurance|payer|payor|health\s*plan|coverage|carrier/, 'insurance(?:\\s*(?:carrier|company|plan))?|payer|payor|health\\s*plan|coverage'))).slice(0, 120);
   const memberId = clean(field(kv, text, /(?:member|subscriber|policy|insurance|plan)\s*(?:id|no|number|#)|\bid\s*(?:no|number|#)/, '(?:member|subscriber|policy|insurance)\\s*(?:id|no|number|#)')).replace(/[^A-Za-z0-9-]/g, '').slice(0, 40);
 
   // Urgency: STAT > urgent > routine (explicit words only; default routine, coder confirms).

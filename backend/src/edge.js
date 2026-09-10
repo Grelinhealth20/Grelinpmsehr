@@ -23,7 +23,10 @@ const WAF_SIGNATURES = [
   // Tautology equality (OR/AND) covers numeric (1=1) AND quoted ('1'='1, "1"="1) auth-bypass payloads —
   // written with non-capturing groups (no fragile numbered backreference) so it is robust and catches the
   // classic `' OR '1'='1` and `"x"="x`. The comment rule matches `-- ` OR `--` at end-of-input (`admin'--`).
-  { name: 'sqli', re: /(\bunion\b[\s(]+\bselect\b)|(\bselect\b\s+\*\s+\bfrom\b)|(\binsert\b\s+\binto\b)|(\bdrop\b\s+\btable\b)|(\b(?:or|and)\b\s+(?:\d+\s*=\s*\d+|'[^']{0,30}'\s*=\s*'|"[^"]{0,30}"\s*=\s*"))|(--(?:\s|$))|(\/\*[\s\S]{0,200}?\*\/)|(\bsleep\s*\()|(\bbenchmark\s*\()|(\bwaitfor\b\s+\bdelay\b)|(\binformation_schema\b)/i },
+  // UNION-based: `union select`, and the evasions `union ALL/DISTINCT select`, `union/**/select`,
+  // `union%0aselect` — union followed by select within a short gap (bounded to 12 chars so it never fires
+  // on ordinary clinical prose, which does not juxtapose "union" and "select").
+  { name: 'sqli', re: /(\bunion\b[\s\S]{0,12}?\bselect\b)|(\bselect\b\s+\*\s+\bfrom\b)|(\binsert\b\s+\binto\b)|(\bdrop\b\s+\btable\b)|(\b(?:or|and)\b\s+(?:\d+\s*=\s*\d+|'[^']{0,30}'\s*=\s*'|"[^"]{0,30}"\s*=\s*"))|(--(?:\s|$))|(\/\*[\s\S]{0,200}?\*\/)|(\bsleep\s*\()|(\bbenchmark\s*\()|(\bwaitfor\b\s+\bdelay\b)|(\binformation_schema\b)/i },
   { name: 'xss', re: /(<script[\s/>])|(<\/script>)|(javascript:)|(<[a-z][a-z0-9]*[^>]{0,300}?\son[a-z]+\s*=)|(<iframe[\s/>])|(document\.cookie)/i },
   { name: 'traversal-lfi', re: /(\.\.[\/\\]){2,}|(\.\.\/){1,}etc\/passwd|(%2e%2e[%2f%5c])|(\/etc\/passwd)|(\bfile:\/\/)|(\\windows\\system32)|(boot\.ini)/i },
   // RCE / command-injection. Tuned to avoid CLINICAL false positives: real medical prose routinely

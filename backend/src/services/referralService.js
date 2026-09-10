@@ -726,7 +726,7 @@ async function facilityOwningProviderId(facilityId) {
  * Returns { patientId, created, reason }. Never fabricates a name; a nameless/facility-less fax stays
  * unlinked in the intake queue (document still stored — no data loss).
  */
-async function matchOrCreatePatientForReferral(extracted, { facilityId, createdBy, allowCreate = true } = {}) {
+export async function matchOrCreatePatientForReferral(extracted, { facilityId, createdBy, allowCreate = true } = {}) {
   const p = (extracted && extracted.patient) || {};
   const { firstName, lastName } = splitPatientName(p.name);
   if (!facilityId) return { patientId: null, created: false, reason: 'unknown DID — no facility to scope patient' };
@@ -802,7 +802,12 @@ export async function ingestIncomingFax(rec = {}) {
   // both S3 storage and deterministic OCR extraction — one fetch, no double download, no data loss. If it
   // cannot be stored, keep the fax id (re-fetchable) and record the error — never a silent loss.
   let s3Key = null; let storeErr = null; let docBuffer = null; let docSize = null;
-  if (faxId && (s3Enabled() || ocrEnabled())) {
+  // A caller may supply the already-fetched document bytes (reprocessing a stored fax, or a sync path that
+  // holds the buffer) so we don't re-download from Fax.Plus. Otherwise fetch by FAX ID.
+  if (rec.documentBuffer && Buffer.isBuffer(rec.documentBuffer) && rec.documentBuffer.length) {
+    docBuffer = rec.documentBuffer; docSize = docBuffer.length;
+  }
+  if (faxId && !docBuffer && (s3Enabled() || ocrEnabled())) {
     for (let attempt = 1; attempt <= 2 && !docBuffer; attempt += 1) {
       try {
         const { buffer } = await downloadFaxFile(faxId);
@@ -810,10 +815,11 @@ export async function ingestIncomingFax(rec = {}) {
         docBuffer = buffer; docSize = buffer.length;
       } catch (e) { storeErr = e.message; logger.error({ err: e.message, faxId, attempt }, 'incoming fax download failed'); }
     }
-    if (docBuffer && s3Enabled()) {
-      try { s3Key = await uploadReferralObject(facilityCtx, { direction: 'incoming', fileName: `${faxId}.pdf` }, docBuffer, 'application/pdf'); }
-      catch (e) { storeErr = e.message; logger.error({ err: e.message, faxId }, 'incoming fax store failed'); }
-    }
+  }
+  // Store to S3 whenever we have the document (however obtained: downloaded or injected) and S3 is enabled.
+  if (faxId && docBuffer && !s3Key && s3Enabled()) {
+    try { s3Key = await uploadReferralObject(facilityCtx, { direction: 'incoming', fileName: `${faxId}.pdf` }, docBuffer, 'application/pdf'); }
+    catch (e) { storeErr = e.message; logger.error({ err: e.message, faxId }, 'incoming fax store failed'); }
   }
 
   // (3) DETERMINISTIC field extraction from the received document via the local PaddleOCR service — the

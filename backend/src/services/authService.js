@@ -25,6 +25,11 @@ export class AuthError extends Error {
   }
 }
 
+// Grace window in which a just-rotated (revoked) refresh token presented again is treated as a benign
+// concurrent/multi-tab refresh race rather than token theft — long enough to cover parallel requests and a
+// second browser tab, short enough that a stolen-then-replayed token is still caught.
+const REFRESH_RACE_GRACE_MS = 30 * 1000;
+
 async function logAttempt(email, ip, successful) {
   try {
     await execute(
@@ -155,20 +160,26 @@ export async function login(email, password, ctx = {}) {
     throw new AuthError('Access to this account is currently restricted.', 403, 'ACCOUNT_RESTRICTED');
   }
 
-  await recordSuccessfulLogin(user.id);
-  await logAttempt(email, ctx.ip, true);
   // MFA: if required, issue an access-only (no refresh) session in the setup/pending stage. Full
   // access is gated by requirePasswordSettled until the user completes MFA (which re-issues a full
   // session). Never affects a different user — everything keys off THIS authenticated user.
   const mfaStage = mfaStageFor(user);
-  const session = await issueSession(user, ctx, { mfa: mfaStage, withRefresh: mfaStage === 'ok' });
-  await recordAudit({
-    actorUserId: user.id,
-    action: 'auth.login.success',
-    ip: ctx.ip,
-    userAgent: ctx.userAgent,
-    metadata: mfaStage === 'ok' ? undefined : { mfaStage },
-  });
+  // LATENCY: the session-mint and the three independent bookkeeping writes (last-login update, login
+  // attempt log, success audit) were awaited SEQUENTIALLY — ~4 remote-DB round-trips (~275ms each) added
+  // to every login on top of the password hash. They don't depend on each other, so run them concurrently
+  // (one round-trip's wall time) while keeping every write reliably awaited before responding.
+  const [session] = await Promise.all([
+    issueSession(user, ctx, { mfa: mfaStage, withRefresh: mfaStage === 'ok' }),
+    recordSuccessfulLogin(user.id),
+    logAttempt(email, ctx.ip, true),
+    recordAudit({
+      actorUserId: user.id,
+      action: 'auth.login.success',
+      ip: ctx.ip,
+      userAgent: ctx.userAgent,
+      metadata: mfaStage === 'ok' ? undefined : { mfaStage },
+    }),
+  ]);
 
   return {
     user,
@@ -197,10 +208,25 @@ export async function refresh(refreshToken, ctx = {}) {
   if (!record) {
     throw new AuthError('Session expired. Please sign in again.', 401, 'REFRESH_EXPIRED');
   }
-  // Reuse detection: a token that EXISTS but is already revoked was rotated out — presenting it again
-  // is a theft signal (the legitimate client would use the current token). Nuke the whole session
-  // family and audit, so a stolen-then-rotated token can't quietly ride alongside the real one.
+  // A REVOKED token presented again is EITHER a benign concurrent/multi-tab refresh RACE (the same user's
+  // parallel request — or a second browser tab sharing the cookie — rotated this token a moment ago) OR
+  // genuine REUSE of a long-revoked token (theft). Distinguish by HOW RECENTLY it was revoked:
+  //   • within REFRESH_RACE_GRACE_MS and still-unexpired → RACE: re-issue a fresh session for the SAME
+  //     user WITHOUT nuking the family. Nuking here was the bug — it killed the legitimate just-issued
+  //     session (the parallel/other-tab refresh that succeeded) and forced a needless re-login, which is
+  //     exactly the repeating "session-token reuse alert / unsuccessful" the account was hitting.
+  //   • otherwise → treated as reuse/theft: nuke the whole family and audit a failure.
   if (record.revoked_at) {
+    const revokedAgoMs = Date.now() - new Date(record.revoked_at).getTime();
+    const stillUnexpired = new Date(record.expires_at) >= new Date();
+    if (revokedAgoMs >= 0 && revokedAgoMs <= REFRESH_RACE_GRACE_MS && stillUnexpired) {
+      const raceUser = await findRawByUuid(payload.sub);
+      if (raceUser && raceUser.status !== USER_STATUS.DISABLED) {
+        // benign concurrency — not a security event; issue a valid session so every racing tab converges.
+        const session = await issueSession(raceUser, ctx);
+        return { user: raceUser, ...session };
+      }
+    }
     await revokeAllSessions(record.user_id);
     await recordAudit({
       actorUserId: record.user_id,
