@@ -119,10 +119,24 @@ export async function getFacility(uuid) {
   return { ...(await inlineLogo(toFacility(row), row.logo)), providers };
 }
 
-/** Insert a verified facility. Dedupe by NPI (returns existing if already saved). */
+/**
+ * Insert a facility (NPPES-verified or manually entered by a super/master admin).
+ * Dedupe: by NPI when present; otherwise (manual entry, which has no NPI — the unique
+ * key) by normalized name + state, so a manual save can never silently create a
+ * duplicate facility. In either case the existing record is returned with duplicate:true.
+ */
 export async function createFacility(data, { adminId } = {}) {
   if (data.npi) {
     const [dupe] = await execute(`SELECT ${FAC_COLS} FROM facilities f WHERE f.npi = :npi LIMIT 1`, { npi: data.npi });
+    if (dupe[0]) return { facility: toFacility(dupe[0]), duplicate: true };
+  } else {
+    const [dupe] = await execute(
+      `SELECT ${FAC_COLS} FROM facilities f
+        WHERE LOWER(TRIM(f.name)) = LOWER(TRIM(:name))
+          AND COALESCE(UPPER(f.state), '') = COALESCE(UPPER(:state), '')
+        LIMIT 1`,
+      { name: data.name, state: data.state || '' },
+    );
     if (dupe[0]) return { facility: toFacility(dupe[0]), duplicate: true };
   }
   const uuid = uuidv4();

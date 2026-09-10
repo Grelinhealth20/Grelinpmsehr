@@ -74,18 +74,22 @@ function startCombinedEdge(app) {
       logger.info(`Reverse-proxying SPA from ${e.frontendOrigin}`);
     });
     // Plain-HTTP listener → permanent redirect to HTTPS, but answer /healthz directly (a container/LB
-    // health probe on the HTTP port must not be 301'd to an unresolvable canonical host).
+    // health probe on the HTTP port must not be 301'd to an unresolvable host).
     http.createServer((req, res) => {
       if (req.method === 'GET' && (req.url === '/healthz' || req.url === '/healthz/')) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ status: 'ok', service: 'grelin-pms' }));
       }
-      const raw = e.canonicalHost || (req.headers.host || `localhost:${e.httpsPort}`).replace(/[^A-Za-z0-9.:-]/g, '');
-      const host = raw.replace(/:\d+$/, `:${e.httpsPort}`);
+      // Upgrade to HTTPS on the SAME host the client requested — never rewrite the user's domain to a
+      // configured canonical host (that silently flips e.g. ehr.grelinhealth.com → pms.grelinhealth.com).
+      // canonicalHost is only a last resort when the request carries no Host header (e.g. HTTP/1.0).
+      // Redirect to standard HTTPS (:443) — never leak the internal container port (e.g. :6004).
+      const reqHost = String(req.headers.host || '').replace(/[^A-Za-z0-9.:-]/g, '');
+      const host = (reqHost || e.canonicalHost || 'localhost').replace(/:\d+$/, '');
       const path = String(req.url || '/').replace(/[\r\n]/g, '');
       res.writeHead(301, { Location: `https://${host}${path}` });
       res.end();
-    }).listen(e.httpPort, e.host, () => logger.info(`HTTP :${e.httpPort} → HTTPS :${e.httpsPort} redirect active`));
+    }).listen(e.httpPort, e.host, () => logger.info(`HTTP :${e.httpPort} → HTTPS redirect active (preserves request host)`));
     return srv;
   }
   // Combined, but TLS terminated by an upstream LB → serve public HTTP (set TRUST_PROXY behind the LB).

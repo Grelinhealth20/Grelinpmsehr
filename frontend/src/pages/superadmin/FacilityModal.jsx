@@ -33,6 +33,9 @@ export default function FacilityModal({ facility = null, onClose, onSaved }) {
   const [searching, setSearching] = useState(false);
   const [form, setForm] = useState(editing ? { ...BLANK, ...facility } : BLANK);
   const [verified, setVerified] = useState(editing); // a facility is chosen/verified
+  // Manual entry: the admin fills the facility details by hand instead of picking an
+  // NPPES record. Governs the saved `source` ('manual' vs 'nppes') and the review badge.
+  const [manual, setManual] = useState(editing ? facility?.source === 'manual' : false);
   const [saving, setSaving] = useState(false);
   // Logo: null = unchanged, a data URI = new upload, '' = remove. The existing logo
   // (form.logo) is an inline data URI for display only (served by getFacility from the
@@ -104,11 +107,26 @@ export default function FacilityModal({ facility = null, onClose, onSaved }) {
     // Tax ID (EIN) is not in NPPES — preserve any manually entered value.
     setForm((f) => ({ ...f, npi: r.npi || '', name: r.name || '', address: r.address || '', city: r.city || '', state: r.state || '', zip: r.zip || '', phone: r.phone || '', fax: r.fax || '', taxonomy: r.taxonomy || '', taxonomyCode: r.taxonomyCode || '', authorizedOfficial: r.authorizedOfficial || '', enumerationDate: r.enumerationDate || '', mailingAddress: r.mailingAddress || '', nppesStatus: r.nppesStatus || r.status || '' }));
     setResults([]);
+    setManual(false);
+    setVerified(true);
+  }
+
+  // Switch to manual entry: a super/master admin types the facility details by hand
+  // (e.g. a facility not yet in the NPPES registry, or one without an NPI).
+  function startManual() {
+    setForm(BLANK);
+    setResults([]);
+    setTerm('');
+    setManual(true);
     setVerified(true);
   }
 
   async function save() {
     if (!form.name.trim()) { toast.error('Facility name is required.'); return; }
+    const npiTrim = (form.npi || '').trim();
+    if (npiTrim && !/^\d{10}$/.test(npiTrim)) {
+      toast.error('NPI must be exactly 10 digits (or leave it blank for a manual facility).'); return;
+    }
     setSaving(true);
     try {
       const { logo: _display, ...rest } = form; // drop the display-only signed URL
@@ -122,7 +140,7 @@ export default function FacilityModal({ facility = null, onClose, onSaved }) {
         toast.success('Facility updated.');
         onSaved?.();
       } else {
-        const { data } = await facilitiesApi.create({ ...payload, source: 'nppes' });
+        const { data } = await facilitiesApi.create({ ...payload, source: manual ? 'manual' : 'nppes' });
         setUuid(data.facility.uuid);
         setForm((f) => ({ ...f, logo: data.facility.logo || '' }));
         setLogoData(null);
@@ -180,11 +198,11 @@ export default function FacilityModal({ facility = null, onClose, onSaved }) {
       width={720}
       onClose={onClose}
       footer={<>
-        <span className="fac-foot">CMS NPPES registry · verified facility records</span>
+        <span className="fac-foot">{manual ? 'Manual entry · admin-entered facility record' : 'CMS NPPES registry · verified facility records'}</span>
         <span className="spacer" />
         <button className="btn ghost" onClick={onClose} disabled={saving}>Close</button>
         <button className="btn" onClick={save} disabled={saving || !verified}>
-          {saving ? <span className="spinner" /> : uuid ? 'Save changes' : 'Verify & save'}
+          {saving ? <span className="spinner" /> : uuid ? 'Save changes' : manual ? 'Create facility' : 'Verify & save'}
         </button>
       </>}
     >
@@ -222,14 +240,20 @@ export default function FacilityModal({ facility = null, onClose, onSaved }) {
             {!searching && term.trim().length >= 3 && results.length === 0 && (
               <div className="fac-empty">No matching facilities found in the NPPES registry.</div>
             )}
+            {!manual && (
+              <div className="fac-manual-cta">
+                <span className="fac-manual-sep">Not in the registry, or no NPI?</span>
+                <button type="button" className="btn ghost sm" onClick={startManual}>Enter facility details manually</button>
+              </div>
+            )}
           </div>
         )}
 
         {verified && (
           <div className="fac-verify">
             <div className="fac-verify-head">
-              <span className="fac-badge">{form.npi ? 'NPPES verified' : 'Manual entry'}</span>
-              <span className="fac-verify-title">Review the facility details</span>
+              <span className={`fac-badge${manual ? ' manual' : ''}`}>{manual ? 'Manual entry' : 'NPPES verified'}</span>
+              <span className="fac-verify-title">{manual ? 'Enter the facility details' : 'Review the facility details'}</span>
             </div>
             <div className="fac-logo">
               <div className="fac-logo-preview">

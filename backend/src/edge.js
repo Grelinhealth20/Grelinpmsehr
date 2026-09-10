@@ -27,7 +27,11 @@ const WAF_SIGNATURES = [
   // `union%0aselect` — union followed by select within a short gap (bounded to 12 chars so it never fires
   // on ordinary clinical prose, which does not juxtapose "union" and "select").
   { name: 'sqli', re: /(\bunion\b[\s\S]{0,12}?\bselect\b)|(\bselect\b\s+\*\s+\bfrom\b)|(\binsert\b\s+\binto\b)|(\bdrop\b\s+\btable\b)|(\b(?:or|and)\b\s+(?:\d+\s*=\s*\d+|'[^']{0,30}'\s*=\s*'|"[^"]{0,30}"\s*=\s*"))|(--(?:\s|$))|(\/\*[\s\S]{0,200}?\*\/)|(\bsleep\s*\()|(\bbenchmark\s*\()|(\bwaitfor\b\s+\bdelay\b)|(\binformation_schema\b)/i },
-  { name: 'xss', re: /(<script[\s/>])|(<\/script>)|(javascript:)|(<[a-z][a-z0-9]*[^>]{0,300}?\son[a-z]+\s*=)|(<iframe[\s/>])|(document\.cookie)/i },
+  // The event-handler rule allows ANY non-name separator before `on<handler>=` — a space, tab, newline,
+  // slash or backtick — so filter-evasion tags like `<svg/onload=…>` and `<img/onerror=…>` are caught,
+  // not just space-separated `<svg onload=…>`. The leading `<[a-z]` tag-start guard keeps it off ordinary
+  // clinical prose (medical notes do not contain `<tagname…on…=`).
+  { name: 'xss', re: /(<script[\s/>])|(<\/script>)|(javascript:)|(<[a-z][a-z0-9]*[^>]{0,300}?[\s/`]on[a-z]+\s*=)|(<iframe[\s/>])|(document\.cookie)/i },
   { name: 'traversal-lfi', re: /(\.\.[\/\\]){2,}|(\.\.\/){1,}etc\/passwd|(%2e%2e[%2f%5c])|(\/etc\/passwd)|(\bfile:\/\/)|(\\windows\\system32)|(boot\.ini)/i },
   // RCE / command-injection. Tuned to avoid CLINICAL false positives: real medical prose routinely
   // writes short tokens after a semicolon/pipe — "applied; ID band verified", "ordered; CAT scan",
