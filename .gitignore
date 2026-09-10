@@ -6,6 +6,10 @@ node_modules/
 *.env
 !/**/.env.example
 
+# Deploy compose holds live prod secrets (PHI key, DB pw, AWS/Stedi keys) — keep out of git.
+# The real file lives on the host; commit only sanitized templates/examples if needed.
+docker-compose.yml
+
 # Build output
 frontend/dist/
 
