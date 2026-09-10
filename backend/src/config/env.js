@@ -45,8 +45,8 @@ export const config = {
 
   api: {
     host: process.env.API_HOST || '127.0.0.1',
-    // Default aligned to the merged Docker/AWS port scheme (backend 6000, frontend 6001,
-    // gateway 6002/6004, ocr 6003). Always overridden by API_PORT in .env / compose.
+    // Default aligned to the deployment port scheme (in-process API 6000, public edge 6002,
+    // frontend 6001, ocr 6003). Always overridden by API_PORT in .env.
     port: int('API_PORT', 6000),
     gatewayOrigin: process.env.GATEWAY_ORIGIN || 'http://127.0.0.1:6002',
     // Shared secret the gateway must present. Enforced in production only so

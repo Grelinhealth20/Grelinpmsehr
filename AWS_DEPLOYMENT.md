@@ -1,13 +1,14 @@
 # Grelin Health PMS & EHR — AWS Production Deployment Guide
 
-> **Topology note (current):** the standalone gateway has been **folded into the backend**
-> (`COMBINED_EDGE=true`). The backend is now the **single public edge** — it terminates TLS,
-> runs the WAF + hardened headers + rate limits, serves `/api` in-process, and reverse-proxies
-> the SPA to the private frontend container. There is no separate gateway container and no
-> `INTERNAL_API_KEY` handshake. For the exact single-EC2 go-live steps see
-> **[DEPLOY_pms.grelinhealth.com.md](DEPLOY_pms.grelinhealth.com.md)**. The AWS/ECS patterns
-> below (RDS TLS, IAM roles, Secrets Manager, ElastiCache rate-limit store, observability) still
-> apply — read "gateway" as "the backend edge", and put the backend behind the ALB directly.
+> **Topology note (current):** the public domain is **`ehr.grelinhealth.com`**, and **YOUR nginx**
+> (built and managed from your end — no nginx or Docker ships in this repo) is the **public edge**:
+> it terminates TLS, serves the built SPA on `:6001`, and reverse-proxies `/api` (+ `/healthz`) to
+> the backend on **`:6002` (plain HTTP)**. The standalone gateway is **folded into the backend**
+> (`COMBINED_EDGE=true`), so the backend still runs the WAF + hardened headers + edge rate-limits on
+> every `/api` request behind your nginx (`GATEWAY_TLS=false`, `TRUST_PROXY=true`). There is no
+> separate gateway container and no `INTERNAL_API_KEY` handshake. The AWS/ECS patterns below
+> (RDS TLS, IAM roles, Secrets Manager, ElastiCache rate-limit store, observability) still apply —
+> read "gateway" as "the backend edge", with your nginx (or an ALB) in front of it.
 
 This guide takes the application (backend edge → MySQL, plus the OCR microservice and S3 for
 documents) to a hardened, HIPAA-oriented AWS deployment. It is specific to **this** codebase:
@@ -70,7 +71,7 @@ Keep the frontend and OCR containers off the ALB target groups entirely.
 
 - An AWS account with Organizations/SCP guardrails, and a dedicated account or VPC for PHI.
 - A registered domain in Route 53 (e.g. `app.grelinhealth.com`).
-- The AWS CLI v2 and Docker installed locally.
+- The AWS CLI v2 installed locally (and Docker, if you choose to containerize — you supply your own build).
 - A signed **Business Associate Addendum (BAA)** with AWS covering every service used
   here (RDS, S3, ECS, ElastiCache, CloudWatch, Secrets Manager, KMS, ALB are all HIPAA-eligible).
 
@@ -199,21 +200,21 @@ task role a least-privilege policy scoped to `arn:aws:s3:::pms-ehr/*` and
 
 ## 7. Compute — containerize and run under ECS Fargate
 
-**Container artifacts already exist in the repo:** `backend/Dockerfile`,
-`frontend/Dockerfile` (+ `frontend/nginx.conf`), `ocr-service/Dockerfile`, plus
-`docker-compose.yml` (local) and `docker-compose.aws.yml` (AWS). There is no gateway image.
-Ports:
+**No container artifacts ship in the repo** — you build Docker (and nginx) **from scratch on your
+end**. The repo ships only the three plain Node/Python apps (`backend/`, `frontend/`, `ocr-service/`)
+run directly (`node src/server.js`; `vite build`; `uvicorn`). Containerize them however you like.
+Ports (behind YOUR nginx, which terminates TLS for `ehr.grelinhealth.com`):
 
 | Service  | Internal port | Notes |
 |----------|---------------|-------|
-| **backend (edge)** | **6002** (HTTP) / **6004** (HTTPS) | the ONLY public service — WAF + TLS + /api + SPA proxy |
-| frontend | **6001**      | static SPA (nginx), private (reached only via the backend proxy) |
-| ocr      | **6003**      | private |
+| your nginx | 443/80 | **the public edge** — TLS, serves the built SPA, proxies `/api` (+ `/healthz`) → backend |
+| **backend** | **6002** (HTTP) | API + WAF + hardened headers + rate-limits (`GATEWAY_TLS=false`, `TRUST_PROXY=true`) |
+| frontend | **6001** | built SPA (`dist/`) served by **your nginx** |
+| ocr      | **6003** | private document-AI microservice |
 
-Build the frontend (`vite build`) and serve `dist/` — the compose does this via the
-frontend image + `nginx.conf`. Run the services as one ECS task (so the backend reaches the
-frontend/ocr over loopback) or as separate services behind service discovery; either way, only
-the **backend edge** (`:6002`/`:6004`) is mapped into the ALB target group.
+Build the frontend (`npm run build`) → `dist/`, and serve those static files from your nginx on
+`:6001` with a SPA history fallback. Point your nginx `/api` (and `/healthz`) at the backend on
+`:6002`; keep OCR (`:6003`) private.
 
 **ECS task definition notes:**
 
@@ -281,7 +282,7 @@ auto-scaling** on CPU/ALB-request-count.
 
 ## 11. Code touch-ups for AWS (small, tracked separately)
 
-The **Dockerfiles and compose files are already in the repo** (§7). The remaining
+You build the container images yourself (§7 — no Docker artifacts ship in the repo). The remaining
 application changes the AWS move needs — neither alters functionality — are:
 
 1. **IAM role instead of static keys.** Let the S3 client use the default credential

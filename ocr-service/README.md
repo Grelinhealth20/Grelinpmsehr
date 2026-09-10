@@ -69,18 +69,7 @@ and set the same value as `OCR_API_KEY` in `backend/.env`.
 
 ---
 
-## 3) Run in Docker
-
-```bash
-docker build -t grelin-ocr ./ocr-service
-docker run --rm -p 8600:8600 -e OCR_API_KEY=change-me grelin-ocr
-```
-
-Point the backend at it: `OCR_SERVICE_URL=http://<docker-host>:8600`.
-
----
-
-## 4) Deploy on AWS (production)
+## 3) Deploy on AWS (production)
 
 - Build the image and push to **ECR**.
 - Run on **ECS Fargate** or an **EC2** instance in a **private subnet** — never

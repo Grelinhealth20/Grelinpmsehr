@@ -33,7 +33,7 @@ Browser (React SPA)
             ▼                                ▼
    ┌──────────────────┐              MySQL (grelin_pmsehr)
    │ frontend/ (:6001)│              (PHI over TLS, pinned CA)
-   │ React SPA (nginx)│
+   │ React SPA (dist) │  ← served by YOUR nginx (built via vite; no nginx in this repo)
    └──────────────────┘
 ```
 
