@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, useRef } from 'react';
+import { usDate } from '../../lib/dates.js';
 import AppHeader from '../../components/AppHeader.jsx';
 import ConfirmDialog from '../../components/ConfirmDialog.jsx';
 import UserFormModal from './UserFormModal.jsx';
@@ -320,7 +321,7 @@ export default function SuperAdminPanel() {
                         <td><span className="badge role">{u.role.replace('_', ' ')}</span></td>
                         <td style={{ textTransform: 'capitalize', color: 'var(--c-ink-2)' }}>{u.accessLevel?.scope?.replace('_', ' ') || '—'}</td>
                         <td><StatusBadge status={u.status} /></td>
-                        <td className="mono" style={{ color: 'var(--c-ink-2)', fontSize: 12 }}>{u.lastLoginAt ? new Date(u.lastLoginAt).toLocaleDateString() : 'Never'}</td>
+                        <td className="mono" style={{ color: 'var(--c-ink-2)', fontSize: 12 }}>{u.lastLoginAt ? usDate(u.lastLoginAt) : 'Never'}</td>
                         <td>
                           <div className="row-actions">
                             <button className="act" title="Edit user" onClick={() => setModal({ type: 'edit', user: u })}>Edit</button>

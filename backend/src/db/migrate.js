@@ -139,6 +139,41 @@ export async function runMigrations() {
   // Facility Tax ID (EIN) — organizational billing identifier, entered by an admin
   // (not in NPPES). Kept with the facility's other billing identifiers.
   await ensureColumn('facilities', 'tax_id', '`tax_id` VARCHAR(32) NULL AFTER `taxonomy`');
+  // Facility CODE — the short, admin-set, UNIQUE site prefix used in the facility-specific MRN
+  // (CODE-NNNNNN-C) and Encounter ID (CODE-YYYY-NNNNNN). Auto-seeded from the name for existing
+  // facilities (below); admins can edit it. Uppercase alphanumeric.
+  await ensureColumn('facilities', 'facility_code', '`facility_code` VARCHAR(12) NULL AFTER `name`');
+  try { await pool.query('CREATE UNIQUE INDEX `uq_facility_code` ON `facilities` (`facility_code`)'); }
+  catch (e) { if (!/Duplicate key name|already exists/i.test(e.message)) logger.warn({ err: e.message }, 'facility_code unique index'); }
+  // Atomic per-scope counters — the concurrency-safe backbone of the facility-specific ID series
+  // (scope 'mrn:<facilityId>' and 'enc:<facilityId>:<year>'). One row per scope; the MySQL
+  // LAST_INSERT_ID trick increments and returns the next value atomically (no gaps, no collisions).
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS \`id_sequences\` (
+       \`scope\` VARCHAR(64) NOT NULL,
+       \`seq\` BIGINT UNSIGNED NOT NULL DEFAULT 0,
+       \`updated_at\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+       PRIMARY KEY (\`scope\`)
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+  );
+  // Backfill a UNIQUE facility_code for any facility that lacks one — derived from the name (first
+  // alphanumerics, uppercased, ≥2 chars), with a numeric suffix on collision. Deterministic, one-time.
+  try {
+    const [needCode] = await pool.query('SELECT id, name FROM facilities WHERE facility_code IS NULL OR facility_code = ""');
+    if (needCode.length) {
+      const [taken] = await pool.query('SELECT facility_code AS c FROM facilities WHERE facility_code IS NOT NULL AND facility_code <> ""');
+      const used = new Set(taken.map((r) => String(r.c).toUpperCase()));
+      for (const f of needCode) {
+        const alpha = String(f.name || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+        let base = (alpha.slice(0, 3) || `F${f.id}`).padEnd(2, 'X').slice(0, 8);
+        let code = base; let n = 1;
+        while (used.has(code)) { const suf = String(n++); code = (base.slice(0, Math.max(2, 8 - suf.length)) + suf); }
+        used.add(code);
+        await pool.query('UPDATE facilities SET facility_code = :c WHERE id = :id', { c: code, id: f.id });
+      }
+      logger.info({ facilities: needCode.length }, 'Backfilled facility_code');
+    }
+  } catch (err) { logger.warn({ err: err.message }, 'facility_code backfill skipped'); }
   // Per-facility feature switches (Super Admin controlled). Default ON so existing facilities keep working.
   await ensureColumn('facilities', 'coding_enabled', '`coding_enabled` TINYINT(1) NOT NULL DEFAULT 1 AFTER `status`');
   await ensureColumn('facilities', 'eligibility_enabled', '`eligibility_enabled` TINYINT(1) NOT NULL DEFAULT 1 AFTER `coding_enabled`');

@@ -7,6 +7,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { execute, withTransaction } from '../db/pool.js';
 import { decrypt } from '../utils/crypto.js';
+import { logger } from '../config/logger.js';
 import { providerPayscale } from './reportsService.js';
 import { findProviderIdByUuid } from './userService.js';
 
@@ -16,12 +17,13 @@ const todayUtc = () => new Date().toISOString().slice(0, 10);
 async function providersInScope({ from, to, providerUuid, facilityUuid }) {
   if (providerUuid) { const id = await findProviderIdByUuid(providerUuid); return id ? [id] : []; }
   const params = {};
+  const DOS = 'COALESCE(e.encounter_date, a.appt_date, DATE(e.created_at))'; // scope by DATE OF SERVICE
   const where = ["n.status = 'signed'"];
-  if (from) { where.push('n.signed_at >= :from'); params.from = from; }
-  if (to) { where.push('n.signed_at < :to'); params.to = to; }
+  if (from) { where.push(`${DOS} >= :from`); params.from = from; }
+  if (to) { where.push(`${DOS} < :to`); params.to = to; }
   let join = '';
   if (facilityUuid) { join = 'JOIN provider_facilities pf ON pf.provider_id = n.provider_id JOIN facilities f ON f.id = pf.facility_id'; where.push('f.uuid = :fuuid'); params.fuuid = facilityUuid; }
-  const [rows] = await execute(`SELECT DISTINCT n.provider_id AS id FROM encounter_notes n ${join} WHERE ${where.join(' AND ')}`, params);
+  const [rows] = await execute(`SELECT DISTINCT n.provider_id AS id FROM encounter_notes n JOIN encounters e ON e.id = n.encounter_id LEFT JOIN appointments a ON a.id = e.appointment_id ${join} WHERE ${where.join(' AND ')}`, params);
   return rows.map((r) => r.id);
 }
 
@@ -34,8 +36,13 @@ export async function finalizePeriod({ from, to, periodType = 'monthly', provide
   // is still open at signing time, so finalization captures the complete period exactly once.
   if (to > todayUtc()) { const e = new Error('Cannot finalize a pay period that has not yet ended.'); e.status = 400; e.code = 'PERIOD_NOT_ENDED'; throw e; }
   const ids = await providersInScope({ from, to, providerUuid, facilityUuid });
-  let finalized = 0, updated = 0, skipped = 0;
+  let finalized = 0, updated = 0, skipped = 0, failed = 0;
+  const failures = [];
   for (const pid of ids) {
+    // Each provider is finalized INDEPENDENTLY: a per-provider failure (e.g. a note already ledgered to
+    // another period → UNIQUE collision) rolls back only THAT provider's snapshot+ledger (atomic, no
+    // partial/double-pay) and is recorded — it never aborts finalizing the remaining providers in the batch.
+    try {
     const [[ex]] = [await execute('SELECT id, status FROM pay_period_snapshots WHERE provider_id = :pid AND period_from = :from AND period_to = :to LIMIT 1', { pid, from, to })];
     if (ex[0] && ex[0].status === 'finalized') { skipped++; continue; } // already locked — never silently overwrite
     // excludePaid:true → notes already paid in ANOTHER finalized period are not counted or re-ledgered here.
@@ -75,8 +82,12 @@ export async function finalizePeriod({ from, to, periodType = 'monthly', provide
       }
     });
     if (ex[0]) updated++; else finalized++;
+    } catch (e) {
+      failed++; failures.push({ providerId: pid, code: e.code || null, error: e.message });
+      logger.warn({ providerId: pid, from, to, err: e.message }, 'finalizePeriod: provider skipped due to error (batch continues)');
+    }
   }
-  return { from, to, periodType, providers: ids.length, finalized, updated, skipped };
+  return { from, to, periodType, providers: ids.length, finalized, updated, skipped, failed, failures };
 }
 
 /** The finalized snapshot for one provider+period (or null). Used by reporting to serve locked pay. */

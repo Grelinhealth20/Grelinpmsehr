@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
+import { Fragment, useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import Modal from './Modal.jsx';
 import { useToast } from './Toast.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
@@ -48,6 +48,17 @@ export async function loadNoteDefs() {
     .catch((e) => { NOTE_DEFS_PROMISE = null; throw e; }); // clear so a later call can retry
   return NOTE_DEFS_PROMISE;
 }
+// True when the note has any documented clinical narrative (excludes the billing/attestation scaffolding)
+// — used to skip the coding-engine round-trip on an empty/blank note so opening a template is instant.
+function hasClinicalContent(content) {
+  const secs = content?.sections || {};
+  for (const [k, v] of Object.entries(secs)) {
+    if (/billing|attest|signature/i.test(k)) continue;
+    if (typeof v === 'string' && v.replace(/\s+/g, '').length >= 3) return true;
+  }
+  return false;
+}
+
 // Session cache for the provider's custom templates — so reopening the notes editor is INSTANT (no
 // refetch, no flicker). A single in-flight promise coalesces concurrent callers.
 let CUSTOM_TPL_CACHE = null; // Template[]
@@ -260,6 +271,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   const [detail, setDetail] = useState(null); // authoritative encounter-header details (fetched)
   const skipSave = useRef(true); // skip the save that a fresh load/open would trigger
   const createToken = useRef(0); // guards the async Rx merge to the LATEST note created
+  const repredictRef = useRef(null); // debounce handle: re-run the coding engine after content is saved
   // Auto-save engine refs — persistence must never silently drop an edit.
   const contentRef = useRef(content); // always the LATEST content (avoids stale closures)
   const reasonRef = useRef(reason);
@@ -364,6 +376,10 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   // the note (the last good prediction is kept).
   const runBillingPrediction = useCallback(async () => {
     if (!active?.uuid) { setBilling(null); return null; }
+    // LATENCY: skip the ~2s coding-engine call entirely while the note has NO documented clinical content
+    // (a blank template predicts nothing anyway, so opening a new note is instant — no spinner/round-trip).
+    // Predictions kick in from the first documentation via the after-save re-prediction.
+    if (!hasClinicalContent(contentRef.current)) { setBilling(null); return null; }
     try {
       setBillingLoading(true);
       const { data } = await encountersApi.predictCodes(active.uuid);
@@ -373,12 +389,14 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
     finally { setBillingLoading(false); }
   }, [active?.uuid]);
 
-  // ON OPEN: predict once per opened note. Keyed on the note UUID ONLY, so it never re-runs while the
-  // provider edits — no mid-edit triggering. Stale codes from the previously-open note are cleared first.
+  // Billing codes are predicted ONLY when the provider FINISHES the note — i.e. at Sign & Finalize (see
+  // sign()), and shown on an already-SIGNED note when reopened. A DRAFT that is being written is NEVER
+  // predicted (no codes on a blank or in-progress note, no mid-edit triggering). Clear any stale codes on
+  // open; only re-show them for a finished (signed) note.
   useEffect(() => {
     if (!active?.uuid) { setBilling(null); return; }
     setBilling(null);
-    runBillingPrediction();
+    if (active.status === 'signed') runBillingPrediction();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active?.uuid]);
 
@@ -519,6 +537,8 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
       savingRef.current = false;
       if (dirtyRef.current) { dirtyRef.current = false; return flushSave(); } // edits arrived mid-save
       setAutoState('saved');
+      // NO mid-edit billing prediction. The coding engine runs ONLY when the note is finished (at Sign &
+      // Finalize) — never in between while the provider is still documenting.
       return true;
     } catch {
       savingRef.current = false;
@@ -1056,14 +1076,15 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
                                 : (!(content.checks?.[s.key] || []).length && <span className="pf-muted">—</span>)}
                             </div>
                           ) : s.key === 'prescriptionOrders' ? (
-                            // Medication assist INTEGRATED into the free-form order field itself (no separate
-                            // search box): RxNorm suggestions appear inline as the provider types a drug;
-                            // picking one standardizes the name inline AND auto-loads a structured, RxCUI-coded
-                            // prescription to the Prescriptions tab + runs the live safety check. If RxNorm has
-                            // no match, "use as typed" adds it manually (no RxCUI) — the provider is never blocked.
+                            // MEDICATIONS / PRESCRIPTION ORDERS — a FREE-FORM field the provider writes in their
+                            // own format, WITH RxNorm autocomplete assist rendered as an INLINE suggestion strip
+                            // (in normal flow — it pushes the sections below down, never a floating dropdown that
+                            // overlaps them). Picking a suggestion standardizes the name, loads a structured RxCUI
+                            // prescription to the Prescriptions tab, and runs the allergy/interaction safety check.
                             <RxFreeText
-                              id={`sec-${s.key}`} rows={s.rows >= 4 ? 4 : 2}
-                              value={content.sections[s.key] || ''} placeholder={s.prompt}
+                              id={`sec-${s.key}`} rows={s.rows >= 4 ? 4 : 4}
+                              value={content.sections[s.key] || ''}
+                              placeholder={s.prompt || 'Medications (free-form) — start typing a drug name for suggestions, e.g. donepezil 10 mg'}
                               onChange={(v) => setSection(s.key, v)}
                               allergies={content.sections?.allergies || ''}
                               currentDrugs={(content.prescriptions || []).map((p) => `${p.drug || ''} ${p.dose || ''}`.trim()).filter(Boolean)}
@@ -1490,19 +1511,24 @@ function RxFreeText({ value, onChange, onDrug, allergies, currentDrugs, toast, p
         onBlur={() => setTimeout(() => setOpen(false), 180)}
       />
       {open && searchTerm.length >= 3 && !busy && (
-        <div className="rxa-menu rxft-menu">
-          {suggest.map((r) => (
-            <button type="button" key={r.code} className="rxa-opt" onMouseDown={(e) => { e.preventDefault(); pick(r); }}>
-              <span className="rxa-opt-n">{r.name}</span>
-              <span className="rxa-opt-t">{r.tty || 'RXNORM'} · RxCUI {r.code}</span>
-            </button>
-          ))}
-          {!suggest.some((r) => r.name.toLowerCase() === searchTerm.toLowerCase()) && (
-            <button type="button" className="rxa-opt rxa-manual" onMouseDown={(e) => { e.preventDefault(); pick({ name: searchTerm, code: '', tty: 'MANUAL' }); }}>
-              <span className="rxa-opt-n">+ Use “{searchTerm}” as typed</span>
-              <span className="rxa-opt-t">{suggest.length ? 'Not listed? Enter manually' : 'No RxNorm match'} · manual (no RxCUI)</span>
-            </button>
-          )}
+        // INLINE suggestion strip — rendered in normal flow (NOT an absolute dropdown), so it expands the
+        // section and pushes the ones below down instead of overlapping them. Click a suggestion to insert.
+        <div className="rxft-suggest">
+          <span className="rxft-suggest-lbl">Suggestions for “{searchTerm}”</span>
+          <div className="rxft-suggest-list">
+            {suggest.map((r) => (
+              <button type="button" key={r.code} className="rxft-chip" title={`${r.tty || 'RXNORM'} · RxCUI ${r.code}`} onMouseDown={(e) => { e.preventDefault(); pick(r); }}>
+                <span className="rxft-chip-n">{r.name}</span>
+                <span className="rxft-chip-t">RxCUI {r.code}</span>
+              </button>
+            ))}
+            {!suggest.some((r) => r.name.toLowerCase() === searchTerm.toLowerCase()) && (
+              <button type="button" className="rxft-chip rxft-chip-manual" onMouseDown={(e) => { e.preventDefault(); pick({ name: searchTerm, code: '', tty: 'MANUAL' }); }}>
+                <span className="rxft-chip-n">+ Use “{searchTerm}” as typed</span>
+                <span className="rxft-chip-t">{suggest.length ? 'manual' : 'no RxNorm match'}</span>
+              </button>
+            )}
+          </div>
         </div>
       )}
       {safety && <RxSafetyPanel safety={safety} checking={checking} onClose={() => setSafety(null)} />}
@@ -1521,7 +1547,7 @@ function RxSafetyPanel({ safety, checking, onClose }) {
     return (
       <div className="rxs rxs-load">
         <span className="spinner sm" aria-hidden="true" />
-        <span>Checking {safety.drug} — allergies, drug class, duplicates…</span>
+        <span>Checking {safety.drug} — allergies and duplicate therapy…</span>
       </div>
     );
   }
@@ -1536,7 +1562,7 @@ function RxSafetyPanel({ safety, checking, onClose }) {
     <div className={`rxs ${allergy.length ? 'rxs-danger' : (dup.length || classUnknown) ? 'rxs-warn' : 'rxs-ok'}`}>
       <div className="rxs-head">
         <span className="rxs-title">
-          {allergy.length ? '⚠ Safety alert' : classUnknown ? 'Class not on file' : dup.length ? 'Review before prescribing' : 'Safety check'} · {safety.drug}
+          {allergy.length ? '⚠ Allergy alert' : classUnknown ? 'Screening limited' : dup.length ? 'Review before prescribing' : 'Safety check'} · {safety.drug}
         </span>
         <button type="button" className="rxs-x" onClick={onClose} aria-label="Dismiss safety panel">×</button>
       </div>
@@ -1556,8 +1582,8 @@ function RxSafetyPanel({ safety, checking, onClose }) {
 
       {classUnknown && (
         <div className="rxs-block rxs-b-warn">
-          <div className="rxs-b-lbl">Not screened</div>
-          <ul><li>No drug class is on file for this ingredient, so <strong>class-based allergy and duplicate screening could not be applied</strong>. Verify allergies manually before prescribing.</li></ul>
+          <div className="rxs-b-lbl">Screening limited</div>
+          <ul><li>Checked against the patient’s documented allergies by name — no direct match. Broader drug-class cross-reactivity and duplicate-therapy screening isn’t available for this medication, so <strong>verify any class allergies manually</strong> before prescribing.</li></ul>
         </div>
       )}
 
@@ -1575,7 +1601,6 @@ function RxSafetyPanel({ safety, checking, onClose }) {
       )}
 
       {clear && <div className="rxs-clear">No documented-allergy or duplicate-therapy conflict for this medication.</div>}
-      <div className="rxs-src">Source: {safety.source || 'WHO ATC drug classification (local)'}</div>
     </div>
   );
 }
@@ -1603,33 +1628,30 @@ function BillingSection({ value, onChange, readOnly, billing, loading }) {
     <div className="pf-sec pf-billing">
       <div className="pf-sec-h">
         <span className="pf-sec-hl"><span className="pf-sec-tick" aria-hidden="true" /><span className="pf-sec-t">Billing</span></span>
-        <span className="pf-billing-src">Coding engine · CMS-validated{loading ? <span className="spinner dark pf-billing-spin" /> : null}</span>
+        <span className="pf-billing-src">CMS-validated{loading ? <span className="spinner dark pf-billing-spin" /> : null}</span>
       </div>
       {readOnly
         ? ((value || '').trim() ? <div className="pf-body">{value.split('\n').map((ln, li) => <p key={li}>{ln || ' '}</p>)}</div> : null)
-        : <AutoText id="sec-billing" rows={2} value={value} placeholder="Billing notes (free-form) — the predicted codes below are advisory suggestions from the coding engine." onChange={onChange} />}
+        : <AutoText id="sec-billing" rows={2} value={value} placeholder="Billing notes (free-form). Suggested codes appear here when you Sign & Finalize." onChange={onChange} />}
       <div className="pf-billing-pred">
-        <div className="pf-bill-grp">
-          <div className="pf-bill-lbl">Predicted diagnoses — ICD-10-CM</div>
-          {dx.length ? dx.map((d, i) => (
-            <div className="pf-bill-row" key={`${d.icd}-${i}`}>
-              <span className="pf-bill-code">{d.icd}</span>
-              {d.primary ? <span className="pf-bill-primary">Primary</span> : null}
-              <span className="pf-bill-desc">{d.description || '—'}</span>
-              {d.snomedCode ? <span className="pf-bill-snomed">SNOMED CT {d.snomedCode}</span> : null}
-            </div>
-          )) : <div className="pf-bill-empty">No diagnoses predicted yet — document the assessment.</div>}
-        </div>
-        <div className="pf-bill-grp">
-          <div className="pf-bill-lbl">Predicted procedures — CPT / HCPCS</div>
-          {px.length ? px.map((p, i) => (
-            <div className="pf-bill-row" key={`${p.cpt}-${i}`}>
-              <span className="pf-bill-code">{p.cpt}</span>
-              {mods(p.modifiers) ? <span className="pf-bill-mod">Mod {mods(p.modifiers)}</span> : null}
-              {p.units > 1 ? <span className="pf-bill-units">×{p.units}</span> : null}
-            </div>
-          )) : <div className="pf-bill-empty">No procedures predicted.</div>}
-        </div>
+        {/* Predicted codes shown INLINE within the billing section (no separate labeled boxes). Purely
+            DYNAMIC: nothing appears on a blank note — codes surface only from what is documented, and refresh
+            after each save. CPT/HCPCS + ICD-10-CM as chips; hover a diagnosis for its description. */}
+        {(px.length || dx.length) ? (
+          <div className="pf-bill-inline">
+            {px.map((p, i) => (
+              <span className="pf-code-chip proc" key={`p-${p.cpt}-${i}`} title={p.description || ''}>
+                {p.cpt}{mods(p.modifiers) ? `-${mods(p.modifiers)}` : ''}{p.units > 1 ? ` ×${p.units}` : ''}
+              </span>
+            ))}
+            {dx.map((d, i) => (
+              <span className={`pf-code-chip dx${d.primary ? ' primary' : ''}`} key={`d-${d.icd}-${i}`} title={d.description || ''}>
+                {d.icd}{d.primary ? ' • primary' : ''}
+              </span>
+            ))}
+            <span className="pf-code-hint">Suggested from your documentation — verify before billing</span>
+          </div>
+        ) : (!loading ? <div className="pf-bill-empty">Suggested billing codes are generated from your completed note when you Sign &amp; Finalize.</div> : null)}
         {(() => {
           // denialSummary is a COUNT object { errors, warnings, info } — never render it directly (that
           // throws "Objects are not valid as a React child"). Surface only actionable error/warning

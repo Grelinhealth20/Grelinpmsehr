@@ -4,7 +4,7 @@ import { useToast } from '../../components/Toast.jsx';
 import { useAuth } from '../../context/AuthContext.jsx';
 import { facilitiesApi, usersApi, toApiError } from '../../lib/api.js';
 
-const BLANK = { npi: '', name: '', address: '', city: '', state: '', zip: '', phone: '', fax: '', taxonomy: '', taxonomyCode: '', taxId: '', authorizedOfficial: '', enumerationDate: '', mailingAddress: '', nppesStatus: '', logo: '' };
+const BLANK = { npi: '', name: '', facilityCode: '', address: '', city: '', state: '', zip: '', phone: '', fax: '', taxonomy: '', taxonomyCode: '', taxId: '', authorizedOfficial: '', enumerationDate: '', mailingAddress: '', nppesStatus: '', logo: '' };
 const initials = (n = '') => n.split(' ').filter(Boolean).slice(0, 2).map((w) => w[0]?.toUpperCase()).join('') || '·';
 
 /**
@@ -273,6 +273,7 @@ export default function FacilityModal({ facility = null, onClose, onSaved }) {
             </div>
             <div className="fac-grid">
               <Fld label="Facility name" v={form.name} on={(v) => setF('name', v)} wide />
+              <Fld label="Facility Code (MRN / Encounter ID prefix)" v={form.facilityCode} on={(v) => setF('facilityCode', v.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8))} hint="2–8 letters/numbers. Used as the prefix for this facility’s MRNs and Encounter IDs. Auto-generated from the name if left blank." />
               <Fld label="NPI" v={form.npi} on={(v) => setF('npi', v)} />
               <Fld label="Tax ID (EIN)" v={form.taxId} on={(v) => setF('taxId', v)} />
               <Fld label="Taxonomy" v={form.taxonomy} on={(v) => setF('taxonomy', v)} wide />
@@ -380,11 +381,12 @@ export default function FacilityModal({ facility = null, onClose, onSaved }) {
   );
 }
 
-function Fld({ label, v, on, wide }) {
+function Fld({ label, v, on, wide, hint }) {
   return (
     <div className={`fac-fld ${wide ? 'fac-fld-wide' : ''}`}>
       <label>{label}</label>
       <input className="input" value={v || ''} onChange={(e) => on(e.target.value)} />
+      {hint ? <span className="fac-fld-hint">{hint}</span> : null}
     </div>
   );
 }

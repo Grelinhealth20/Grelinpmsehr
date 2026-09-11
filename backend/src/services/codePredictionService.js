@@ -638,6 +638,20 @@ function mdmProxyLevel(content = {}, problemCount = 0, fam) {
   return { idx: 1, basis: `MDM proxy — ${problemCount} stable chronic problem${problemCount === 1 ? '' : 's'}, no acuity documented (low, ${setLabel}) — coder confirms` };
 }
 
+/**
+ * Total length of the DOCUMENTED clinical narrative (non-whitespace), across every clinical section —
+ * excluding the billing / attestation / signature scaffolding. Used to tell a BLANK note (nothing written)
+ * from a documented one, so the E/M level is only ever predicted from real documentation.
+ */
+function clinicalTextLength(content = {}) {
+  let n = 0;
+  for (const [k, v] of Object.entries(content || {})) {
+    if (/billing|attest|signature|signed/i.test(k)) continue; // not clinical documentation
+    if (typeof v === 'string') n += v.replace(/\s+/g, '').length;
+  }
+  return n;
+}
+
 export function predictEM(content = {}, noteType = 'hp', problemCount = 0, posHint) {
   // Advance Care Planning is its OWN time-based service — CPT 99497 (first 30 min, face-to-face) plus
   // +99498 for each additional 30 min — NOT a subsequent-visit E/M. Per CMS: 99497 is reportable once
@@ -655,6 +669,14 @@ export function predictEM(content = {}, noteType = 'hp', problemCount = 0, posHi
   // Note types with no E/M family (telehealth attestation) get NO auto E/M code — a telehealth note is an
   // addendum to a visit (POS 02/10 + modifier 95), not a standalone charge. Return an explicit "no charge".
   if (!fam) return { cpt: null, description: null, units: 1, modifiers: '', basis: 'No standalone E/M charge auto-suggested for this note type — assign the appropriate code(s) (e.g. procedure, order, or letter) in the coding panel; the live scrub validates before signing.', confirm: true, addOn: null };
+  // BLANK / undocumented note → predict NO E/M code. The level is derived from the documented content
+  // (total time and/or medical decision-making); with nothing written there is no basis, so inventing the
+  // low default (e.g. 99308) would be a static, unsupported code. This mirrors diagnosis prediction, which
+  // also yields nothing on an empty note. The E/M appears once the visit is documented and rises with
+  // documented acuity/time — fully dynamic, never a fixed code on a blank template.
+  if (documentedMinutes(content) == null && problemCount === 0 && clinicalTextLength(content) < 12) {
+    return { cpt: null, description: fam.label, units: 1, modifiers: '', basis: 'Document the visit — the E/M level is predicted from the note (medical decision-making and/or total time).', confirm: true, addOn: null };
+  }
   const minutes = documentedMinutes(content);
   let idx = 0; let basis; let confirm = false;
   if (fam.kind === 'discharge') {

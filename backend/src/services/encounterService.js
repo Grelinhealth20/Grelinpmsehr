@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { execute } from '../db/pool.js';
 import { decrypt, blindIndex } from '../utils/crypto.js';
 import { viewerScope, patientScopeWhere, isFacilityWide, noteServiceLineWhere } from './accessScope.js';
+import { nextSequence, facilityCodeFor } from './idSequenceService.js';
 
 /**
  * Encounter worklist. Each of a provider's appointments is presented as an
@@ -26,14 +27,15 @@ const pad2 = (n) => String(n).padStart(2, '0');
  */
 async function nextEncounterNo(patientId) {
   if (!patientId) return null;
-  const [m] = await execute(
-    // Clean multi-digit per-patient visit number: starts at 1001, increments by 1,
-    // no leading zeros, always numeric and ≤5 characters (1001, 1002, 1003 …).
-    `SELECT GREATEST(COALESCE(MAX(CAST(encounter_no AS UNSIGNED)), 0) + 1, 1001) AS nxt
-       FROM encounters WHERE patient_id = :pid`,
-    { pid: patientId },
-  );
-  return String(m[0].nxt);
+  // FACILITY-SPECIFIC Encounter ID: <CODE>-YYYY-NNNNNN — the patient's facility code, the current UTC
+  // year, and a 6-digit sequence unique PER FACILITY PER YEAR (atomic id_sequences counter → clean,
+  // aligned, collision-free). NO fallback: a patient with no facility (or a facility with no code) throws.
+  const [rows] = await execute('SELECT facility_id FROM patients WHERE id = :id LIMIT 1', { id: patientId });
+  const facilityId = rows[0]?.facility_id;
+  const code = await facilityCodeFor(facilityId);
+  const year = new Date().getUTCFullYear();
+  const seq = await nextSequence(`enc:${facilityId}:${year}`);
+  return `${code}-${year}-${String(seq).padStart(6, '0')}`;
 }
 
 const isDupKey = (e) => e && (e.errno === 1062 || e.code === 'ER_DUP_ENTRY');

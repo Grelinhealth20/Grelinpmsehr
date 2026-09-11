@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { usDate } from '../../lib/dates.js';
 import { auditApi, toApiError } from '../../lib/api.js';
 import { NOTE_TYPES } from '../../lib/noteTemplates.js';
 import { useToast } from '../../components/Toast.jsx';
@@ -139,7 +140,7 @@ function fmtRel(t) {
     const m = Math.round(s / 60); if (m < 60) return `${m} min ago`;
     const h = Math.round(m / 60); if (h < 24) return `${h} hr ago`;
     const days = Math.round(h / 24); if (days < 7) return `${days} day${days === 1 ? '' : 's'} ago`;
-    return new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    return usDate(t); // older than a week → mm/dd/yyyy
   } catch { return ''; }
 }
 const csvEscape = (v) => { const s = String(v ?? ''); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };

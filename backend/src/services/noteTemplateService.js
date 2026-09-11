@@ -91,40 +91,36 @@ const sec = (key, label, prompt = '', rows = 3, checks = null, group = null) => 
 export const NOTE_TYPE_TEMPLATES = [
   {
     noteType: 'hp', label: 'H&P', category: 'SNF Admission H&P · Physician E/M (Part B)',
+    // Simplified, provider-focused SNF Admission H&P (13 sections): the clinical + E/M + order essentials.
+    // Code status folds into Chief Complaint, social/functional baseline into HPI & Exam; Family History and
+    // the IDT Care Plan Review (nursing/MDS) are removed — nothing billing- or medico-legally required is lost.
     sections: [
-      sec('chiefComplaint', 'Chief Complaint', 'One line — the problem you are evaluating at this initial visit (e.g. post-hospital hypoxia, uncontrolled diabetes, delirium).', 2),
-      sec('codeStatus', 'Code Status', 'Full code / DNR / DNR-DNI / comfort care; who it was discussed with; healthcare proxy if known.', 2),
-      sec('hospitalCourse', 'HPI', 'History of present illness / hospital course — why the patient went to the hospital, what was found and done (procedures with dates), complications, medication changes, and how they were on arrival; end with what is still active or unresolved.', 4),
-      sec('medications', 'Medications & Allergies', 'Current medication list reviewed and reconciled; any change you made today and why; drugs needing lab monitoring; antibiotic/antifungal end dates; allergies with reaction.', 3),
-      sec('pmh', 'Past Medical History', 'Conditions and surgeries with dates where they matter; devices present — pacemaker, stents, catheter, PEG, prosthetic joints.', 3),
-      sec('socialHistory', 'Social History', 'Where and with whom the patient lived and how they got around before the hospital (independent, cane, walker, ADL help); tobacco, alcohol; family contact.', 3),
-      sec('familyHistory', 'Family History', 'What was asked and answered; if the patient cannot answer, say so and who you asked.', 2),
+      sec('chiefComplaint', 'Chief Complaint', 'One line — the problem you are evaluating at this initial visit (e.g. post-hospital hypoxia, uncontrolled diabetes, delirium). Note code status (Full / DNR / DNR-DNI / comfort).', 2),
+      sec('hospitalCourse', 'HPI / Hospital Course', 'Why the patient went to the hospital, what was found and done (procedures with dates), complications, medication changes, and how they were on arrival; one line on the pre-hospital living / functional baseline; end with what is still active or unresolved.', 4),
+      sec('medications', 'Medications & Allergies', 'Current medication list reviewed and reconciled; any change you made today and why; drugs needing lab monitoring; antibiotic end dates; allergies with reaction.', 3),
+      sec('pmh', 'Past Medical & Surgical History', 'Conditions and surgeries with dates where they matter; devices present — pacemaker, stents, catheter, PEG, prosthetic joints.', 3),
       sec('ros', 'Review of Systems', 'Positives for this patient first, then “remaining systems negative”; if the patient cannot answer, name who gave the history.', 3),
-      sec('exam', 'Physical Examination', 'Findings by system; every wound with site, side, stage, size, drainage, and whether present on admission; lines and tubes; a clear statement of orientation and mental status.', 4),
-      sec('functionalStatus', 'Function & Cognition', 'Orientation or a cognitive screen; current mobility and ADLs; swallow/diet; fall risk.', 3),
-      sec('results', 'Labs & Imaging', 'Hospital discharge summary reviewed (date); each lab and image with date and result that matters today; what you ordered and when.', 3),
+      sec('exam', 'Physical Examination', 'Findings by system; every wound with site, side, stage, size, drainage, and whether present on admission; lines and tubes; orientation, mental status, and current mobility / ADLs / swallow.', 4),
+      sec('results', 'Labs & Imaging', 'Hospital discharge summary reviewed (date); each lab and image with date and the result that matters today; what you ordered and when.', 3),
       sec('assessment', 'Assessment & Plan', 'One paragraph per problem, most important first — full diagnosis, status (new/improving/stable/worsening), cause, and the plan (meds, monitoring, consults, return-to-hospital criteria). Name the intervention rather than “continue current care”.', 4),
-      sec('carePlanReview', 'Care Plan Review', 'Interdisciplinary care plan established/reviewed — measurable goals & target dates, interventions, progress toward goals, and revisions ordered; coordination with nursing, therapy, dietary, and social services.', 3),
-      sec('prescriptionOrders', 'Medications / Prescription Orders', 'Medications ordered at this visit — start / change / discontinue, with drug, dose, route, frequency, duration, and the clinical reason; controlled-substance and monitoring notes. Free text (scripts sent to the pharmacy are managed on the Prescriptions tab).', 3),
+      sec('prescriptionOrders', 'Medications / Prescription Orders', 'Medications ordered at this visit — start / change / discontinue, with drug, dose, route, frequency, duration, and the clinical reason. Free text (scripts sent to the pharmacy are managed on the Prescriptions tab).', 3),
       sec('labOrders', 'Lab Orders', 'Laboratory tests ordered at this visit — panel / test name, priority (routine / STAT), and the clinical indication. Attach resulted lab reports for this encounter below.', 2),
       sec('imagingOrders', 'Imaging Orders', 'Imaging ordered at this visit — study, body region, contrast, priority, and the clinical indication. Attach imaging reports / films for this encounter below.', 2),
-      sec('timeSpent', 'Time / Complexity', 'Total time today (including record review, exam, med reconciliation, orders, and discussion) or one line on why the admission was complex.', 2),
-      sec('attestation', 'Attestation & Signature', '“I personally performed this initial comprehensive visit in its entirety on the date of service.” (The initial SNF visit is physician-performed — not a split/shared service.) Add your credentials (MD/DO) and NPI. Your electronic signature and date are captured automatically.', 2),
+      sec('timeSpent', 'Time / Complexity', 'Total time today (record review, exam, med reconciliation, orders, discussion) or one line on why the admission was complex — for the E/M level.', 2),
+      sec('attestation', 'Attestation & Signature', '“I personally performed this initial comprehensive visit in its entirety on the date of service.” Add your credentials (MD/DO) and NPI. Your electronic signature and date are captured automatically.', 2),
     ],
   },
   {
     noteType: 'soap', label: 'SOAP Note', category: 'SNF Follow-Up (SOAP) · Physician E/M (Part B)',
+    // Simplified, provider-focused SNF Follow-Up SOAP (11 sections). A follow-up on an established patient:
+    // code status folds into Chief Complaint, allergies into Medications & Allergies; the standalone
+    // PMH / PSH / Family History ("reviewed in EMR") are removed — the admission H&P holds the full history.
     sections: [
-      sec('chiefComplaint', 'Chief Complaint', 'The conditions you came to manage today — name them; not “routine visit”.', 2),
-      sec('codeStatus', 'Code Status', 'Full code / DNR / DNR-DNI / DNH / comfort care; who it was discussed with; healthcare proxy if known.', 2),
+      sec('chiefComplaint', 'Chief Complaint', 'The conditions you came to manage today — name them; not “routine visit”. Note code status (Full / DNR / DNR-DNI / DNH / comfort).', 2),
       sec('hpi', 'HPI', 'History of present illness — the story of today’s problem(s): onset and what changed since the last visit, response to treatment, associated symptoms, intake/weight trend, falls; who gave the history if not the patient.', 4),
-      sec('allergies', 'Allergy', 'Drug / food / environmental allergies with reaction and severity, or NKDA — or reviewed in EMR.', 2),
-      sec('medications', 'Home Medications', 'Current home / facility medications reviewed and reconciled; drugs needing monitoring; psychotropic indication / dose-reduction — or reviewed in EMR.', 3),
-      sec('pmh', 'Past Medical History', 'Chronic conditions and past diagnoses (with ICD-10 where known) — or reviewed in EMR.', 2),
-      sec('psh', 'Past Surgical History', 'Prior surgeries with approximate dates — or reviewed in EMR.', 2),
-      sec('familyHistory', 'Family History', 'Relevant family history reviewed with the patient, or noncontributory / not obtainable (say why).', 2),
-      sec('ros', 'Review of Systems', 'Positives for this patient first, then the pertinent-negative statement (e.g. “11-point ROS negative except as above”); note if ROS is limited by the patient’s neurological condition.', 3),
-      sec('exam', 'Physical Examination', 'Vitals reviewed; General and by system (HEENT, Neck, Respiratory, Cardiovascular, GI, GU, Musculoskeletal, Skin, Neuro) — each wound with site / side / stage / size / drainage and whether present on admission; a clear statement of orientation and mental status.', 4),
+      sec('medications', 'Medications & Allergies', 'Current home / facility medications reviewed and reconciled; drugs needing monitoring; psychotropic indication / dose-reduction; allergies with reaction, or NKDA.', 3),
+      sec('ros', 'Review of Systems', 'Positives for this patient first, then the pertinent-negative statement (e.g. “11-point ROS negative except as above”); note if ROS is limited by the patient’s condition.', 3),
+      sec('exam', 'Physical Examination', 'Vitals reviewed; General and by system — each wound with site / side / stage / size / drainage and whether present on admission; a clear statement of orientation and mental status.', 4),
       sec('results', 'Labs / Imaging / Microbiology', 'Labs, imaging, and microbiology reviewed — each with date and the result that matters today, or reviewed in EMR.', 3),
       sec('assessment', 'Assessment & Plan', 'Numbered by problem, most important first — each the full diagnosis with status and cause, then the plan (meds started/stopped/changed and why, monitoring, consults, orders, return criteria); include stable chronic conditions you are managing, plus fall prevention and wound care, and the total time / MDM supporting the E/M level.', 4),
       sec('prescriptionOrders', 'Medications / Prescription Orders', 'Medications ordered at this visit — start / change / discontinue, with drug, dose, route, frequency, duration, and the clinical reason; controlled-substance and monitoring notes. Free text (scripts sent to the pharmacy are managed on the Prescriptions tab).', 3),

@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { execute, withTransaction } from '../db/pool.js';
 import { encrypt, decrypt, blindIndex } from '../utils/crypto.js';
 import { providerFacilityIds, providerPrimaryFacilityId } from './facilityService.js';
+import { nextSequence, facilityCodeFor } from './idSequenceService.js';
 
 /**
  * Patient records for the EHR face sheet. ALL demographics and insurance data is
@@ -102,20 +103,26 @@ export function luhnCheckDigit(digits) {
   return String((10 - (sum % 10)) % 10);
 }
 export function isValidMrn(mrn) {
-  const s = String(mrn || '');
-  if (!/^\d{8}$/.test(s)) return false;
-  return luhnCheckDigit(s.slice(0, 7)) === s[7];
+  const s = String(mrn || '').toUpperCase();
+  // Facility-specific format: CODE-NNNNNN-C (Luhn check over the 6-digit sequence).
+  const m = /^([A-Z0-9]{2,12})-(\d{6})-(\d)$/.exec(s);
+  if (m) return luhnCheckDigit(m[2]) === m[3];
+  // Backward-compatible: legacy 8-digit numeric + Luhn (records created before facility codes).
+  if (/^\d{8}$/.test(s)) return luhnCheckDigit(s.slice(0, 7)) === s[7];
+  return false;
 }
 
-// MRN format: 8-digit numeric = 7 random base digits + 1 Luhn check digit. Unique and
-// never reused. (MRN is a LOCAL identifier — no CMS/SNOMED format governs it; the check
-// digit is the real medical-records-grade integrity control, mirroring the NPI scheme.)
-async function generateMrn() {
-  for (let i = 0; i < 40; i += 1) {
-    const base = String(crypto.randomInt(1_000_000, 9_999_999)); // 7 digits, no leading zero
-    const mrn = base + luhnCheckDigit(base);
-    const [rows] = await execute(`SELECT id FROM patients WHERE mrn = :mrn LIMIT 1`, { mrn });
-    if (rows.length === 0) return mrn;
+// FACILITY-SPECIFIC MRN: <CODE>-NNNNNN-C — the facility's admin-set CODE, a 6-digit sequence unique
+// PER FACILITY (atomic id_sequences counter, clean/aligned/no gaps), and a Luhn check digit over the
+// sequence (medical-records-grade typo detection). NO fallback: a facility without a code throws.
+async function generateMrn(facilityId) {
+  const code = await facilityCodeFor(facilityId); // required — throws FACILITY_REQUIRED / FACILITY_CODE_MISSING
+  for (let i = 0; i < 6; i += 1) {
+    const seq = await nextSequence(`mrn:${facilityId}`);
+    const num = String(seq).padStart(6, '0');
+    const mrn = `${code}-${num}-${luhnCheckDigit(num)}`;
+    const [rows] = await execute('SELECT id FROM patients WHERE mrn = :mrn LIMIT 1', { mrn });
+    if (rows.length === 0) return mrn; // unique (sequence + unique code guarantee this; the check is a backstop)
   }
   throw new Error('Could not allocate a unique MRN.');
 }
@@ -172,16 +179,17 @@ export async function syncPatientNameTokensFromEnc(patientId, demographicsEnc) {
 
 export async function createPatient({ providerId, demographics, insurance, facility, emergencyContact, emergencyContacts, createdBy }) {
   const uuid = uuidv4();
-  const mrn = await generateMrn();
   const nameKey = `${demographics.lastName || ''} ${demographics.firstName || ''}`.trim().toLowerCase();
   const emg = emgValue(emergencyContacts, emergencyContact);
   // Billing facility is derived automatically (background) from the rendering provider's PRIMARY assigned
   // facility (active, deterministic — same resolver referrals use) — never entered on the UI. This links
   // the patient to a real facility for billing AND facility-scoped access, so a new patient is never
-  // stranded with a null facility (which would hide it from a facility-wide MD). Falls back to any assigned
-  // facility only if the provider somehow has assignments but none active.
+  // stranded with a null facility (which would hide it from a facility-wide MD).
   let facilityId = await providerPrimaryFacilityId(providerId);
   if (!facilityId) { const facIds = await providerFacilityIds(providerId); facilityId = facIds.length ? facIds[0] : null; }
+  // MRN is FACILITY-SPECIFIC, so it is allocated AFTER the facility is resolved. No fallback: if the
+  // provider has no facility (or the facility has no code), creation fails loudly with a clear message.
+  const mrn = await generateMrn(facilityId);
   const [ins] = await execute(
     `INSERT INTO patients (uuid, provider_id, facility_id, mrn, name_bidx, demographics_enc, insurance_enc, facility_enc, emergency_enc, created_by)
      VALUES (:uuid, :pid, :facilityId, :mrn, :nameBidx, :demoEnc, :insEnc, :facEnc, :emgEnc, :createdBy)`,

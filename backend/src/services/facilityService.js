@@ -5,6 +5,16 @@ import { logger } from '../config/logger.js';
 import { normalizeState, extractStateFromText } from './payerDirectoryService.js';
 import { s3Enabled, uploadFacilityLogo, getObjectBytes, deleteObject, facilityPrefix, deleteByPrefix } from './s3Service.js';
 import { recordAudit, backfillAuditChain } from './auditService.js';
+import { proposeFacilityCode, facilityCodesInUse } from './idSequenceService.js';
+
+/** Normalize an admin-entered facility code to the stored form: uppercase alphanumeric, 2–8 chars. Returns
+ *  null for empty; throws a 422 for an invalid non-empty value (no silent coercion). */
+function normalizeFacilityCode(v) {
+  if (v == null || String(v).trim() === '') return null;
+  const c = String(v).toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (c.length < 2 || c.length > 8) { const e = new Error('Facility Code must be 2–8 letters/numbers.'); e.status = 422; e.code = 'BAD_FACILITY_CODE'; throw e; }
+  return c;
+}
 
 // Decode a data:image/...;base64 URI → { buffer, contentType, ext } (null if not one).
 const EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg' };
@@ -45,7 +55,7 @@ async function inlineLogo(facility, rawKey) {
  * scoped through them to strictly prevent cross-facility data sharing.
  */
 
-const FAC_COLS = `f.uuid, f.npi, f.name, f.address, f.city, f.state, f.zip, f.phone, f.fax,
+const FAC_COLS = `f.uuid, f.npi, f.name, f.facility_code, f.address, f.city, f.state, f.zip, f.phone, f.fax,
   f.taxonomy, f.taxonomy_code, f.tax_id, f.authorized_official, f.enumeration_date, f.mailing_address,
   f.nppes_status, f.logo, f.status, f.coding_enabled, f.eligibility_enabled, f.fax_auto_create_patients, f.source,
   DATE_FORMAT(f.created_at, '%Y-%m-%dT%H:%i:%sZ') AS created_at`;
@@ -55,7 +65,7 @@ const boolFlag = (v) => v == null ? true : !!Number(v); // per-facility flags de
 // that display it set it to an inline data URI (inlineLogo) or a hasLogo flag.
 function toFacility(r) {
   return {
-    uuid: r.uuid, npi: r.npi || null, name: r.name,
+    uuid: r.uuid, npi: r.npi || null, name: r.name, facilityCode: r.facility_code || null,
     address: r.address || null, city: r.city || null, state: r.state || null,
     zip: r.zip || null, phone: r.phone || null, fax: r.fax || null,
     taxonomy: r.taxonomy || null, taxonomyCode: r.taxonomy_code || null,
@@ -147,13 +157,19 @@ export async function createFacility(data, { adminId } = {}) {
   if (parsed && s3Enabled()) {
     try { logoKey = await uploadFacilityLogo({ facilityUuid: uuid, facilityName: data.name }, parsed.buffer, parsed.contentType, parsed.ext); } catch { logoKey = null; }
   }
+  // Facility CODE (the MRN / Encounter ID prefix): use the admin-provided code if valid + unique, else
+  // auto-derive a UNIQUE one from the name. Every facility ends up with a code — no fallback-less gap.
+  const taken = await facilityCodesInUse();
+  let facilityCode = normalizeFacilityCode(data.facilityCode);
+  if (facilityCode && taken.has(facilityCode)) { const e = new Error(`Facility Code "${facilityCode}" is already in use — choose another.`); e.status = 409; e.code = 'FACILITY_CODE_TAKEN'; throw e; }
+  if (!facilityCode) facilityCode = proposeFacilityCode(data.name, taken);
   await execute(
-    `INSERT INTO facilities (uuid, npi, name, address, city, state, zip, phone, fax, taxonomy, taxonomy_code,
+    `INSERT INTO facilities (uuid, npi, name, facility_code, address, city, state, zip, phone, fax, taxonomy, taxonomy_code,
         tax_id, authorized_official, enumeration_date, mailing_address, nppes_status, logo, status, source, verified_by, created_by)
-     VALUES (:uuid, :npi, :name, :address, :city, :state, :zip, :phone, :fax, :taxonomy, :taxonomyCode,
+     VALUES (:uuid, :npi, :name, :facilityCode, :address, :city, :state, :zip, :phone, :fax, :taxonomy, :taxonomyCode,
         :taxId, :authorizedOfficial, :enumerationDate, :mailingAddress, :nppesStatus, :logo, 'active', :source, :adminId, :adminId)`,
     {
-      uuid, npi: data.npi || null, name: data.name, address: data.address || null,
+      uuid, npi: data.npi || null, name: data.name, facilityCode, address: data.address || null,
       city: data.city || null, state: data.state || null, zip: data.zip || null,
       phone: data.phone || null, fax: data.fax || null,
       taxonomy: data.taxonomy || null, taxonomyCode: data.taxonomyCode || null, taxId: data.taxId || null,
@@ -175,6 +191,15 @@ export async function updateFacility(uuid, data) {
   }
   // Tax ID (EIN): the DTO key `taxId` maps to the `tax_id` column.
   if (data.taxId !== undefined) { sets.push('tax_id = :taxId'); params.taxId = data.taxId || null; }
+  // Facility CODE (MRN / Encounter ID prefix) — admin-editable, must stay unique and non-empty. Existing
+  // records keep the code they were issued under; only NEW identifiers use the changed code.
+  if (data.facilityCode !== undefined) {
+    const code = normalizeFacilityCode(data.facilityCode);
+    if (!code) { const e = new Error('Facility Code cannot be empty.'); e.status = 422; e.code = 'BAD_FACILITY_CODE'; throw e; }
+    const [others] = await execute('SELECT id FROM facilities WHERE facility_code = :c AND uuid <> :uuid LIMIT 1', { c: code, uuid });
+    if (others[0]) { const e = new Error(`Facility Code "${code}" is already in use — choose another.`); e.status = 409; e.code = 'FACILITY_CODE_TAKEN'; throw e; }
+    sets.push('facility_code = :facilityCode'); params.facilityCode = code;
+  }
   // Full NPPES (NPI-2) details — DTO camelCase → snake_case columns.
   if (data.taxonomyCode !== undefined) { sets.push('taxonomy_code = :taxonomyCode'); params.taxonomyCode = data.taxonomyCode || null; }
   if (data.authorizedOfficial !== undefined) { sets.push('authorized_official = :authorizedOfficial'); params.authorizedOfficial = data.authorizedOfficial || null; }

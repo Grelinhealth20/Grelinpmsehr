@@ -53,17 +53,20 @@ export async function providerSummary(providerId, { from = null, to = null } = {
       WHERE ${encWhere.join(' AND ')}`, encParams);
   const enc = encRows[0] || {};
 
+  // Notes are counted by the SAME DATE OF SERVICE window as encounters (join the encounter for its DOS), so
+  // every card on the summary uses one consistent period definition — no created_at vs DOS mismatch.
   const nParams = { pid: providerId };
   const nWhere = ['n.provider_id = :pid'];
-  if (from) { nWhere.push('n.created_at >= :from'); nParams.from = from; }
-  if (to) { nWhere.push('n.created_at < :to'); nParams.to = to; }
+  if (from) { nWhere.push(`${encDate} >= :from`); nParams.from = from; }
+  if (to) { nWhere.push(`${encDate} < :to`); nParams.to = to; }
+  const nFrom = 'FROM encounter_notes n JOIN encounters e ON e.id = n.encounter_id LEFT JOIN appointments a ON a.id = e.appointment_id';
   const [nRows] = await execute(
     `SELECT SUM(n.status = 'signed') AS signed_notes, SUM(n.status = 'draft') AS unsigned_notes, COUNT(*) AS total_notes
-       FROM encounter_notes n WHERE ${nWhere.join(' AND ')}`, nParams);
+       ${nFrom} WHERE ${nWhere.join(' AND ')}`, nParams);
   const notes = nRows[0] || {};
   const [types] = await execute(
     `SELECT n.note_type AS type, COUNT(*) AS cnt, SUM(n.status = 'signed') AS signed
-       FROM encounter_notes n WHERE ${nWhere.join(' AND ')} GROUP BY n.note_type ORDER BY cnt DESC`, nParams);
+       ${nFrom} WHERE ${nWhere.join(' AND ')} GROUP BY n.note_type ORDER BY cnt DESC`, nParams);
 
   return {
     totalEncounters: Number(enc.total_encounters) || 0,
@@ -84,9 +87,13 @@ export async function providerPayscale(providerId, { from = null, to = null, cre
   const locality = localityFor(localityCode);
   const gpci = locality.gpci;
   const params = { pid: providerId, year: RVU_YEAR };
+  // Pay is based on the DATE OF SERVICE (DOS) — the day the visit was rendered — NOT when the note was
+  // signed. DOS = encounter_date, else the appointment date, else the encounter's creation date. Only
+  // SIGNED work is payable, but the PERIOD a charge falls into is its DOS.
+  const DOS = 'COALESCE(e.encounter_date, a.appt_date, DATE(e.created_at))';
   const where = ['n.provider_id = :pid', "n.status = 'signed'", "c.kind = 'proc'"];
-  if (from) { where.push('n.signed_at >= :from'); params.from = from; }
-  if (to) { where.push('n.signed_at < :to'); params.to = to; }
+  if (from) { where.push(`${DOS} >= :from`); params.from = from; }
+  if (to) { where.push(`${DOS} < :to`); params.to = to; }
   // Anti-join the paid-note ledger: a note already PAID in a finalized period is never counted again, so
   // already-paid RVUs can never appear on a later paycheck (structural no-double-pay). finalizePeriod calls
   // with excludePaid:false only to see the raw period, but the ledger insert itself enforces pay-once.
@@ -109,6 +116,8 @@ export async function providerPayscale(providerId, { from = null, to = null, cre
             COALESCE(mm.conv_factor, mb.conv_factor) AS conv_factor,
             COALESCE(mm.status_code, mb.status_code) AS status_code
        FROM encounter_notes n
+       JOIN encounters e ON e.id = n.encounter_id
+       LEFT JOIN appointments a ON a.id = e.appointment_id
        JOIN encounter_note_codes c ON c.note_id = n.id AND c.kind = 'proc'
        LEFT JOIN paid_note_ledger pnl ON pnl.note_id = n.id
        LEFT JOIN mpfs_rvu mm ON mm.hcpcs = c.code AND mm.year = :year AND mm.modifier = ${modCase}
@@ -176,13 +185,14 @@ export async function providerPayscale(providerId, { from = null, to = null, cre
 /** Bi-weekly / monthly period boundaries (UTC), most-recent first. Bi-weekly anchored to 2024-01-01 (Mon). */
 export function buildPeriods(periodType, count = 6, ref = new Date()) {
   const ymd = (ms) => new Date(ms).toISOString().slice(0, 10);
+  const usd = (iso) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso); return m ? `${m[2]}/${m[3]}/${m[1]}` : iso; }; // mm/dd/yyyy label
   const periods = [];
   if (periodType === 'biweekly') {
     const ANCHOR = Date.UTC(2024, 0, 1);
     const P = 14 * 86400000;
     const today = Date.UTC(ref.getUTCFullYear(), ref.getUTCMonth(), ref.getUTCDate());
     const idx = Math.floor((today - ANCHOR) / P);
-    for (let i = 0; i < count; i++) { const s = ANCHOR + (idx - i) * P; const e = s + P; periods.push({ label: `${ymd(s)} – ${ymd(e - 86400000)}`, from: ymd(s), to: ymd(e) }); }
+    for (let i = 0; i < count; i++) { const s = ANCHOR + (idx - i) * P; const e = s + P; periods.push({ label: `${usd(ymd(s))} – ${usd(ymd(e - 86400000))}`, from: ymd(s), to: ymd(e) }); }
   } else {
     for (let i = 0; i < count; i++) {
       const s = Date.UTC(ref.getUTCFullYear(), ref.getUTCMonth() - i, 1);
@@ -195,7 +205,7 @@ export function buildPeriods(periodType, count = 6, ref = new Date()) {
 
 /**
  * Monthly statement (workbook "Monthly Statement" layout) — for ONE month, each procedure the provider
- * personally performed, with encounters split by WEEK of the month (Week 1–5, by signed_at day), total
+ * personally performed, with encounters split by WEEK of the month (Week 1–5, by DATE OF SERVICE day), total
  * encounters, place of service, and pay. Owner-only, real-time.
  */
 export async function providerMonthlyStatement(providerId, { year, month, credentials = [], cfKind = 'standard', localityCode = DEFAULT_LOCALITY, setting = 'facility' } = {}) {
@@ -205,15 +215,18 @@ export async function providerMonthlyStatement(providerId, { year, month, creden
   const locality = localityFor(localityCode);
   const modCase = "CASE WHEN UPPER(COALESCE(c.modifiers,'')) REGEXP '(^|[^A-Z])TC([^A-Z]|$)' THEN 'TC' "
     + "WHEN COALESCE(c.modifiers,'') REGEXP '(^|[^0-9])26([^0-9]|$)' THEN '26' ELSE '' END";
+  const DOS = 'COALESCE(e.encounter_date, a.appt_date, DATE(e.created_at))'; // pay by DATE OF SERVICE
   const [rows] = await execute(
-    `SELECT c.code, c.description, COALESCE(c.units, 1) AS units, DAY(n.signed_at) AS d, n.note_type AS note_type, n.pos_code AS pos_code,
+    `SELECT c.code, c.description, COALESCE(c.units, 1) AS units, DAY(${DOS}) AS d, n.note_type AS note_type, n.pos_code AS pos_code,
             ${modCase} AS price_mod,
             COALESCE(mm.work_rvu, mb.work_rvu) AS work_rvu, COALESCE(mm.conv_factor, mb.conv_factor) AS conv_factor, COALESCE(mm.status_code, mb.status_code) AS status_code
        FROM encounter_notes n
+       JOIN encounters e ON e.id = n.encounter_id
+       LEFT JOIN appointments a ON a.id = e.appointment_id
        JOIN encounter_note_codes c ON c.note_id = n.id AND c.kind = 'proc'
        LEFT JOIN mpfs_rvu mm ON mm.hcpcs = c.code AND mm.year = :year AND mm.modifier = ${modCase}
        LEFT JOIN mpfs_rvu mb ON mb.hcpcs = c.code AND mb.year = :year AND mb.modifier = ''
-      WHERE n.provider_id = :pid AND n.status = 'signed' AND n.signed_at >= :from AND n.signed_at < :to`,
+      WHERE n.provider_id = :pid AND n.status = 'signed' AND ${DOS} >= :from AND ${DOS} < :to`,
     { pid: providerId, year: RVU_YEAR, from, to });
 
   const byCode = new Map();
@@ -276,9 +289,10 @@ export async function providerMonthlyStatement(providerId, { year, month, creden
  */
 export async function adminProviderPayscale({ facilityUuid = null, providerUuid = null, from = null, to = null, cfKind = 'standard', excludePaid = true } = {}) {
   const params = { year: RVU_YEAR };
+  const DOS = 'COALESCE(e.encounter_date, a.appt_date, DATE(e.created_at))'; // pay by DATE OF SERVICE
   const where = ["n.status = 'signed'", "c.kind = 'proc'"];
-  if (from) { where.push('n.signed_at >= :from'); params.from = from; }
-  if (to) { where.push('n.signed_at < :to'); params.to = to; }
+  if (from) { where.push(`${DOS} >= :from`); params.from = from; }
+  if (to) { where.push(`${DOS} < :to`); params.to = to; }
   if (providerUuid) { where.push('u.uuid = :puuid'); params.puuid = providerUuid; }
   // Outstanding-pay view: notes already PAID in a finalized period are excluded, so an admin never sees
   // already-paid RVUs as still owed (paid history lives in the finalized-snapshots list). Same anti-join
@@ -299,6 +313,8 @@ export async function adminProviderPayscale({ facilityUuid = null, providerUuid 
             c.code, ${modCase} AS price_mod, SUM(COALESCE(c.units, 1)) AS units,
             COALESCE(mm.work_rvu, mb.work_rvu) AS work_rvu, COALESCE(mm.conv_factor, mb.conv_factor) AS conv_factor, COALESCE(mm.status_code, mb.status_code) AS status_code
        FROM encounter_notes n
+       JOIN encounters e ON e.id = n.encounter_id
+       LEFT JOIN appointments a ON a.id = e.appointment_id
        JOIN users u ON u.id = n.provider_id
        LEFT JOIN paid_note_ledger pnl ON pnl.note_id = n.id
        ${facilityJoin}

@@ -523,7 +523,11 @@ function ReferralDetail({ uuid, facilities = [], onClose, onChanged }) {
     setPdfBusy(true);
     try {
       const res = await referralsApi.receivedDocument(uuid);
-      const url = URL.createObjectURL(res.data);
+      // SECURITY: pin the blob's MIME to application/pdf. A received fax document is externally supplied
+      // (attacker-influenced); without pinning, a blob whose server Content-Type resolved to text/html would
+      // execute its scripts SAME-ORIGIN in the viewer iframe. Forcing application/pdf means it is only ever
+      // handled by the browser's PDF viewer — HTML/JS is never executed (a non-PDF just renders blank).
+      const url = URL.createObjectURL(new Blob([res.data], { type: 'application/pdf' }));
       setPdfUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return url; });
     } catch (e) { toast.error(toApiError(e).message); } finally { setPdfBusy(false); }
   }, [uuid, toast]);

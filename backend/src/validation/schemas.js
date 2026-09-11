@@ -399,6 +399,9 @@ const facilityBase = {
   state: z.union([z.string().trim().length(2), z.literal('')]).optional(),
   zip: optStr(10), phone: optStr(24), fax: optStr(24),
   taxonomy: optStr(160), taxonomyCode: optStr(16), taxId: optStr(32),
+  // Facility CODE — the MRN / Encounter ID prefix (2–8 letters/numbers). Optional on create (auto-derived
+  // from the name when omitted); editable later. Empty string allowed on create (→ auto-derive).
+  facilityCode: z.union([z.string().trim().regex(/^[A-Za-z0-9]{2,8}$/, 'Facility Code must be 2–8 letters/numbers.'), z.literal('')]).optional(),
   authorizedOfficial: optStr(200), enumerationDate: optStr(20), mailingAddress: optStr(300), nppesStatus: optStr(16),
   // Facility logo as a data URI (base64 image) or empty to clear. ~700 KB cap.
   logo: z.union([

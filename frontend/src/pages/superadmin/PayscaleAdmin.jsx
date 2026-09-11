@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { usDate } from '../../lib/dates.js';
 import { reportsApi, usersApi, saveBlob, toApiError } from '../../lib/api.js';
 
 /**
@@ -16,7 +17,7 @@ function buildPeriods(type, count = 6, ref = new Date()) {
     const A = Date.UTC(2024, 0, 1); const P = 14 * 864e5;
     const t = Date.UTC(ref.getUTCFullYear(), ref.getUTCMonth(), ref.getUTCDate());
     const idx = Math.floor((t - A) / P);
-    for (let i = 0; i < count; i++) { const s = A + (idx - i) * P; const e = s + P; out.push({ label: `${ymd(s)} – ${ymd(e - 864e5)}`, from: ymd(s), to: ymd(e) }); }
+    for (let i = 0; i < count; i++) { const s = A + (idx - i) * P; const e = s + P; out.push({ label: `${usDate(ymd(s))} – ${usDate(ymd(e - 864e5))}`, from: ymd(s), to: ymd(e) }); }
   } else {
     for (let i = 0; i < count; i++) {
       const s = Date.UTC(ref.getUTCFullYear(), ref.getUTCMonth() - i, 1);
@@ -170,7 +171,7 @@ export default function PayscaleAdmin({ facilities = [], role = '' }) {
           {isLocked ? (
             <>
               <span className="pay-lock-badge">🔒 Paid &amp; locked</span>
-              <span className="pay-lock-sub">{period?.label} was finalized{lockedAt ? ` on ${new Date(lockedAt).toLocaleDateString('en-US')}` : ''}. These encounters are marked paid and won’t appear on any later paycheck.</span>
+              <span className="pay-lock-sub">{period?.label} was finalized{lockedAt ? ` on ${usDate(lockedAt)}` : ''}. These encounters are marked paid and won’t appear on any later paycheck.</span>
             </>
           ) : (
             <>
