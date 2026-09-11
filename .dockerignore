@@ -1,0 +1,22 @@
+# Git & metadata
+.git/
+.gitignore
+
+# Environment & secrets
+.env
+*.env
+!*.env.example
+certs/*.key
+certs/*.crt
+
+# Logs & temp files
+*.log
+logs/
+.DS_Store
+Thumbs.db
+
+# Dependencies & build outputs
+node_modules/
+dist/
+.venv/
+__pycache__/
