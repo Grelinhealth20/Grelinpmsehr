@@ -48,6 +48,16 @@ export async function loadNoteDefs() {
     .catch((e) => { NOTE_DEFS_PROMISE = null; throw e; }); // clear so a later call can retry
   return NOTE_DEFS_PROMISE;
 }
+// Authoritative per-note-type heading labels, read from the SAME backend templates cache (single source
+// of truth). Returns a key→label map (empty if the cache is cold). Read-only views prefer this over the
+// generic SECTION_LABELS dictionary, so a heading like hp.hospitalCourse → "HPI" matches the editor and
+// the downloaded document exactly — with no hardcoded, drift-prone per-type copy on the client.
+export function noteTypeLabels(noteType) {
+  const t = NOTE_DEFS_CACHE?.byType?.[noteType];
+  const m = {};
+  if (t) for (const s of (t.sections || [])) if (s && s.key && s.label) m[s.key] = s.label;
+  return m;
+}
 // True when the note has any documented clinical narrative (excludes the billing/attestation scaffolding)
 // — used to skip the coding-engine round-trip on an empty/blank note so opening a template is instant.
 function hasClinicalContent(content) {
@@ -1108,6 +1118,21 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
                               enc={enc}
                               toast={toast}
                             />
+                          )}
+                          {/* Labs & Imaging REVIEW section: attach the actual resulted lab / imaging record
+                              files (the CBC report, the CXR read) right where they are reviewed — same
+                              per-encounter S3 store as the order sections, split into Lab and Imaging. */}
+                          {s.key === 'results' && enc?.encounterUuid && (
+                            <div className="ord-attach-group">
+                              <OrderAttachments
+                                encounterUuid={enc.encounterUuid} kind="lab" label="Lab records"
+                                readOnly={readOnly} orderText={content.sections[s.key] || ''} enc={enc} toast={toast}
+                              />
+                              <OrderAttachments
+                                encounterUuid={enc.encounterUuid} kind="imaging" label="Imaging records"
+                                readOnly={readOnly} orderText={content.sections[s.key] || ''} enc={enc} toast={toast}
+                              />
+                            </div>
                           )}
                         </div>
                         </Fragment>

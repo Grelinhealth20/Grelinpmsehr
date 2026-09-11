@@ -96,7 +96,7 @@ export const NOTE_TYPE_TEMPLATES = [
     // the IDT Care Plan Review (nursing/MDS) are removed — nothing billing- or medico-legally required is lost.
     sections: [
       sec('chiefComplaint', 'Chief Complaint', 'One line — the problem you are evaluating at this initial visit (e.g. post-hospital hypoxia, uncontrolled diabetes, delirium). Note code status (Full / DNR / DNR-DNI / comfort).', 2),
-      sec('hospitalCourse', 'HPI / Hospital Course', 'Why the patient went to the hospital, what was found and done (procedures with dates), complications, medication changes, and how they were on arrival; one line on the pre-hospital living / functional baseline; end with what is still active or unresolved.', 4),
+      sec('hospitalCourse', 'HPI', 'Why the patient went to the hospital, what was found and done (procedures with dates), complications, medication changes, and how they were on arrival; one line on the pre-hospital living / functional baseline; end with what is still active or unresolved.', 4),
       sec('medications', 'Medications & Allergies', 'Current medication list reviewed and reconciled; any change you made today and why; drugs needing lab monitoring; antibiotic end dates; allergies with reaction.', 3),
       sec('pmh', 'Past Medical & Surgical History', 'Conditions and surgeries with dates where they matter; devices present — pacemaker, stents, catheter, PEG, prosthetic joints.', 3),
       sec('ros', 'Review of Systems', 'Positives for this patient first, then “remaining systems negative”; if the patient cannot answer, name who gave the history.', 3),

@@ -1,5 +1,5 @@
 import { NOTE_TYPES, SECTION_LABELS } from '../lib/noteTemplates.js';
-import { usDate, encNo } from './EncounterNotes.jsx';
+import { usDate, encNo, noteTypeLabels } from './EncounterNotes.jsx';
 
 const VITALS = [
   ['temp', 'Temp °F'], ['hr', 'HR bpm'], ['bp', 'BP'], ['rr', 'RR'],
@@ -19,10 +19,14 @@ export default function NoteDocumentView({ note, meta }) {
   const checks = content.checks || {};
   const ticked = (k) => (Array.isArray(checks[k]) ? checks[k].filter(Boolean) : []);
   const hasSectionContent = (k) => (sections[k] || '').trim() || ticked(k).length > 0;
-  // Custom-template notes carry their own heading labels in the snapshot — prefer those.
+  // Custom-template notes carry their own heading labels in the snapshot — prefer those. For built-in
+  // notes, use the AUTHORITATIVE per-type labels from the backend templates cache (same source as the
+  // editor and the downloaded document) so a shared key like hospitalCourse reads "HPI" on an H&P and
+  // "Course in Facility" on a discharge — SECTION_LABELS is only a cold-cache last resort.
   const customLabels = {};
   for (const s of (content.customSections || [])) if (s && s.key) customLabels[s.key] = s.label || s.key;
-  const labelFor = (k) => customLabels[k] || SECTION_LABELS[k] || k;
+  const typeLabels = noteTypeLabels(note.noteType);
+  const labelFor = (k) => customLabels[k] || typeLabels[k] || SECTION_LABELS[k] || k;
   // Render in the note's OWN stored section order (from the backend template it was created
   // with) — no client-side template copy. Labels come from the shared key→label dictionary.
   const order = (Array.isArray(content.sectionOrder) && content.sectionOrder.length)

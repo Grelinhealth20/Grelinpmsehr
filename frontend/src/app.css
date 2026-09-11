@@ -2785,7 +2785,9 @@ input::-ms-clear, input::-ms-reveal { display: none; width: 0; height: 0; }
 .rxs-src { margin-top: 8px; font-size: 10.5px; color: rgba(9, 17, 33, 0.4); }
 
 /* Lab / Imaging order attachments (per-encounter records) */
+.ord-attach-group { display: flex; flex-direction: column; gap: 8px; }
 .ord-attach { margin-top: 10px; border: 1px solid var(--c-line); border-radius: 11px; background: #fbfcfe; padding: 10px 12px; }
+.ord-attach-group .ord-attach:last-child { margin-top: 0; }
 .ord-attach-bar { display: flex; align-items: center; gap: 8px; }
 .ord-attach-t { font-size: 11.5px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; color: var(--c-ink-3); }
 .ord-btn {
