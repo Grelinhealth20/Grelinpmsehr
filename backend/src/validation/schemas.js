@@ -410,6 +410,22 @@ const facilityBase = {
 export const createFacilitySchema = z.object(facilityBase).strict();
 export const updateFacilitySchema = z.object({ ...facilityBase, name: facilityBase.name.optional() }).partial().strict();
 export const facilityStatusSchema = z.object({ status: z.enum(['active', 'inactive']) }).strict();
+// Per-facility feature switches — only these three booleans; unknown keys rejected (defense-in-depth on
+// top of the controller's type filtering).
+export const facilityFlagsSchema = z.object({
+  codingEnabled: z.boolean().optional(),
+  eligibilityEnabled: z.boolean().optional(),
+  autoCreatePatients: z.boolean().optional(),
+}).strict();
+// Per-facility referral fax config. Numbers are deep-validated in the service ('' clears, garbage → 400);
+// here we bound length + type and reject unknown keys.
+export const facilityFaxConfigSchema = z.object({
+  incomingNumber: z.string().trim().max(24).optional(),
+  outgoingNumber: z.string().trim().max(24).optional(),
+  enabled: z.boolean().optional(),
+  referralsEnabled: z.boolean().optional(),
+  autoCreatePatients: z.boolean().optional(),
+}).strict();
 export const assignProviderSchema = z.object({ providerUuid: z.string().uuid() }).strict();
 export const providerUuidParam = z.object({ uuid: z.string().uuid(), providerUuid: z.string().uuid() });
 export const setUserFacilitiesSchema = z.object({ facilityUuids: z.array(z.string().uuid()).max(100) }).strict();

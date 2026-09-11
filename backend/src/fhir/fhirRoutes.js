@@ -135,6 +135,14 @@ router.use((req, res, next) => {
   if (FHIR_TYPES.has(type) && !scopeAllowsRead(req.smartScope, type)) {
     return send(res, 403, operationOutcome('error', 'forbidden', `Access token scope does not permit ${type} read`));
   }
+  // A patient/*-scoped token (single-patient grant, no user/*-level scope) MUST be bound to a specific
+  // patient (launch/patient). Without that binding it must NOT be served — never widen a single-patient
+  // grant to the authorizing user's ENTIRE patient set. (user/*-level tokens legitimately span the user.)
+  const hasPatientScope = /(^|\s)patient\//i.test(req.smartScope || '');
+  const hasUserScope = /(^|\s)user\//i.test(req.smartScope || '');
+  if (hasPatientScope && !hasUserScope && !req.smartPatient) {
+    return send(res, 403, operationOutcome('error', 'forbidden', 'This access token requires a patient launch context (launch/patient)'));
+  }
   next();
 });
 

@@ -20,11 +20,19 @@ export function createApp() {
   // Trust-proxy must match the real topology, or X-Forwarded-For can be spoofed to evade the WAF IP
   // lists + per-IP rate limits. We ARE the edge: with direct TLS there is NO proxy in front → trust
   // nothing. Behind an AWS ALB/NLB that terminates TLS, set TRUST_PROXY=1 (or the real hop count).
+  // A numeric hop count is the correct, precise setting (e.g. TRUST_PROXY=1 for a single nginx/ALB). The
+  // legacy `true` is a footgun — it trusts the ENTIRE X-Forwarded-For chain, letting a client spoof req.ip
+  // to evade WAF IP lists + per-IP rate limits. We therefore map `true` to a SINGLE trusted hop (the one
+  // reverse proxy in front) rather than trust-all, and warn to set an explicit hop count. Anything else
+  // (or unset) trusts nothing (we are the direct edge).
   const TRUST_PROXY = process.env.TRUST_PROXY;
-  app.set('trust proxy',
-    /^\d+$/.test(TRUST_PROXY || '') ? Number(TRUST_PROXY)
-      : TRUST_PROXY === 'true' ? true
-        : false);
+  let trustProxy = false;
+  if (/^\d+$/.test(TRUST_PROXY || '')) trustProxy = Number(TRUST_PROXY);
+  else if (TRUST_PROXY === 'true') {
+    trustProxy = 1;
+    logger.warn('TRUST_PROXY=true is imprecise (mapped to a single trusted hop). Set TRUST_PROXY to the exact reverse-proxy hop count (e.g. 1) so X-Forwarded-For cannot be spoofed.');
+  }
+  app.set('trust proxy', trustProxy);
   app.disable('x-powered-by');
 
   app.use(

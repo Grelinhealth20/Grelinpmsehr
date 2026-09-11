@@ -60,11 +60,18 @@ async function assertSchedulablePatient(req, patientUuid) {
   const e = new Error('Linked patient not found.'); e.status = 400; e.code = 'BAD_PATIENT_LINK'; throw e;
 }
 
-/** Resolve a selected rendering-provider uuid to an internal id (active providers only). */
-async function resolveRenderingProvider(uuid) {
+/**
+ * Resolve a selected rendering-provider uuid to an internal id (active providers only). The chosen
+ * provider must be the caller themselves OR share a facility with the caller — never an arbitrary
+ * cross-facility provider (object-level authorization on the reference field, on both create and update).
+ */
+async function resolveRenderingProvider(uuid, req) {
   if (!uuid) return null;
   const id = await findProviderIdByUuid(uuid);
   if (!id) { const e = new Error('Selected provider not found.'); e.status = 400; e.code = 'BAD_PROVIDER'; throw e; }
+  if (Number(id) !== Number(req.authUserId) && !(await isProviderInUserFacilities(uuid, req.authUserId))) {
+    const e = new Error('Selected provider is not at your facility.'); e.status = 403; e.code = 'FORBIDDEN'; throw e;
+  }
   return id;
 }
 
@@ -112,7 +119,7 @@ export async function create(req, res, next) {
   try {
     const { title, patient, patientUuid, renderingProviderUuid, type, procedureCode, date, startMin, durationMin } = req.body;
     const scope = await schedulingScope(req.authUserId);
-    const renderingProviderId = await resolveRenderingProvider(renderingProviderUuid);
+    const renderingProviderId = await resolveRenderingProvider(renderingProviderUuid, req);
 
     // Determine whose schedule this appointment lands on (the owner). A front-desk
     // billing user MUST pick a rendering provider WITHIN their facility.
@@ -175,7 +182,7 @@ export async function update(req, res, next) {
 
     const b = { ...req.body };
     if (b.renderingProviderUuid !== undefined) {
-      b.renderingProviderId = await resolveRenderingProvider(b.renderingProviderUuid);
+      b.renderingProviderId = await resolveRenderingProvider(b.renderingProviderUuid, req);
       delete b.renderingProviderUuid;
     }
     // Choose the most meaningful audit action for the change.

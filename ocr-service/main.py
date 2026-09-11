@@ -22,16 +22,17 @@ log = logging.getLogger("grelin-ocr")
 API_KEY = os.environ.get("OCR_API_KEY", "")
 MAX_BYTES = int(os.environ.get("OCR_MAX_BYTES", str(15 * 1024 * 1024)))
 
-# Fail-closed auth. Dev/local stays convenient (no key => no auth), but in
-# production the OCR key is MANDATORY so the PHI endpoint is never open to the
-# network. We consider the service "production" when ENV/OCR_ENV/NODE_ENV says
-# so, or when REQUIRE_OCR_AUTH=true is set explicitly.
-_ENV = (os.environ.get("OCR_ENV") or os.environ.get("ENV") or os.environ.get("NODE_ENV") or "").lower()
-REQUIRE_AUTH = os.environ.get("REQUIRE_OCR_AUTH", "").lower() == "true" or _ENV in ("prod", "production")
+# Fail-closed auth by DEFAULT. This PHI endpoint requires OCR_API_KEY unless an operator EXPLICITLY
+# opts into insecure local development (OCR_DEV_INSECURE=true). This removes the previous footgun where a
+# process merely missing the prod env marker (independent Python env — the Node app's NODE_ENV does not
+# propagate here) would silently run auth-open. Secure-by-default: no key + no explicit opt-out => refuse.
+_INSECURE = os.environ.get("OCR_DEV_INSECURE", "").lower() == "true"
+REQUIRE_AUTH = not _INSECURE
 if REQUIRE_AUTH and not API_KEY:
-    # Refuse to boot rather than silently run auth-open in production.
+    # Refuse to boot rather than silently run auth-open.
     raise RuntimeError(
-        "OCR_API_KEY is required in production (REQUIRE_OCR_AUTH=true or ENV=production) but is not set.")
+        "OCR_API_KEY is required. Set OCR_API_KEY (and the same value on the backend's OCR_API_KEY), "
+        "or set OCR_DEV_INSECURE=true for local development only.")
 
 app = FastAPI(title="Grelin OCR Service", version="1.0.0")
 

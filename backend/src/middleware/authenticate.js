@@ -20,7 +20,9 @@ export async function authenticate(req, res, next) {
     }
 
     const row = await findRawByUuidCached(claims.sub);
-    if (!row || row.status === USER_STATUS.DISABLED) {
+    // Reject ANY non-active account (disabled OR restricted). Restricted was previously a no-op on live
+    // sessions — a restricted user kept full access until token expiry. Non-active = access denied now.
+    if (!row || row.status !== USER_STATUS.ACTIVE) {
       return res.status(401).json({ error: 'Session no longer valid.', code: 'USER_INVALID' });
     }
 

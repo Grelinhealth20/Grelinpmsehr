@@ -221,7 +221,15 @@ export async function refresh(refreshToken, ctx = {}) {
     const stillUnexpired = new Date(record.expires_at) >= new Date();
     if (revokedAgoMs >= 0 && revokedAgoMs <= REFRESH_RACE_GRACE_MS && stillUnexpired) {
       const raceUser = await findRawByUuid(payload.sub);
-      if (raceUser && raceUser.status !== USER_STATUS.DISABLED) {
+      // Grace is ONLY for a benign rotation race. A SECURITY revocation (password change, admin
+      // force-logout, reuse-nuke) additionally stamps tokens_valid_after=NOW(); if this token was
+      // issued BEFORE that cut it was security-revoked and must NEVER be re-graced — doing so would
+      // negate the credential cut (an attacker replaying a captured token in the 30s window would get a
+      // fresh, un-revoked family). A plain rotation does NOT bump tokens_valid_after, so a real race
+      // still converges here. Also require the account be ACTIVE and not pending a forced reset.
+      const cutSec = raceUser && raceUser.tokens_valid_after_epoch != null ? Number(raceUser.tokens_valid_after_epoch) : null;
+      const securityRevoked = cutSec != null && typeof payload.iat === 'number' && payload.iat < cutSec;
+      if (raceUser && raceUser.status === USER_STATUS.ACTIVE && !raceUser.must_reset_password && !securityRevoked) {
         // benign concurrency — not a security event; issue a valid session so every racing tab converges.
         const session = await issueSession(raceUser, ctx);
         return { user: raceUser, ...session };
@@ -242,7 +250,9 @@ export async function refresh(refreshToken, ctx = {}) {
   }
 
   const user = await findRawByUuid(payload.sub);
-  if (!user || user.status === USER_STATUS.DISABLED) {
+  // Refresh is denied for ANY non-active account (disabled OR restricted) — a restricted account must
+  // not be able to mint fresh access/refresh tokens (the "soft cut" has to actually cut).
+  if (!user || user.status !== USER_STATUS.ACTIVE) {
     throw new AuthError('Session no longer valid.', 401, 'USER_INVALID');
   }
 

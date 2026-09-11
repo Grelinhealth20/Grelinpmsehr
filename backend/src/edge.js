@@ -22,11 +22,13 @@ const WAF_IP_BLOCKLIST = new Set(parseList(process.env.WAF_IP_BLOCKLIST));
 const WAF_SIGNATURES = [
   // Tautology equality (OR/AND) covers numeric (1=1) AND quoted ('1'='1, "1"="1) auth-bypass payloads —
   // written with non-capturing groups (no fragile numbered backreference) so it is robust and catches the
-  // classic `' OR '1'='1` and `"x"="x`. The comment rule matches `-- ` OR `--` at end-of-input (`admin'--`).
+  // classic `' OR '1'='1` and `"x"="x`. The comment rule is QUOTE-ANCHORED (`'`/`"` then optional spaces
+  // then `--`, e.g. `admin'--`, `admin' -- `) so a bare prose dash in a clinical note ("continue meds --
+  // reassess", "BP 120 -- 130") is NOT a false positive; quote-comment auth-bypass injections still hit.
   // UNION-based: `union select`, and the evasions `union ALL/DISTINCT select`, `union/**/select`,
   // `union%0aselect` — union followed by select within a short gap (bounded to 12 chars so it never fires
   // on ordinary clinical prose, which does not juxtapose "union" and "select").
-  { name: 'sqli', re: /(\bunion\b[\s\S]{0,12}?\bselect\b)|(\bselect\b\s+\*\s+\bfrom\b)|(\binsert\b\s+\binto\b)|(\bdrop\b\s+\btable\b)|(\b(?:or|and)\b\s+(?:\d+\s*=\s*\d+|'[^']{0,30}'\s*=\s*'|"[^"]{0,30}"\s*=\s*"))|(--(?:\s|$))|(\/\*[\s\S]{0,200}?\*\/)|(\bsleep\s*\()|(\bbenchmark\s*\()|(\bwaitfor\b\s+\bdelay\b)|(\binformation_schema\b)/i },
+  { name: 'sqli', re: /(\bunion\b[\s\S]{0,12}?\bselect\b)|(\bselect\b\s+\*\s+\bfrom\b)|(\binsert\b\s+\binto\b)|(\bdrop\b\s+\btable\b)|(\b(?:or|and)\b\s+(?:\d+\s*=\s*\d+|'[^']{0,30}'\s*=\s*'|"[^"]{0,30}"\s*=\s*"))|(['"]\s*--(?:\s|$))|(\/\*[\s\S]{0,200}?\*\/)|(\bsleep\s*\()|(\bbenchmark\s*\()|(\bwaitfor\b\s+\bdelay\b)|(\binformation_schema\b)/i },
   // The event-handler rule allows ANY non-name separator before `on<handler>=` — a space, tab, newline,
   // slash or backtick — so filter-evasion tags like `<svg/onload=…>` and `<img/onerror=…>` are caught,
   // not just space-separated `<svg onload=…>`. The leading `<[a-z]` tag-start guard keeps it off ordinary
@@ -71,7 +73,10 @@ function collectScannable(value, out, depth = 0) {
   if (typeof value === 'string') { out.push(value); return; }
   if (typeof value !== 'object') return;
   if (Array.isArray(value)) { for (const v of value) collectScannable(v, out, depth + 1); return; }
-  for (const [k, v] of Object.entries(value)) { if (WAF_SKIP_KEYS.has(k.toLowerCase())) continue; collectScannable(v, out, depth + 1); }
+  // Skip credential values ONLY at the TOP level (where real login/change-password fields live). A
+  // credential-named key NESTED anywhere used to skip the whole subtree — a universal evasion channel
+  // (wrap a payload in {"token": …}). Nested keys are now always scanned.
+  for (const [k, v] of Object.entries(value)) { if (depth === 0 && WAF_SKIP_KEYS.has(k.toLowerCase())) continue; collectScannable(v, out, depth + 1); }
 }
 
 /** WAF middleware — scans decoded URL + query values + parsed JSON body (credentials skipped). */
@@ -85,8 +90,14 @@ export function waf(req, res, next) {
   catch { logger.warn({ ip, url: req.originalUrl }, 'WAF: malformed URL encoding'); if (WAF_BLOCKING) return res.status(400).json({ error: 'Bad request.', code: 'WAF_BAD_ENCODING' }); }
   // Scan the URL fully (recursively) decoded so double-encoding cannot bypass the signatures.
   const haystacks = [deepDecode(req.originalUrl)];
-  for (const v of Object.values(req.query || {})) { const s = Array.isArray(v) ? v.join(' ') : String(v); haystacks.push(s, deepDecode(s)); }
-  if (req.body && typeof req.body === 'object') collectScannable(req.body, haystacks);
+  // Query AND body are collected via collectScannable (walks nested objects/arrays — a bracketed query
+  // param ?filter[x]=… or a nested body field is no longer stringified to "[object Object]" and missed),
+  // and EACH collected string is scanned both raw and fully percent-decoded (parity with the URL/query
+  // path — an encoded payload placed in a body field can no longer slip past the signatures).
+  const collected = [];
+  collectScannable(req.query || {}, collected);
+  if (req.body && typeof req.body === 'object') collectScannable(req.body, collected);
+  for (const s of collected) { haystacks.push(s); const d = deepDecode(s); if (d !== s) haystacks.push(d); }
   for (const h of haystacks) {
     const hit = scanValue(h);
     if (hit) { logger.warn({ ip, url: req.originalUrl, rule: hit }, `WAF: ${hit} signature`); if (WAF_BLOCKING) return res.status(403).json({ error: 'Request blocked by WAF.', code: `WAF_${hit.toUpperCase()}` }); break; }

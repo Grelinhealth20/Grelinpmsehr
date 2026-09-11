@@ -17,6 +17,7 @@ import { findSpecialtyIdByUuid } from '../services/specialtyService.js';
 import { listUserFacilities, setUserFacilities } from '../services/facilityService.js';
 import { blindIndex } from '../utils/crypto.js';
 import { searchProviders, nppesEnabled } from '../services/nppesService.js';
+import { revokeAllSessions } from '../services/authService.js';
 import { config, ROLES } from '../config/env.js';
 
 const auditCtx = (req) => ({ ip: req.ip, userAgent: req.get('user-agent') });
@@ -247,6 +248,10 @@ export async function changeStatus(req, res, next) {
     }
 
     const updated = await setUserStatus(req.params.uuid, req.body.status);
+    // A non-active transition (restricted/disabled) must take effect IMMEDIATELY: revoke all refresh
+    // tokens and stamp the credential cut so every live access token for this user dies on its next
+    // request — a restricted/disabled account can neither keep browsing nor refresh a new session.
+    if (req.body.status !== 'active') await revokeAllSessions(row.id);
     await recordAudit({
       actorUserId: req.authUserId,
       action: `user.status.${req.body.status}`,

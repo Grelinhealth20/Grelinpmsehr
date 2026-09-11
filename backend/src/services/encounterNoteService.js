@@ -7,6 +7,7 @@ import { encrypt, decrypt } from '../utils/crypto.js';
 import { getOwnedEncounterId, getAccessibleEncounterId } from './encounterService.js';
 import { viewerScope, isFacilityWide, noteServiceLineWhere } from './accessScope.js';
 import { storeSignedNoteDoc } from './noteDocumentService.js';
+import { isBillableIcd } from './terminologyCache.js';
 import { logger } from '../config/logger.js';
 
 // Build the READ-access SQL condition for a note by the viewer's scope: own note, OR a
@@ -294,6 +295,31 @@ export async function saveNoteCodes(noteUuid, providerId, { diagnoses = [], proc
   const r = await findDraft(noteUuid, providerId);
   if (!r) return null;
   if (r.status === 'signed') return { locked: true }; // signed notes are immutable
+  // VALIDATE every submitted code against the REAL CMS terminology datasets before persisting. A curated
+  // code set flows verbatim into the signed claim / PDF / FHIR (persistPredictedCodes only fills an EMPTY
+  // set), so an unknown or mistyped ICD/CPT/HCPCS must be rejected EXPLICITLY — never silently stored or
+  // dropped. ICD via the billable set; procedures against cpt_codes UNION hcpcs_codes so legitimate
+  // HCPCS Level II (J/G/…) codes are not wrongly refused. Nothing is written unless every code is real.
+  const dxCodes = (Array.isArray(diagnoses) ? diagnoses : []).filter((d) => d && d.icd).map((d) => String(d.icd).trim());
+  const procCodes = [...new Set((Array.isArray(procedures) ? procedures : []).filter((p) => p && p.cpt).map((p) => String(p.cpt).trim().toUpperCase()))];
+  const invalidDx = [];
+  for (const icd of dxCodes) { if (!(await isBillableIcd(icd))) invalidDx.push(icd); }
+  let invalidProc = [];
+  if (procCodes.length) {
+    const params = {}; procCodes.forEach((c, i) => { params[`c${i}`] = c; });
+    const inList = procCodes.map((_, i) => `:c${i}`).join(',');
+    // Two separate lookups (NOT a UNION — the cpt_codes and hcpcs_codes `code` columns use different
+    // collations, which makes a UNION throw). A procedure code is valid if it exists in EITHER dataset.
+    const [cptRows] = await execute(`SELECT code FROM cpt_codes WHERE code IN (${inList})`, params);
+    const [hcpcsRows] = await execute(`SELECT code FROM hcpcs_codes WHERE code IN (${inList})`, params);
+    const knownSet = new Set([...cptRows, ...hcpcsRows].map((row) => String(row.code).toUpperCase()));
+    invalidProc = procCodes.filter((c) => !knownSet.has(c));
+  }
+  if (invalidDx.length || invalidProc.length) {
+    const e = new Error(`Unrecognized billing codes — not found in the CMS terminology datasets: ${[...invalidDx.map((c) => `ICD ${c}`), ...invalidProc.map((c) => `CPT/HCPCS ${c}`)].join(', ')}.`);
+    e.status = 400; e.code = 'INVALID_CODES'; e.expose = true; e.details = { invalidDx, invalidProc };
+    throw e;
+  }
   // Build the replacement rows FIRST (so any bad input fails before we touch the DB), coercing units
   // safely: Number({}) / Number('x') → NaN, which must become NULL (never a NaN INSERT).
   const rows = [];

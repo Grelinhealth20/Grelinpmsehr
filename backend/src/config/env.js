@@ -207,6 +207,13 @@ export const config = {
   },
 };
 
+// Fail fast if the access and refresh signing secrets are identical: with matching alg (HS256) + issuer +
+// audience they differ ONLY by secret ring, so an equal secret would let an access token verify as a
+// refresh token (and vice-versa) — a token-confusion class. They MUST be distinct.
+if (config.jwt.accessSecret === config.jwt.refreshSecret) {
+  throw new Error('[config] JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must be different values (identical secrets allow access/refresh token confusion).');
+}
+
 /** Roles, ordered by privilege. Used for RBAC checks. */
 export const ROLES = Object.freeze({
   MASTER_ADMIN: 'master_admin',

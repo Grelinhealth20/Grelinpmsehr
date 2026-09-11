@@ -6,7 +6,7 @@ import { csrfProtection } from '../middleware/csrf.js';
 import { validate } from '../middleware/validate.js';
 import { ROLES } from '../config/env.js';
 import {
-  createFacilitySchema, updateFacilitySchema, facilityStatusSchema,
+  createFacilitySchema, updateFacilitySchema, facilityStatusSchema, facilityFlagsSchema, facilityFaxConfigSchema,
   assignProviderSchema, uuidParam, providerUuidParam,
 } from '../validation/schemas.js';
 
@@ -28,9 +28,9 @@ router.get('/:uuid', validate(uuidParam, 'params'), ctrl.getOne);
 router.patch('/:uuid', csrfProtection, validate(uuidParam, 'params'), validate(updateFacilitySchema), ctrl.update);
 router.post('/:uuid/status', csrfProtection, validate(uuidParam, 'params'), validate(facilityStatusSchema), ctrl.status);
 // Per-facility feature switches: coding engine (claims scrubbing) and eligibility verification.
-router.post('/:uuid/flags', csrfProtection, validate(uuidParam, 'params'), ctrl.flags);
+router.post('/:uuid/flags', csrfProtection, validate(uuidParam, 'params'), validate(facilityFlagsSchema), ctrl.flags);
 // Per-facility referral FAX numbers: { incomingNumber?, outgoingNumber?, enabled? }
-router.put('/:uuid/fax-config', csrfProtection, validate(uuidParam, 'params'), ctrl.faxConfigSet);
+router.put('/:uuid/fax-config', csrfProtection, validate(uuidParam, 'params'), validate(facilityFaxConfigSchema), ctrl.faxConfigSet);
 router.delete('/:uuid', csrfProtection, validate(uuidParam, 'params'), ctrl.remove);
 // MASTER-ONLY: completely wipe all of a facility's data (patients/charts/encounters/appointments/
 // referrals/documents in DB + S3 + facility-scoped audit trail). The controller enforces master_admin;
