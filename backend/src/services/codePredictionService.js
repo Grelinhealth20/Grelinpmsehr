@@ -1,5 +1,6 @@
 import { pool } from '../db/pool.js';
-import { searchSnomed, snomedToIcd10cm, snomedConceptsForIcd10cm, lookupCpt } from './terminologyService.js';
+import { logger } from '../config/logger.js';
+import { searchSnomed, snomedToIcd10cm, snomedToIcd10cmBatch, snomedConceptsForIcd10cm, lookupCpt } from './terminologyService.js';
 import { isBillableIcd, icdDescription } from './terminologyCache.js';
 import { scrubClaim } from './codingService.js';
 
@@ -21,8 +22,9 @@ const SCT_FSN = 900000000000003001; // Fully Specified Name description type (ca
 // Clinical abbreviations → full terms (expanded before search; boosts recall on clinician shorthand).
 const ABBREV = {
   t2dm: 'type 2 diabetes mellitus', t1dm: 'type 1 diabetes mellitus', dm: 'diabetes mellitus',
+  dm2: 'type 2 diabetes mellitus', dm1: 'type 1 diabetes mellitus', dmii: 'type 2 diabetes mellitus',
   htn: 'hypertension', ckd: 'chronic kidney disease', esrd: 'end stage renal disease',
-  aki: 'acute kidney injury', chf: 'congestive heart failure', copd: 'chronic obstructive pulmonary disease',
+  aki: 'acute kidney injury', chf: 'heart failure', copd: 'chronic obstructive pulmonary disease',
   cad: 'coronary artery disease', cva: 'cerebral infarction', tia: 'transient ischemic attack',
   mi: 'myocardial infarction', afib: 'atrial fibrillation', 'a-fib': 'atrial fibrillation', af: 'atrial fibrillation',
   uti: 'urinary tract infection', gerd: 'gastroesophageal reflux disease', dvt: 'deep vein thrombosis',
@@ -33,8 +35,36 @@ const ABBREV = {
   ams: 'altered mental status', gad: 'generalized anxiety disorder', ckd: 'chronic kidney disease',
   mdd: 'major depressive disorder', copd2: 'chronic obstructive pulmonary disease',
   cp: 'chest pain', sob: 'shortness of breath', dvt: 'deep vein thrombosis', tia: 'transient ischemic attack',
-  chf: 'congestive heart failure', pna: 'pneumonia', afib: 'atrial fibrillation', htn: 'hypertension',
+  chf: 'heart failure', pna: 'pneumonia', afib: 'atrial fibrillation', htn: 'hypertension',
+  // Acute cardiac / infection / HF-type abbreviations (single-token; expanded before the SNOMED match).
+  stemi: 'st elevation myocardial infarction', nstemi: 'non st elevation myocardial infarction',
+  mrsa: 'methicillin resistant staphylococcus aureus', mssa: 'methicillin susceptible staphylococcus aureus',
+  hfref: 'heart failure with reduced ejection fraction', hfpef: 'heart failure with preserved ejection fraction',
+  djd: 'degenerative joint disease', pud: 'peptic ulcer disease', gout: 'gout', bmi: 'body mass index',
+  resp: 'respiratory', dka: 'diabetic ketoacidosis', hha: 'hyperosmolar hyperglycemia',
 };
+// Whole-PHRASE clinical synonyms — normalize documented wording to the term the SNOMED CT US edition uses,
+// so a common provider phrasing resolves to the correct BILLABLE concept (deterministic, not fuzzy). Applied
+// after abbreviation expansion, before the SNOMED search. Each maps to a real SNOMED-preferred term.
+const PHRASE_SYN = [
+  [/\bpressure injur(?:y|ies)\b/g, 'pressure ulcer'],          // NPUAP 2016 rename; ICD/SNOMED keep "pressure ulcer"
+  [/\baortic stenosis\b/g, 'aortic valve stenosis'],
+  [/\bmitral stenosis\b/g, 'mitral valve stenosis'],
+  [/\baortic (?:regurgitation|insufficiency)\b/g, 'aortic valve regurgitation'],
+  [/\bmitral (?:regurgitation|insufficiency)\b/g, 'mitral valve regurgitation'],
+  [/\brepeated falls?\b/g, 'recurrent falls'],
+  // Spelled-out shorthand that omits the trailing noun of the SNOMED-preferred term (the abbreviations
+  // GERD/GAD expand WITH it and match, but the prose forms don't). The disease/disorder noun is implied
+  // in clinical usage; lookahead avoids double-appending when it is already written.
+  [/\bgastro[\s-]?esophageal reflux\b(?!\s+disease)/g, 'gastroesophageal reflux disease'],
+  [/\bgeneralized anxiety\b(?!\s+disorder)/g, 'generalized anxiety disorder'],
+  [/\blewy body dementia\b/g, 'dementia with lewy bodies'],
+  [/\bckd\s?([1-5])\b/g, 'chronic kidney disease stage $1'],   // "CKD3" / "CKD 4" → staged
+  [/\besrd\b/g, 'end stage renal disease'],
+  // "end stage heart failure" (from CHF→heart failure) mis-scored to a CONGENITAL heart concept (Q24.9);
+  // normalize to "congestive heart failure" → I50.9 (coder refines to I50.84). Runs AFTER the chf abbrev.
+  [/\bend[\s-]?stage heart failure\b/g, 'congestive heart failure'],
+];
 // Negation / uncertainty cues — a problem carrying these is NOT coded as an active diagnosis.
 // (Status words like "resolving/stable/improving" are NOT negation — those conditions are still active.)
 // NOTE: "without" is deliberately NOT a negation cue — in ICD documentation it is a SPECIFIER
@@ -62,6 +92,7 @@ const searchTokens = (s) => norm(s).split(/[\s-]+/).filter((w) => w.length >= 3 
 function expandAbbrev(phrase) {
   const words = norm(phrase).split(/\s+/).map((w) => ABBREV[w] || w);
   let out = words.join(' ');
+  for (const [re, rep] of PHRASE_SYN) out = out.replace(re, rep); // normalize to SNOMED-preferred wording
   // "Type 2 diabetes" / bare "diabetes" is the common shorthand for "diabetes mellitus" — add the implied
   // word so the SNOMED coverage rule matches the concept (without it, "type 2 diabetes" fails to match
   // "Type 2 diabetes mellitus"). Not for "diabetes insipidus" (a different disease).
@@ -82,7 +113,22 @@ function expandAbbrev(phrase) {
 // not followed by one of these site/laterality/episode/severity modifiers. Prevents over-splitting a
 // pasted ICD description into a spurious fragment (which mis-coded to an unspecified code and dropped the
 // real code when two fragments' site tails collided).
-const DX_CONT = /(?:right|left|bilateral|unspecified|lumbar|lumbosacral|thoracolumbar|cervical|cervicothoracic|thoracic|sacral|sacrococcygeal|coccygeal|lumbar region|initial|subsequent|sequela|site|region|part|upper|lower|proximal|distal|with|without|acute|chronic|uncontrolled|controlled|mild|moderate|severe|type\s*\d|stage\s*\w|episode|encounter|not\s+elsewhere|nec|nos|other|specified|in\s+remission|intractable|not\s+intractable)\b/i;
+// Does the text IMMEDIATELY after a comma CONTINUE the preceding diagnosis (so the comma is intra-
+// diagnosis, not a list boundary)? Anchored to the START of `rest` — a qualifier appearing LATER in the
+// line must never suppress an earlier list comma (the bug that collapsed "anemia, HTN, CKD stage 3" into
+// one phrase because "stage" appeared at the end). A GRADED qualifier ("stage 3", "type 2", "grade IV")
+// continues the previous item ONLY when it is that item's trailing qualifier (nothing follows before the
+// next separator); when a condition word follows ("stage 3 sacral ulcer", "type 2 diabetes") it is a NEW
+// standalone item and the comma IS a boundary. Laterality/site words continue unless a condition noun
+// follows them (so "…, right knee" stays but "…, right-sided heart failure" splits).
+function commaContinuesDx(rest) {
+  const r = String(rest || '').replace(/^(?:and\s+|&\s+)/i, '');
+  if (/^(?:stage|type|grade|class|level|phase|category)\s*\w+\s*(?:[,;.)]|$)/i.test(r)) return true; // trailing graded qualifier
+  if (/^(?:right|left|bilateral|unspecified|site|region|part|upper|lower|proximal|distal|initial|subsequent|sequela|episode|encounter|other|specified|nec|nos)\b/i.test(r)
+    && !/\b(?:disease|injury|failure|ulcer|infection|fracture|pain|deficiency|disorder|syndrome|insufficiency|dementia)\b/i.test(r.split(/[,;]/)[0])) return true; // trailing site/laterality
+  if (/^(?:in\s+remission|intractable|not\s+intractable|resolved|resolving|inactive|stable|improving|improved|worsening|worsened|unchanged|unresolved|ongoing|active|well[\s-]?controlled|poorly[\s-]?controlled|at\s+baseline|new\s+onset|unstageable|unstaged|deep\s+tissue)\b/i.test(r)) return true; // trailing status word
+  return false;
+}
 function splitListLine(line) {
   const s = String(line || '');
   if (!/[,;]/.test(s)) return [s]; // not a list — keep combinations & combined codes whole
@@ -94,7 +140,7 @@ function splitListLine(line) {
   while ((m = re.exec(s)) !== null) {
     const sep = m[1];
     const rest = s.slice(re.lastIndex);
-    if (sep === ',' && DX_CONT.test(rest.replace(/^(?:and\s+|&\s+)/i, ''))) continue; // intra-description comma
+    if (sep === ',' && commaContinuesDx(rest)) continue; // intra-description comma (anchored: later qualifier can't suppress an earlier list comma)
     buf += s.slice(last, m.index);
     parts.push(buf);
     buf = '';
@@ -122,7 +168,23 @@ function parseProblemLine(rawLine) {
   // Cut at the first separator — but a period only counts as a boundary when it ENDS a sentence
   // (followed by whitespace or end), NEVER the decimal inside an ICD code (M54.17) or a value (5.5),
   // which previously truncated "...(M54.17)" to "...(M54" and killed the match.
-  let head = line.split(/[:;–—]|,\s|\s-\s|\.(?=\s|$)/)[0];
+  // Cut at hard separators (colon/semicolon/dash/sentence-period) first. A COMMA is a boundary ONLY when
+  // what follows is NOT a code-changing continuation — so "Pressure ulcer of sacral region, stage 3",
+  // "Chronic kidney disease, stage 4", and "Osteoarthritis, right knee" keep the site/stage/laterality in
+  // the head for the SNOMED match (these DETERMINE the billable ICD), while trailing narrative after a
+  // non-modifier comma ("CHF, admitted for diuresis") is still dropped.
+  // Strip a leading SECTION-LABEL prefix ("A/P:", "Assessment:", "Plan:", "Impression:", "Dx:") so the
+  // colon that follows it does not truncate the first diagnosis ("A/P: DM2 …" must code DM2, not "A/P").
+  line = line.replace(/^\s*(?:a\s*\/?\s*p|assessment(?:\s+and\s+plan)?|plan|impression|dx|diagnos[ei]s|problems?(?:\s+list)?|active problems?|medical problems?)\s*[:.\-–)]\s*/i, '');
+  let head = line.split(/[:;–—]|\s-\s|\.(?=\s|$)/)[0];
+  {
+    const re = /,\s/g; let m; let cut = -1;
+    while ((m = re.exec(head)) !== null) {
+      const rest = head.slice(re.lastIndex);
+      if (!commaContinuesDx(rest)) { cut = m.index; break; } // non-continuation comma → real boundary (anchored)
+    }
+    if (cut >= 0) head = head.slice(0, cut);
+  }
   head = head.split(/\b(?:due to|secondary to|related to|from|attributed to)\b/i)[0].trim();
   // Capture ANY explicit ICD-10-CM code the provider wrote on the line (with or without parens/label),
   // e.g. "Lumbar radiculopathy (M54.17)", "Heart failure improved I50.23". The provider's own code is
@@ -211,7 +273,28 @@ export function extractProblemPhrases(rawContent = {}, noteType = 'hp') {
     const raw = content?.[key];
     if (!raw || typeof raw !== 'string') continue;
     const lines = raw.split(/\r?\n+/)
-      .flatMap((ln) => ln.split(/(?=\b\d{1,2}[.)]\s)/)) // split a run-on numbered list onto its items
+      // Split a RUN-ON numbered list ("1. Dx one. 2. Dx two.") onto its items — but ONLY at a real item
+      // boundary (start of the segment, or right after a sentence period/semicolon), NEVER a qualifier
+      // number that is part of the diagnosis and DETERMINES the code ("stage 3", "type 2", "grade 4").
+      // "3." in "sacral pressure ulcer, stage 3." is preceded by a letter+space, so it is not a boundary;
+      // "2." after "…stage 3. " is preceded by ". ", so it correctly starts the next item.
+      // Split before an enumeration marker "N." / "N)" UNLESS the number is a code-changing qualifier value
+      // ("stage 3", "type 2", "grade 4"). This handles BOTH run-on lists that use periods ("...HF. 2. DM.")
+      // AND space-only lists ("...respiratory failure 2. aspiration pneumonia 3. dysphagia"), while never
+      // splitting "stage 3." mid-diagnosis. (A decimal like "9.2" isn't matched — no space after the dot.)
+      // ALSO split before a HASH problem-marker "#1"/"#2" — providers write inline problem lists as
+      // "#1 HTN #2 CAP #3 CKD". The "#" is unambiguous (never a "stage 3"-style qualifier), so it needs no
+      // qualifier lookbehind; without this the whole "#1 … #2 …" line collapses into one unmatched phrase.
+      .flatMap((ln) => ln.split(/(?<!(?:stage|type|grade|class|level|phase|category|factor|gcs)\s)(?=\b\d{1,2}[.)]\s)|(?=#\d{1,2}\b)/i))
+      // ALSO split an UNNUMBERED multi-sentence problem list ("…insulin use. Chronic constipation. Also
+      // COPD.") — providers list problems as separate sentences without numbers, and without this only the
+      // first sentence's head survived (parseProblemLine cuts its head at the first ". "), silently dropping
+      // the rest. Split only at a sentence period FOLLOWED by a capitalized/#-marked new clause and PRECEDED
+      // by a letter or ")" — so a decimal ("5.5"), an ICD code ("M54.16"), or "stage 3." (digit before the
+      // dot) is never split. Can only ADD segments (each matched independently) — never fabricates a code.
+      .flatMap((ln) => ln.split(/(?<=[A-Za-z)])\.\s+(?=[A-Z#])/))
+      .map((s) => s.replace(/^\s*#?\s*\d{1,2}[.)]?\s+/, '').trim()) // strip a leading "1." / "2)" / "#1" / "#2 " list marker
+      .filter(Boolean)
       .flatMap(splitListLine);                          // split a comma/"and" diagnosis LIST into items
     for (const line of lines) push(parseProblemLine(line), key);
   }
@@ -395,7 +478,43 @@ export async function matchIcdForPhrase(phrase, fullLine) {
   // bare head ("pain") in the memo.
   const memoKey = `${norm(fullLine || '')}§${pTokens.slice().sort().join(' ')}`;
   if (PHRASE_MEMO.has(memoKey)) return PHRASE_MEMO.get(memoKey);
-  const result = await resolveIcdForPhrase(phrase, expanded, pTokens, fullLine);
+  let result = await resolveIcdForPhrase(phrase, expanded, pTokens, fullLine);
+  // PARENTHETICAL FALLBACK. Providers append a parenthetical qualifier constantly ("Systolic heart
+  // failure (HFrEF)", "COPD (emphysema)", "Type 2 DM (poorly controlled)"). When that parenthetical
+  // does not itself resolve, the whole phrase would otherwise drop to unmatched. Retry WITHOUT losing
+  // information: first FOLD the parenthetical inline (preserves "(stage 3)"/"(left)"/severity), then —
+  // only if still unresolved — DROP it entirely. This can only convert unmatched→matched; it never
+  // overrides or degrades a match the full phrase already produced.
+  // QUALIFIER-NOISE RECOVERY. When the base phrase does not resolve, retry with progressively more of the
+  // NON-diagnostic qualifier noise removed — parenthetical, then spinal-level designators (L5-S1, C5-C6),
+  // then standalone laterality. Ordered MOST-PRESERVING first so specificity is kept when possible (e.g.
+  // "Lumbar radiculopathy L5-S1, left" fails whole but resolves to M54.16 once the level token is dropped,
+  // keeping laterality). Deterministic (pure ordered regex transforms) and strictly ADDITIVE — it fires
+  // ONLY on an otherwise-unmatched phrase, so it can only convert unmatched→matched (prevents silent data
+  // loss of a documented diagnosis) and never overrides or degrades a match the full phrase produced.
+  if (!result) {
+    // spinal level like L5-S1 / C5 / T12 / L4-L5 — but NOT "T2DM"/"L2" glued to letters (negative lookahead)
+    const SPINE = /\b[CTLS]\d{1,2}(?:\s*[-/]\s*[CTLS]?\d{1,2})?(?![A-Za-z0-9])/gi;
+    const LAT = /\b(?:left|right|bilateral|lt|rt|b\/l)\b/gi;
+    const clean = (s) => s.replace(/\s*,\s*(?=,|$)/g, '').replace(/\s+/g, ' ').replace(/\s+,/g, ',').trim();
+    const alts = [];
+    if (/\([^)]*\)/.test(phrase)) {
+      alts.push(clean(phrase.replace(/[()]/g, ' ')));            // fold parenthetical inline (keep "(stage 3)")
+      alts.push(clean(phrase.replace(/\s*\([^)]*\)/g, ' ')));    // drop the parenthetical entirely
+    }
+    alts.push(clean(phrase.replace(SPINE, ' ')));                // drop spinal-level noise, KEEP laterality
+    alts.push(clean(phrase.replace(SPINE, ' ').replace(LAT, ' '))); // last resort: drop level AND laterality
+    const tried = new Set([norm(phrase)]);
+    for (const alt of alts) {
+      const na = norm(alt);
+      if (!alt || tried.has(na)) continue; tried.add(na);
+      const altExp = expandAbbrev(alt);
+      const altTok = scoreTokens(altExp);
+      if (!altTok.length) continue;
+      result = await resolveIcdForPhrase(alt, altExp, altTok, fullLine || phrase);
+      if (result) break;
+    }
+  }
   if (PHRASE_MEMO.size >= PHRASE_MEMO_MAX) PHRASE_MEMO.delete(PHRASE_MEMO.keys().next().value);
   PHRASE_MEMO.set(memoKey, result);
   return result;
@@ -434,6 +553,37 @@ async function upgradeToBillableSeventh(icd, contextText) {
   const xCount = (c) => { let n = 0; for (const ch of c.replace('.', '').slice(3, 6)) if (ch === 'X') n += 1; return n; };
   cands.sort((a, b) => xCount(b) - xCount(a) || b.localeCompare(a));
   return { icd: cands[0], seventh };
+}
+
+// DOCUMENTED-SPECIFICITY UPGRADE. The SNOMED match sometimes lands on a GENERIC concept whose ICD map is
+// the "site/qualifier unspecified" leaf even though the note documents the specific axis — e.g. "lumbar
+// spondylosis" → M47.819 (site unspecified) when "lumbar" is documented (→ M47.816), or "acute respiratory
+// failure WITH HYPOXIA" → J96.00 (→ J96.01). This upgrades ONLY an unspecified leaf to the sibling billable
+// leaf whose OFFICIAL DESCRIPTION contains the DOCUMENTED axis — fully data-driven against icd10cm_valid
+// (no hard-coded digit maps), scoped to dorsopathies (region axis) and respiratory failure (hypoxia/
+// hypercapnia axis), and only when EXACTLY ONE sibling matches. It can only raise specificity to a value
+// the provider actually documented; it never invents specificity and never overrides a specific code.
+async function upgradeToDocumentedSpecificity(icd, text) {
+  const code = String(icd || '').toUpperCase();
+  if (!/^M(4\d|5[0-4])/.test(code) && !/^J96/.test(code)) return null;
+  if (code.replace('.', '').length < 5) return null;      // need a subclassification leaf to have siblings
+  const desc = (await icdDescription(code)) || '';
+  if (!/unspecified/i.test(desc)) return null;            // only ever upgrade an UNSPECIFIED leaf
+  const t = String(text || '').toLowerCase();
+  let token = null;
+  if (/^M/.test(code)) {
+    token = /\blumbosacral\b/.test(t) ? 'lumbosacral' : /\bthoracolumbar\b/.test(t) ? 'thoracolumbar'
+      : /\bcervicothoracic\b/.test(t) ? 'cervicothoracic' : /\blumbar\b/.test(t) ? 'lumbar'
+      : /\bcervical\b/.test(t) ? 'cervical' : /\bthoracic\b/.test(t) ? 'thoracic'
+      : /\bsacrococcygeal\b/.test(t) ? 'sacrococcygeal' : /\bsacral\b/.test(t) ? 'sacral' : null;
+  } else { // J96 respiratory failure
+    token = /hypercapni|hypercarbi/.test(t) ? 'hypercapnia' : /hypox/.test(t) ? 'hypoxia' : null;
+  }
+  if (!token) return null;
+  const [kids] = await pool.query('SELECT code, description FROM icd10cm_valid WHERE code LIKE ?', [`${code.slice(0, -1)}%`]);
+  const matches = kids.filter((k) => k.code.toUpperCase() !== code && new RegExp(`\\b${token}`, 'i').test(k.description || ''));
+  if (matches.length !== 1) return null;                  // require an unambiguous single specific sibling
+  return { icd: matches[0].code.toUpperCase(), description: matches[0].description };
 }
 
 async function resolveIcdForPhrase(phrase, expanded, pTokens, fullLine) {
@@ -490,15 +640,25 @@ async function resolveIcdForPhrase(phrase, expanded, pTokens, fullLine) {
   // and then folding IN RANK ORDER preserves the exact same deterministic result (first billable primary
   // in rank order wins; else the best-ranked non-billable becomes the 7th-char-completion base).
   const top = ranked.slice(0, 10);
-  const maps = await Promise.all(top.map(({ c }) => snomedToIcd10cm(c.code)));
+  // ONE batched map query for all top candidates (was up to 10 sequential/parallel single lookups — the
+  // dominant multi-problem real-time cost). Folded back in RANK ORDER → identical deterministic result.
+  const mapById = await snomedToIcd10cmBatch(top.map(({ c }) => c.code));
+  const maps = top.map(({ c }) => mapById.get(String(c.code)) || { primary: null, candidates: [] });
   let seventhFallback = null; // best non-billable injury/7th-char base seen, to complete if nothing billable
   for (let i = 0; i < top.length; i += 1) {
     const c = top[i].c;
     const map = maps[i];
     if (!map.primary) continue;
     if (map.primary.billable) {
-      return { icd: map.primary.icd, description: map.primary.description, snomedCode: c.code,
-        snomedTerm: c.name, contextDependent: !!map.primary.contextDependent };
+      let icd = map.primary.icd; let description = map.primary.description;
+      // Best-effort specificity enrichment: raise an unspecified leaf to the documented axis. Wrapped so a
+      // transient DB error NEVER drops the already-validated base code — worst case the base (correct, less
+      // specific) code stands. Enrichment only; not a degraded/mock fallback.
+      try {
+        const spec = await upgradeToDocumentedSpecificity(icd, fullLine || phrase);
+        if (spec) { icd = spec.icd; description = spec.description; }
+      } catch (e) { logger.warn({ err: e?.message, icd }, 'specificity-upgrade enrichment failed — keeping validated base code'); } // logged, not silent; base code preserved (no data loss)
+      return { icd, description, snomedCode: c.code, snomedTerm: c.name, contextDependent: !!map.primary.contextDependent };
     }
     // Remember the FIRST (best-ranked) non-billable mapped code as a 7th-character-completion candidate.
     if (!seventhFallback) seventhFallback = { icd: map.primary.icd, c };
@@ -543,6 +703,34 @@ const EM_FAMILIES = {
     hospice: { kind: 'home-est', codes: ['99347', '99348', '99349', '99350'], times: [20, 30, 40, 60], label: 'Home or residence visit, established patient' },
     discharge: { kind: 'home-est', codes: ['99347', '99348', '99349', '99350'], times: [20, 30, 40, 60], label: 'Home or residence visit, established patient' },
   },
+  office: {
+    // Office / outpatient POS (11, 19/22 outpatient hospital, 49/50/71/72 clinics, 20 urgent care): the
+    // 2021-revised families — NEW 99202-99205 (15/30/45/60 min), ESTABLISHED 99212-99215 (10/20/30/40).
+    // Anchoring the family to the POS (not the SNF template) prevents a POS-vs-code mismatch DENIAL.
+    hp: { kind: 'office-new', codes: ['99202', '99203', '99204', '99205'], times: [15, 30, 45, 60], label: 'Office/outpatient visit, new patient' },
+    soap: { kind: 'office-est', codes: ['99212', '99213', '99214', '99215'], times: [10, 20, 30, 40], label: 'Office/outpatient visit, established patient' },
+    progress: { kind: 'office-est', codes: ['99212', '99213', '99214', '99215'], times: [10, 20, 30, 40], label: 'Office/outpatient visit, established patient' },
+    acuteChange: { kind: 'office-est', codes: ['99212', '99213', '99214', '99215'], times: [10, 20, 30, 40], label: 'Office/outpatient visit, established patient' },
+    hospice: { kind: 'office-est', codes: ['99212', '99213', '99214', '99215'], times: [10, 20, 30, 40], label: 'Office/outpatient visit, established patient' },
+    // No office DISCHARGE E/M — a discharge template at an office POS gets no auto E/M (coder assigns).
+  },
+  inpatient: {
+    // Hospital inpatient / observation (POS 21 / 51 / 61) — 2023-merged families: initial 99221-99223
+    // (40/55/75 min), subsequent 99231-99233 (25/35/50 min), discharge 99238-99239 (≤30 / >30 min).
+    hp: { kind: 'initial', codes: ['99221', '99222', '99223'], times: [40, 55, 75], label: 'Initial hospital inpatient/observation care' },
+    soap: { kind: 'ip-sub', codes: ['99231', '99232', '99233'], times: [25, 35, 50], label: 'Subsequent hospital inpatient/observation care' },
+    progress: { kind: 'ip-sub', codes: ['99231', '99232', '99233'], times: [25, 35, 50], label: 'Subsequent hospital inpatient/observation care' },
+    acuteChange: { kind: 'ip-sub', codes: ['99231', '99232', '99233'], times: [25, 35, 50], label: 'Subsequent hospital inpatient/observation care' },
+    hospice: { kind: 'ip-sub', codes: ['99231', '99232', '99233'], times: [25, 35, 50], label: 'Subsequent hospital inpatient/observation care' },
+    discharge: { kind: 'discharge', codes: ['99238', '99239'], times: [0, 31], label: 'Hospital inpatient/observation discharge day management' },
+  },
+  ed: {
+    // Emergency department (POS 23) — 99281-99285, MDM-only (NO time-based leveling; times omitted).
+    hp: { kind: 'ed', codes: ['99281', '99282', '99283', '99284', '99285'], times: null, label: 'Emergency department visit' },
+    soap: { kind: 'ed', codes: ['99281', '99282', '99283', '99284', '99285'], times: null, label: 'Emergency department visit' },
+    progress: { kind: 'ed', codes: ['99281', '99282', '99283', '99284', '99285'], times: null, label: 'Emergency department visit' },
+    acuteChange: { kind: 'ed', codes: ['99281', '99282', '99283', '99284', '99285'], times: null, label: 'Emergency department visit' },
+  },
   // NOTE: 'acp' (Advance Care Planning, 99497/98 — time-based) and 'telehealth' (an attestation addendum)
   // are deliberately ABSENT — they are NOT standalone E/M visits, so no E/M code is auto-suggested for
   // them (no silent fallback to a subsequent-visit code); their coding is assigned separately.
@@ -570,11 +758,23 @@ const OFFICE_EM = {
 // Default is 'nf' (the primary SNF use case); explicit home/residence signals switch to 'home'.
 function detectSetting(content = {}, posHint) {
   const pos = String(posHint || '').trim();
-  if (['31', '32'].includes(pos)) return 'nf';
-  if (['12', '13', '14', '33'].includes(pos)) return 'home';
-  if (posHint === 'nf' || posHint === 'home') return posHint;
+  // An EXPLICIT Place of Service is AUTHORITATIVE — the E/M family must match it or the payer denies the
+  // line (POS-vs-code edit). Map each POS to its E/M setting; a POS with no auto-E/M family (inpatient 21,
+  // ER 23, telehealth, ambulatory surgical 24, …) returns 'other' so NO E/M is suggested (the coder
+  // assigns the setting-correct code) rather than a MISMATCHED nursing-facility code that would deny.
+  if (pos) {
+    if (['31', '32'].includes(pos)) return 'nf';                               // skilled/nursing facility
+    if (['12', '13', '14', '33'].includes(pos)) return 'home';                 // home / assisted living / group home / custodial
+    if (['11', '19', '22', '49', '50', '71', '72', '20'].includes(pos)) return 'office'; // office / outpatient / clinic / urgent care
+    if (['21', '51', '61'].includes(pos)) return 'inpatient';                  // hospital inpatient / psych / rehab
+    if (pos === '23') return 'ed';                                             // emergency department
+    if (['nf', 'home', 'office', 'inpatient', 'ed'].includes(posHint)) return posHint;
+    if (/^\d{1,2}$/.test(pos)) return 'other';                                 // explicit but unmapped POS → no auto E/M (denial-safe)
+  }
+  // No POS provided → detect the setting from the note text; default to nf (the primary SNF use case).
   const t = Object.values(content).filter((v) => typeof v === 'string').join('  ').toLowerCase();
   if (/\b(skilled nursing|nursing facility|nursing home|\bsnf\b|long[\s-]?term care facility)\b/.test(t)) return 'nf';
+  if (/\b(office|clinic|outpatient)\b/.test(t) && !/\b(nursing|snf|facility|home)\b/.test(t)) return 'office';
   if (/\b(assisted living|\balf\b|memory care|residential care|domiciliary|rest home|group home|board and care|adult family home)\b/.test(t)
       || /(visit\s+(was\s+)?(done|conducted|performed|seen)[^.]{0,30}\b(at|in)\s+(the\s+)?(patient'?s?\s+)?home|home visit|seen at home)/.test(t)) return 'home';
   return 'nf';
@@ -583,6 +783,9 @@ function pickFamily(setting, noteType) {
   // PI/Pain office E/M visits are outpatient services — always the office family, independent of the
   // SNF/home setting detection (which only applies to the SNF note types).
   if (OFFICE_EM[noteType]) return OFFICE_EM[noteType];
+  // An explicit but unmapped POS ('other' — inpatient, ER, ASC, telehealth POS, …): suggest NO E/M so a
+  // mismatched (denial-causing) code is never emitted; the coder assigns the setting-correct E/M.
+  if (setting === 'other') return null;
   const bySetting = EM_FAMILIES[setting] || EM_FAMILIES.nf;
   // No fallback: a note type with no E/M family (acp / telehealth / PI-Pain non-visit types) returns
   // null so NO E/M code is invented.
@@ -632,6 +835,14 @@ function mdmProxyLevel(content = {}, problemCount = 0, fam) {
     const idx = highSig ? 3 : (problemCount <= 1 && !modSig) ? 1 : 2;
     return { idx, basis: `MDM proxy — ${highSig ? 'high acuity' : (problemCount <= 1 && !modSig) ? 'low' : 'moderate'} (${setLabel}) — coder confirms` };
   }
+  if (fam.kind === 'ip-sub') { // subsequent hospital inpatient/obs: 99231/99232/99233 (3 codes)
+    const idx = highSig ? 2 : modSig ? 1 : 0;
+    return { idx, basis: `MDM proxy — ${highSig ? 'unstable/significant complication (high)' : modSig ? 'responding inadequately / minor complication (moderate)' : 'stable, recovering (low)'} (${setLabel}) — coder confirms` };
+  }
+  if (fam.kind === 'ed') { // emergency department: 99281-99285 (MDM-driven, 5 codes)
+    const idx = highSig ? 4 : modSig ? 3 : 2;
+    return { idx, basis: `MDM proxy — ${highSig ? 'high complexity / threat to life' : modSig ? 'moderate complexity' : 'low-moderate complexity'} (${setLabel}) — coder confirms` };
+  }
   // Subsequent NF / established home: floor at LOW for stable chronic care; escalate on documented acuity.
   if (highSig) return { idx: 3, basis: `MDM proxy — documented instability / threat to life (high, ${setLabel}) — coder confirms` };
   if (modSig) return { idx: 2, basis: `MDM proxy — documented acuity/active problem (moderate, ${problemCount} problems, ${setLabel}) — coder confirms` };
@@ -653,6 +864,7 @@ function clinicalTextLength(content = {}) {
 }
 
 export function predictEM(content = {}, noteType = 'hp', problemCount = 0, posHint) {
+  content = content || {}; // a note row with NULL content must not crash prediction (default only catches undefined)
   // Advance Care Planning is its OWN time-based service — CPT 99497 (first 30 min, face-to-face) plus
   // +99498 for each additional 30 min — NOT a subsequent-visit E/M. Per CMS: 99497 is reportable once
   // ≥16 min of ACP counseling is documented (midpoint of the first 30), and each 99498 once the next
@@ -691,7 +903,8 @@ export function predictEM(content = {}, noteType = 'hp', problemCount = 0, posHi
     // confirm (E/M leveling is provider-attested). Under-coding is only avoided WITHIN documented support.
     const em = mdmProxyLevel(content, problemCount, fam);
     idx = em.idx; basis = em.basis;
-    if (minutes != null) {
+    // Time-based leveling applies only when the family HAS time thresholds (ED is MDM-only → times null).
+    if (minutes != null && Array.isArray(fam.times) && fam.times.length) {
       let timeIdx = 0; for (let i = 0; i < fam.times.length; i += 1) if (minutes >= fam.times[i]) timeIdx = i;
       if (timeIdx > idx) { idx = timeIdx; basis = `documented total time ${minutes} min (time-based; MDM proxy supports ${fam.codes[em.idx]})`; }
       else if (timeIdx === idx) basis = `${em.basis}; corroborated by documented time ${minutes} min`;
@@ -699,6 +912,9 @@ export function predictEM(content = {}, noteType = 'hp', problemCount = 0, posHi
     }
     confirm = true;
   }
+  // Safety clamp — the selected level index can NEVER exceed the family's code list (guards a 3-code family
+  // against a 4-code MDM index, so an undefined CPT is impossible).
+  idx = Math.max(0, Math.min(idx, fam.codes.length - 1));
   // Hospice ATTENDING visit → modifier GV (attending physician, not employed by the hospice, care
   // related to the terminal condition). Coder confirms GV vs GW (services unrelated to the terminal dx).
   // A pain-management TELEHEALTH visit → modifier 95 (synchronous audio-video); coder confirms POS 10/02.
@@ -733,69 +949,111 @@ export function predictProcedures(content = {}) {
   const t = Object.values(flat).filter((v) => typeof v === 'string').join('  ').toLowerCase();
   if (!t.trim()) return [];
   const out = [];
-  // Procedure ATTRIBUTES — laterality (LT/RT/50), spine region (C/T vs L/S), and level count — are read
-  // ONLY from PROCEDURE-designated sections, NOT the whole note. Otherwise a diagnosis's laterality
-  // ("osteoarthritis, right knee") contaminates an unrelated procedure's modifier (a LEFT TFESI would be
-  // mis-coded 50 instead of LT). Procedure DETECTION still scans the whole note (so a procedure documented
-  // anywhere is caught); only the attributes are procedure-scoped, falling back to the whole note when no
-  // procedure-named section exists. Dynamic (any …procedure… section key), so new templates work too.
+  const seen = new Set();
+  const emit = (cpt, modifiers, extra) => { const k = `${cpt}|${modifiers || ''}`; if (seen.has(k)) return; seen.add(k); out.push({ cpt, units: 1, modifiers: modifiers || '', confirm: true, ...extra }); };
   const procText = Object.keys(flat).filter((k) => /procedure/i.test(k))
     .map((k) => flat[k]).filter((v) => typeof v === 'string').join('  ').toLowerCase();
-  const attrText = procText.trim() ? procText : t;
-  const latMod = detectLateralityMod(attrText);
-  const ct = spineRegionCT(attrText);
-  const push = (cpt, extra = {}) => out.push({ cpt, units: 1, modifiers: latMod, confirm: true, ...extra });
 
-  // Transforaminal epidural steroid injection (TFESI) — imaging-inclusive codes. The abbreviations
-  // TFESI/SNRB inherently denote the injection, so they alone suffice; the spelled-out forms still
-  // require an action word (injection/steroid/epidural/block/nerve root).
-  const tfesiHit = /\btfesi\b|\bsnrb\b/.test(t)
-    || ((/transforaminal|selective nerve root block/.test(t)) && /(epidural|steroid|injection|inject|block|nerve root)/.test(t));
-  if (tfesiHit) {
-    push(ct ? '64479' : '64483', { basis: `transforaminal epidural, ${ct ? 'cervical/thoracic' : 'lumbar/sacral'} (add ${ct ? '64480' : '64484'} per additional level)` });
-  } else if (/(interlaminar|caudal|epidural steroid|\besi\b)/.test(t) && /(epidural|steroid|injection|block)/.test(t)) {
-    // Interlaminar/caudal epidural steroid injection (with imaging guidance).
-    push(ct ? '62321' : '62323', { basis: `interlaminar/caudal epidural steroid, ${ct ? 'cervical/thoracic' : 'lumbar/sacral'}` });
-  }
-  // Facet joint injection / medial branch block (paravertebral facet).
-  if (/(facet|medial branch|zygapophyseal|paravertebral)/.test(t) && /(injection|block|\bmbb\b|inject)/.test(t) && !/(radiofrequency|\brfa\b|ablation|neurotomy)/.test(t)) {
-    const n = Math.min(levelCount(attrText), 2);
-    push(ct ? (n >= 2 ? '64491' : '64490') : (n >= 2 ? '64494' : '64493'), { basis: `paravertebral facet joint injection/MBB, ${ct ? 'cervical/thoracic' : 'lumbar/sacral'}, ${n} level(s)` });
-  }
-  // Radiofrequency ablation / neurotomy of facet (paravertebral) nerves.
-  if (/(radiofrequency|\brfa\b|\brfn\b|neurotomy|ablation|rhizotomy)/.test(t) && /(facet|medial branch|paravertebral|zygapophyseal)/.test(t)) {
-    push(ct ? '64633' : '64635', { basis: `radiofrequency ablation of paravertebral facet nerve, ${ct ? 'cervical/thoracic' : 'lumbar/sacral'} (add ${ct ? '64634' : '64636'} per additional level)` });
-  }
-  // Sacroiliac (SI) joint: RFA vs injection.
-  if (/(sacroiliac|\bsi joint\b|si-joint)/.test(t)) {
-    if (/(radiofrequency|\brfa\b|ablation|neurotomy)/.test(t)) push('64625', { basis: 'radiofrequency ablation, SI joint nerves (imaging-inclusive)' });
-    else if (/(injection|inject|block|arthrogram)/.test(t)) push('27096', { basis: 'sacroiliac joint injection with imaging guidance' });
-  }
-  // Trigger point injection(s) — by muscle count. The abbreviation "TPI" alone denotes the injection;
-  // otherwise require "trigger point" + an injection action word.
-  if (/\btpi\b/.test(t) || (/trigger point/.test(t) && /(injection|inject)/.test(t))) {
-    const three = /\b(three|four|five|3|4|5)\b[^.]{0,20}muscle|\bmultiple muscles\b/.test(attrText);
-    out.push({ cpt: three ? '20553' : '20552', units: 1, modifiers: '', confirm: true, basis: `trigger point injection, ${three ? '3 or more' : '1-2'} muscle(s)` });
-  }
-  // Major/intermediate/small PERIPHERAL joint or bursa injection/aspiration. No blanket spine-exclusion:
-  // the specific peripheral-joint names below (knee/shoulder/hip/elbow/…) never overlap with spine terms,
-  // so a facet/SI/epidural note simply matches none of them — while a note documenting BOTH a spine
-  // procedure AND a peripheral joint injection now correctly predicts the peripheral joint too.
-  // Peripheral joint/bursa injection or aspiration. Gate on an injection ACTION + a JOINT-CONTEXT term
-  // (the word joint/bursa/arthrocentesis/aspiration OR a joint-type/abbreviation like TMJ, interphalangeal,
-  // subacromial, glenohumeral…) + a specific joint name. This catches real phrasings that omit the literal
-  // word "joint" ("TMJ injection", "great toe interphalangeal injection") WITHOUT false-firing on an
-  // unrelated procedure that merely mentions a joint diagnosis (e.g. an epidural with a "knee OA" dx).
-  const jointCtx = /(joint|bursa|arthrocentesis|aspiration|interphalangeal|metacarpophalangeal|glenohumeral|acromioclavicular|\btmj\b|temporomandibular|subacromial|trochanteric|\bmcp\b|\bpip\b|\bdip\b)/.test(t);
-  if (/(injection|inject|aspiration|arthrocentesis)/.test(t) && jointCtx) {
-    if (/\b(knee|shoulder|hip|glenohumeral)\b/.test(t)) push('20610', { basis: 'major joint/bursa injection or aspiration (knee/shoulder/hip)' });
-    else if (/\b(elbow|wrist|ankle|acromioclavicular|\btmj\b|temporomandibular)\b/.test(t)) push('20605', { basis: 'intermediate joint/bursa injection or aspiration' });
-    else if (/\b(finger|toe|interphalangeal|metacarpophalangeal|\bmcp\b|\bpip\b|\bdip\b)\b/.test(t)) push('20600', { basis: 'small joint/bursa injection or aspiration' });
+  // Detection over a text SEGMENT. `scoped` = the segment is procedure-designated (a procedure clause), so a
+  // joint NAME + "injection" is unambiguous even without the word "joint"; when NOT scoped (the whole note),
+  // a joint injection still requires an explicit joint-context word so a "knee OA" DIAGNOSIS never fires a
+  // CPT. Laterality (LT/RT/50), spine region, and level are all read from the SAME segment — so two
+  // procedures documented on DIFFERENT sides each get their own modifier (a LEFT TFESI is never mis-billed 50).
+  const detect = (dt, scoped) => {
+    const latMod = detectLateralityMod(dt);
+    const ct = spineRegionCT(dt);
+    const push = (cpt, extra = {}) => emit(cpt, extra.modifiers ?? latMod, extra);
+    // TFESI (imaging-inclusive). TFESI/SNRB alone suffice; spelled-out forms need an action word.
+    const tfesiHit = /\btfesi\b|\bsnrb\b/.test(dt)
+      || ((/transforaminal|selective nerve root block/.test(dt)) && /(epidural|steroid|injection|inject|block|nerve root|\besi\b)/.test(dt));
+    if (tfesiHit) {
+      const n = Math.min(levelCount(dt), 6);
+      push(ct ? '64479' : '64483', { basis: `transforaminal epidural, ${ct ? 'cervical/thoracic' : 'lumbar/sacral'}, first level` });
+      if (n >= 2) push(ct ? '64480' : '64484', { units: n - 1, basis: `transforaminal epidural, each additional level (${n - 1} additional)` }); // add-on — REQUIRES its primary; never billed alone
+    } else if (/(interlaminar|caudal|epidural steroid|\besi\b)/.test(dt) && /(epidural|steroid|injection|block|\besi\b)/.test(dt)) {
+      push(ct ? '62321' : '62323', { basis: `interlaminar/caudal epidural steroid, ${ct ? 'cervical/thoracic' : 'lumbar/sacral'}` });
+    }
+    // Facet joint injection / medial branch block. Paravertebral facet CPTs are per-level with DISTINCT
+    // codes: lumbar 64493 (1st) + 64494 (2nd) + 64495 (3rd & any additional); cervical 64490/64491/64492.
+    // The add-on codes REQUIRE the primary — previously n≥2 emitted only the add-on (64494) alone, which
+    // denies as an add-on without its base. Emit the primary, then each documented additional level.
+    if (/(facet|medial branch|zygapophyseal|paravertebral|\bmbb\b)/.test(dt) && /(injection|block|\bmbb\b|inject)/.test(dt) && !/(radiofrequency|\brfa\b|ablation|neurotomy)/.test(dt)) {
+      const n = Math.min(levelCount(dt), 3);
+      const codes = ct ? ['64490', '64491', '64492'] : ['64493', '64494', '64495'];
+      push(codes[0], { basis: `paravertebral facet joint injection/MBB, ${ct ? 'cervical/thoracic' : 'lumbar/sacral'}, first level` });
+      if (n >= 2) push(codes[1], { basis: `paravertebral facet joint injection/MBB, second level` });
+      if (n >= 3) push(codes[2], { basis: `paravertebral facet joint injection/MBB, third and any additional level(s)` });
+    }
+    // RFA / neurotomy of facet nerves — lumbar 64635 (1st) + 64636 (each additional, units); cervical
+    // 64633 + 64634. The add-on was never emitted for multi-level, under-coding the claim.
+    if (/(radiofrequency|\brfa\b|\brfn\b|neurotomy|ablation|rhizotomy)/.test(dt) && /(facet|medial branch|paravertebral|zygapophyseal)/.test(dt)) {
+      const n = Math.min(levelCount(dt), 6);
+      push(ct ? '64633' : '64635', { basis: `radiofrequency ablation of paravertebral facet nerve, ${ct ? 'cervical/thoracic' : 'lumbar/sacral'}, first level` });
+      if (n >= 2) push(ct ? '64634' : '64636', { units: n - 1, basis: `radiofrequency ablation of paravertebral facet nerve, each additional level (${n - 1} additional)` });
+    }
+    // Sacroiliac (SI) joint: RFA vs injection.
+    if (/(sacroiliac|\bsi joint\b|si-joint)/.test(dt)) {
+      if (/(radiofrequency|\brfa\b|ablation|neurotomy)/.test(dt)) push('64625', { basis: 'radiofrequency ablation, SI joint nerves (imaging-inclusive)' });
+      else if (/(injection|inject|block|arthrogram)/.test(dt)) push('27096', { basis: 'sacroiliac joint injection with imaging guidance' });
+    }
+    // Trigger point injection(s) — CPT is driven by muscle COUNT (20552 = 1-2 muscles, 20553 = 3+), no
+    // laterality. Extract the count robustly: "x3 muscles", "x 3", "3 muscles", "three muscles" — the old
+    // \b3\b failed on "x3" (no word boundary between x and 3) and under-coded 3-muscle TPIs to 20552.
+    if (/\btpi\b/.test(dt) || (/trigger point/.test(dt) && /(injection|inject)/.test(dt))) {
+      const NW = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+      const cm = dt.match(/x\s*(\d{1,2})|(\d{1,2})\s*(?:muscle|site|trigger|tp)/) || dt.match(/\b(one|two|three|four|five|six|seven|eight|nine|ten)\b[^.]{0,20}(?:muscle|site)/);
+      let n = null;
+      if (cm) { const g = (cm[1] || cm[2] || '').toLowerCase(); n = NW[g] != null ? NW[g] : parseInt(g, 10); }
+      else if (/\bmultiple muscles?\b/.test(dt)) n = 3;
+      const three = Number.isInteger(n) && n >= 3;
+      emit(three ? '20553' : '20552', '', { basis: `trigger point injection, ${three ? '3 or more' : '1-2'} muscle(s)` });
+    }
+    // Peripheral joint/bursa injection (size by joint). A specific joint name is unambiguous within a
+    // procedure clause (scoped); on the whole note, an explicit joint-context word is required.
+    const jointCtx = /(joint|bursa|arthrocentesis|aspiration|intra[\s-]?articular|interphalangeal|metacarpophalangeal|glenohumeral|acromioclavicular|\btmj\b|temporomandibular|subacromial|trochanteric|\bmcp\b|\bpip\b|\bdip\b)/.test(dt);
+    const jointPart = scoped && /(injection|inject|aspiration|arthrocentesis)/.test(dt) && /\b(knee|shoulder|hip|elbow|wrist|ankle)\b/.test(dt);
+    if ((/(injection|inject|aspiration|arthrocentesis)/.test(dt) && jointCtx) || jointPart) {
+      if (/\b(knee|shoulder|hip|glenohumeral|trochanteric|subacromial)\b/.test(dt)) push('20610', { basis: 'major joint/bursa injection or aspiration (knee/shoulder/hip)' });
+      else if (/\b(elbow|wrist|ankle|acromioclavicular|\btmj\b|temporomandibular)\b/.test(dt)) push('20605', { basis: 'intermediate joint/bursa injection or aspiration' });
+      else if (/\b(finger|toe|interphalangeal|metacarpophalangeal|\bmcp\b|\bpip\b|\bdip\b)\b/.test(dt)) push('20600', { basis: 'small joint/bursa injection or aspiration' });
+    }
+    // ---- SNF / bedside procedures (physician-performed, Part B) ----------------------------------------
+    const isNail = /\b(?:toe|finger)?nails?\b|onychomycos|mycotic nail/.test(dt);
+    const negProc = /\bno (?:wound |sharp |surgical )?debride|without debride|debridement (?:was )?(?:not|deferred)|dressing change only|no procedure performed/.test(dt);
+    // WOUND DEBRIDEMENT — deepest tissue removed drives the CPT: bone → 11044, muscle/fascia → 11043,
+    // subcutaneous → 11042; non-excisional/selective → 97597. Size drives add-ons (coder confirms).
+    if (!negProc && !isNail && /\bdebride(?:ment|d|s)?\b/.test(dt) && /(wound|ulcer|pressure|eschar|slough|necroti|devitaliz|granulat|soft tissue|subcutaneous|subcut|subq|\bskin\b|dermis|epiderm|muscle|fascia|bone)/.test(dt)) {
+      if (/\bbone\b/.test(dt)) push('11044', { basis: 'surgical debridement to BONE (11045-11047 per additional 20 sq cm) — confirm depth & size', modifiers: '' });
+      else if (/(muscle|fascia)/.test(dt)) push('11043', { basis: 'surgical debridement of MUSCLE/FASCIA (11046 per additional 20 sq cm) — confirm depth & size', modifiers: '' });
+      else if (/(subcutaneous|subcut|subq|full[\s-]?thickness|excisional)/.test(dt)) push('11042', { basis: 'surgical debridement of SUBCUTANEOUS tissue (11045 per additional 20 sq cm) — confirm depth & size', modifiers: '' });
+      else push('97597', { basis: 'selective (non-excisional) debridement of devitalized tissue, first 20 sq cm (97598 per additional 20 sq cm) — confirm size', modifiers: '' });
+    }
+    // NAIL DEBRIDEMENT — 11720 (1-5 nails) / 11721 (6 or more).
+    if (!negProc && isNail && /(debride|mycotic|onychomycos|dystrophic|trim)/.test(dt)) {
+      const many = /\b(6|7|8|9|10|11|12|six|seven|eight|nine|ten)\b[^.]{0,18}nail|all\s+(?:ten|10)\s+nails|multiple nails|\ball nails\b/.test(dt);
+      push(many ? '11721' : '11720', { basis: `debridement of nail(s), ${many ? '6 or more' : '1 to 5'} — confirm count`, modifiers: '' });
+    }
+    // CERUMEN removal (impacted, requiring instrumentation) — 69210 (±50 bilateral).
+    if (/\bcerumen\b|impacted (?:ear ?)?wax|earwax/.test(dt) && /(remov|disimpact|curette|irrigat|instrument)/.test(dt)) {
+      push('69210', { basis: 'removal of impacted cerumen requiring instrumentation, unilateral (add -50 if bilateral)', modifiers: /\bbilateral\b|both ears/.test(dt) ? '50' : latMod });
+    }
+  };
+
+  // A procedure section is detected PER CLAUSE (split on ; / sentence / newline / "and also") so each
+  // procedure gets its OWN laterality/region/level and a diagnosis never contaminates a procedure. With no
+  // procedure section, the whole note is one unscoped segment (joint injections then need an explicit
+  // joint-context word). Commas are NOT split points (they occur inside one procedure: "L4-L5, left").
+  if (procText.trim()) {
+    const clauses = procText.split(/;|\.\s+|\n|\band also\b|\balso\b/).map((s) => s.trim()).filter((s) => s.length > 2);
+    for (const c of (clauses.length ? clauses : [procText])) detect(c, true);
+  } else {
+    detect(t, false);
   }
   return out;
 }
 
 export async function predictEncounterCoding(content = {}, { noteType = 'hp', pos } = {}) {
+  content = content || {}; // NULL note content must never crash the coding prediction
   // Surface section text to the flat keys the extractors (diagnoses, E/M, procedures) read — real notes
   // store text under content.sections, so without this the whole prediction ran on empty input.
   content = withFlatSections(content);
@@ -880,9 +1138,11 @@ async function applyLinkage(diagnoses, content) {
   // "diabetes WITH chronic kidney disease stage 3" line). Per ICD-10-CM the CKD STAGE (N18.-) must be
   // coded IN ADDITION to any diabetic/hypertensive CKD combination — add the documented stage so it is
   // never lost, which also enables the hypertensive-CKD combination below.
-  const ckdDocumented = hasText(/chronic kidney disease|\bckd\b/) || esrd;
+  // Detect CKD even in the abbreviated no-space form "CKD4"/"CKD3a" (\bckd\b alone fails there because a
+  // digit follows with no word boundary), so the stage code is co-reported for "T2DM with CKD4" too.
+  const ckdDocumented = hasText(/chronic kidney disease|\bckd\b|\bckd\s?(?:3a|3b|[1-5])/) || esrd;
   if (ckdDocumented && !hasCode(/^N18\./)) {
-    const sm = text.match(/stage\s*(3a|3b|[1-5])/);
+    const sm = text.match(/(?:stage|ckd)\s*(3a|3b|[1-5])/);
     const stageCode = esrd ? 'N18.6'
       : sm ? ({ 1: 'N18.1', 2: 'N18.2', 3: 'N18.30', '3a': 'N18.31', '3b': 'N18.32', 4: 'N18.4', 5: 'N18.5' }[sm[1]] || 'N18.9')
         : 'N18.9';
@@ -897,20 +1157,30 @@ async function applyLinkage(diagnoses, content) {
     }
   }
   if (hasDM2 && hasPAD) await add('E11.51', 'Type 2 diabetes mellitus with diabetic peripheral angiopathy without gangrene', 'DM + PAD');
-  if (hasDM2 && hasText(/neuropath/)) await add('E11.40', 'Type 2 diabetes mellitus with diabetic neuropathy, unspecified', 'DM + neuropathy');
-  if (hasDM2 && hasText(/retinopath/)) await add('E11.319', 'Type 2 diabetes mellitus with unspecified diabetic retinopathy without macular edema', 'DM + retinopathy');
+  // Add the UNSPECIFIED diabetic-complication combo ONLY when no MORE-SPECIFIC sibling is already coded —
+  // otherwise "DM with diabetic polyneuropathy" (E11.42) would carry a redundant E11.40, and a specific
+  // retinopathy (E11.311/E11.321/…) a redundant E11.319. The specific code from the phrase match stands.
+  if (hasDM2 && hasText(/neuropath/) && !hasCode(/^E11\.4[1-9]$/)) await add('E11.40', 'Type 2 diabetes mellitus with diabetic neuropathy, unspecified', 'DM + neuropathy');
+  if (hasDM2 && hasText(/retinopath/) && !hasCode(/^E11\.3[123][1-9]$/)) await add('E11.319', 'Type 2 diabetes mellitus with unspecified diabetic retinopathy without macular edema', 'DM + retinopathy');
 
-  // Hypertensive chronic kidney disease (combination), then hypertensive heart disease.
+  // Hypertensive chronic kidney disease (combination — ICD-10-CM PRESUMES the HTN↔CKD relationship).
   if (out.some((d) => d.icd === 'I10') && hasCKDnow) {
     await upgrade(/^I10$/, esrd ? 'I12.0' : 'I12.9',
       esrd ? 'Hypertensive chronic kidney disease with stage 5 CKD or end stage renal disease'
         : 'Hypertensive chronic kidney disease with stage 1 through stage 4 CKD, or unspecified CKD', 'HTN + CKD');
-  } else if (out.some((d) => d.icd === 'I10') && hasHF
-      && hasText(/hypertensive heart|heart (disease|failure) due to hypertension|hypertension.*hypertensive/)) {
-    // Unlike HTN+CKD, ICD-10-CM does NOT presume a HTN→heart-failure relationship — it must be stated
-    // ("hypertensive heart disease" / "due to hypertension"). Absent that, code I10 and I50.- separately.
-    // When combined, I50.- is still reported additionally to specify the heart-failure type.
-    await upgrade(/^I10$/, 'I11.0', 'Hypertensive heart disease with heart failure', 'HTN + HF (documented)');
+  }
+  // Hypertensive HEART disease with heart failure (ICD-10-CM I.C.9.a.1). Unlike HTN+CKD, the relationship
+  // is NOT presumed — it must be STATED or IMPLIED ("hypertensive heart disease", "hypertensive", "heart
+  // failure DUE TO hypertension") or already coded (any I11.-). When it is: report I11.0 (upgrading a bare
+  // I10 or an I11.9-without-HF), AND ALWAYS report the heart-failure TYPE additionally (I50.-, defaulting to
+  // I50.9). Absent a stated relationship, HTN and HF are coded SEPARATELY (I10 + I50.-) — never presumed.
+  const hfDocumented = hasCode(/^I50\./) || hasText(/heart failure|congestive heart|\bchf\b|\bhfref\b|\bhfpef\b/);
+  const htnHeartStated = hasCode(/^I11\./) || hasText(/hypertensive heart|(?:heart (?:disease|failure)|\bchf\b|\bhf\b) (?:due to|secondary to|from|related to|attributed to) hypertension/);
+  if (hfDocumented && htnHeartStated) {
+    if (!(await upgrade(/^I10$|^I11\.9$/, 'I11.0', 'Hypertensive heart disease with heart failure', 'HTN + HF'))) {
+      await add('I11.0', 'Hypertensive heart disease with heart failure', 'HTN + HF');
+    }
+    if (!hasCode(/^I50\./)) await add('I50.9', 'Heart failure, unspecified', 'HF type reported with I11.0');
   }
 
   // ESRD documented → the CKD stage code is N18.6 (coded IN ADDITION to any hypertensive/diabetic combo).
@@ -984,6 +1254,7 @@ async function resolveExplicitIcd(icd, phrase) {
 
 /** Predict billable ICD-10-CM diagnoses for a note → { diagnoses:[...], unmatched:[...] }. */
 export async function predictDiagnosesFromNote(content = {}, { noteType = 'hp' } = {}) {
+  content = content || {}; // NULL note content must never crash diagnosis prediction
   content = withFlatSections(content); // real notes store text under .sections; flatten so linkage sees it too
   const items = extractProblemPhrases(content, noteType);
   const diagnoses = [];

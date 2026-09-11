@@ -1036,18 +1036,6 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
                         </div>
                       ) : (
                         <Fragment key={s.key}>
-                        {/* BILLING — a FREE-FORM note section (saved in content.sections.billing) PLUS the
-                            live coding-engine predictions, rendered directly ABOVE Attestation & Signature
-                            on every template. */}
-                        {s.key === 'attestation' && (
-                          <BillingSection
-                            value={content.sections?.billing || ''}
-                            onChange={(v) => setSection('billing', v)}
-                            readOnly={readOnly}
-                            billing={billing}
-                            loading={billingLoading}
-                          />
-                        )}
                         <div className="pf-sec">
                           <div className="pf-sec-h">
                             <span className="pf-sec-hl"><span className="pf-sec-tick" aria-hidden="true" /><span className="pf-sec-t">{s.label}</span></span>
@@ -1137,6 +1125,21 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
                         </div>
                         </Fragment>
                       ))) : <div className="pf-body"><span className="pf-muted">This note has no documentation.</span></div>}
+
+                      {/* BILLING — the free-form billing note PLUS the live predicted codes (ICD-10-CM with
+                          SNOMED CT id, then CPT & modifiers). Rendered ONCE here, after the note body and
+                          before the signature, so it is ALWAYS visible — on drafts AND on reopened signed
+                          notes — independent of section content-filtering (the sign/attestation section is
+                          filtered out of the read view when blank, so billing must not be anchored to it). */}
+                      {template && template.length > 0 && (
+                        <BillingSection
+                          value={content.sections?.billing || ''}
+                          onChange={(v) => setSection('billing', v)}
+                          readOnly={readOnly}
+                          billing={billing}
+                          loading={billingLoading}
+                        />
+                      )}
 
                       {signed && (
                         <div className="pf-sign">
@@ -1663,20 +1666,48 @@ function BillingSection({ value, onChange, readOnly, billing, loading }) {
             DYNAMIC: nothing appears on a blank note — codes surface only from what is documented, and refresh
             after each save. CPT/HCPCS + ICD-10-CM as chips; hover a diagnosis for its description. */}
         {(px.length || dx.length) ? (
-          <div className="pf-bill-inline">
-            {px.map((p, i) => (
-              <span className="pf-code-chip proc" key={`p-${p.cpt}-${i}`} title={p.description || ''}>
-                {p.cpt}{mods(p.modifiers) ? `-${mods(p.modifiers)}` : ''}{p.units > 1 ? ` ×${p.units}` : ''}
-              </span>
-            ))}
-            {dx.map((d, i) => (
-              <span className={`pf-code-chip dx${d.primary ? ' primary' : ''}`} key={`d-${d.icd}-${i}`} title={d.description || ''}>
-                {d.icd}{d.primary ? ' • primary' : ''}
-              </span>
-            ))}
+          <div className="pf-bill-pred-groups">
+            {/* DIAGNOSES — each predicted ICD-10-CM on its own aligned row: the ICD code in a fixed column,
+                then its official description with the SNOMED CT concept id directly beneath it. */}
+            {dx.length > 0 && (
+              <div className="pf-bill-codegrp">
+                <div className="pf-bill-codegrp-lbl">Diagnoses — ICD-10-CM</div>
+                <div className="pf-bill-rows">
+                  {dx.map((d, i) => (
+                    <div className={`pf-bill-row dx${d.primary ? ' primary' : ''}`} key={`d-${d.icd}-${i}`}>
+                      <span className="pf-bill-row-code">{d.icd}</span>
+                      <span className="pf-bill-row-body">
+                        <span className="pf-bill-row-desc">
+                          {d.description || '—'}
+                          {d.primary ? <span className="pf-bill-primary-tag">Primary</span> : null}
+                        </span>
+                        <span className="pf-bill-row-sct">SNOMED CT&nbsp;{d.snomedCode || '—'}</span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {/* PROCEDURES — CPT with its modifiers, listed BELOW the diagnoses. */}
+            {px.length > 0 && (
+              <div className="pf-bill-codegrp">
+                <div className="pf-bill-codegrp-lbl">Procedures — CPT &amp; Modifiers</div>
+                <div className="pf-bill-rows">
+                  {px.map((p, i) => (
+                    <div className="pf-bill-row px" key={`p-${p.cpt}-${i}`}>
+                      <span className="pf-bill-row-code">{p.cpt}{p.units > 1 ? <span className="pf-bill-units">×{p.units}</span> : null}</span>
+                      <span className="pf-bill-row-body">
+                        <span className="pf-bill-row-desc">{p.description || '—'}</span>
+                        <span className="pf-bill-row-mods">{mods(p.modifiers) ? `Modifiers: ${mods(p.modifiers).split(',').map((m) => m.trim()).filter(Boolean).join(', ')}` : 'No modifiers'}</span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             <span className="pf-code-hint">Suggested from your documentation — verify before billing</span>
           </div>
-        ) : (!loading ? <div className="pf-bill-empty">Suggested billing codes are generated from your completed note when you Sign &amp; Finalize.</div> : null)}
+        ) : (!loading && !readOnly ? <div className="pf-bill-empty">Suggested billing codes are generated from your completed note when you Sign &amp; Finalize.</div> : null)}
         {(() => {
           // denialSummary is a COUNT object { errors, warnings, info } — never render it directly (that
           // throws "Objects are not valid as a React child"). Surface only actionable error/warning
