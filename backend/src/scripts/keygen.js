@@ -12,3 +12,4 @@ console.log(`PHI_ENC_KEY=${key()}`);
 console.log(`BLIND_INDEX_KEY=${key()}`);
 console.log(`JWT_ACCESS_SECRET=${secret()}`);
 console.log(`JWT_REFRESH_SECRET=${secret()}`);
+console.log(`OCR_API_KEY=${crypto.randomBytes(32).toString('hex')}`);
