@@ -340,7 +340,7 @@ async function exactConcept(phrase) {
        FROM snomed_descriptions d JOIN snomed_concepts c ON c.id = d.concept_id
       WHERE d.active = 1 AND c.active = 1 AND MATCH(d.term) AGAINST(? IN BOOLEAN MODE)
         AND REPLACE(REPLACE(LOWER(d.term), '-', ' '), '  ', ' ') = ?
-      ORDER BY d.us_preferred DESC, CHAR_LENGTH(d.term) LIMIT 5`, [boolean, target]);
+      ORDER BY d.us_preferred DESC, CHAR_LENGTH(d.term), d.concept_id, d.term LIMIT 5`, [boolean, target]);
   return rows.map((r) => ({ code: String(r.code), name: r.name, preferred: !!r.preferred }));
 }
 
@@ -451,7 +451,7 @@ async function broaderSearch(query, limit = 30) {
             MATCH(d.term) AGAINST(? IN NATURAL LANGUAGE MODE) AS score
        FROM snomed_descriptions d JOIN snomed_concepts c ON c.id = d.concept_id
       WHERE d.active = 1 AND c.active = 1 AND MATCH(d.term) AGAINST(? IN NATURAL LANGUAGE MODE)
-      ORDER BY score DESC LIMIT ?`, [q, q, limit]);
+      ORDER BY score DESC, d.concept_id, d.term LIMIT ?`, [q, q, limit]);
   const seen = new Set(); const out = [];
   for (const r of rows) { const code = String(r.code); if (seen.has(code)) continue; seen.add(code); out.push({ code, name: r.name, preferred: !!r.preferred }); }
   return out;

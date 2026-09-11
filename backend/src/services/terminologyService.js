@@ -46,7 +46,7 @@ export async function searchSnomed(query, { pageSize = 20 } = {}) {
       `SELECT d.concept_id AS code, d.term AS name, d.us_preferred AS preferred
          FROM snomed_descriptions d JOIN snomed_concepts c ON c.id = d.concept_id
         WHERE d.concept_id = ? AND d.active = 1 AND c.active = 1
-        ORDER BY d.us_preferred DESC, (d.type_id = ?) DESC LIMIT ?`,
+        ORDER BY d.us_preferred DESC, (d.type_id = ?) DESC, d.concept_id, d.term LIMIT ?`,
       [q, SCT_SYNONYM, limit]);
     return rows.map((r) => ({ code: String(r.code), name: r.name, source: 'SNOMEDCT_US', preferred: !!r.preferred }));
   }
@@ -61,7 +61,7 @@ export async function searchSnomed(query, { pageSize = 20 } = {}) {
               MATCH(d.term) AGAINST(? IN BOOLEAN MODE) AS score
          FROM snomed_descriptions d JOIN snomed_concepts c ON c.id = d.concept_id
         WHERE d.active = 1 AND c.active = 1 AND MATCH(d.term) AGAINST(? IN BOOLEAN MODE)
-        ORDER BY (d.term LIKE ?) DESC, d.us_preferred DESC, CHAR_LENGTH(d.term), score DESC LIMIT ?`,
+        ORDER BY (d.term LIKE ?) DESC, d.us_preferred DESC, CHAR_LENGTH(d.term), score DESC, d.concept_id, d.term LIMIT ?`,
       [boolean, boolean, `${q}%`, limit * 4]);
   }
   if (!rows.length) {
@@ -69,7 +69,7 @@ export async function searchSnomed(query, { pageSize = 20 } = {}) {
       `SELECT d.concept_id AS code, d.term AS name, d.us_preferred AS preferred
          FROM snomed_descriptions d JOIN snomed_concepts c ON c.id = d.concept_id
         WHERE d.active = 1 AND c.active = 1 AND d.term LIKE ?
-        ORDER BY d.us_preferred DESC, CHAR_LENGTH(d.term) LIMIT ?`, [`${q}%`, limit]);
+        ORDER BY d.us_preferred DESC, CHAR_LENGTH(d.term), d.concept_id, d.term LIMIT ?`, [`${q}%`, limit]);
   }
   // One row per concept (prefer the us_preferred/highest-scoring synonym already ordered first).
   const seen = new Set(); const out = [];
@@ -286,7 +286,7 @@ export async function snomedToIcd10cm(conceptId) {
   if (!/^\d+$/.test(id)) return { primary: null, candidates: [] };
   const [rows] = await pool.query(
     `${MAP_SELECT} WHERE m.snomed_id = ? AND m.icd_code IS NOT NULL AND m.icd_code <> ''
-      ORDER BY m.map_group, m.map_priority`, [id]);
+      ORDER BY m.map_group, m.map_priority, m.icd_code`, [id]);
   return mapRowsToResult(rows);
 }
 
@@ -303,7 +303,7 @@ export async function snomedToIcd10cmBatch(conceptIds) {
   if (!ids.length) return out;
   const [rows] = await pool.query(
     `${MAP_SELECT} WHERE m.snomed_id IN (?) AND m.icd_code IS NOT NULL AND m.icd_code <> ''
-      ORDER BY m.snomed_id, m.map_group, m.map_priority`, [ids]);
+      ORDER BY m.snomed_id, m.map_group, m.map_priority, m.icd_code`, [ids]);
   const byId = new Map();
   for (const r of rows) { const k = String(r.snomed_id); if (!byId.has(k)) byId.set(k, []); byId.get(k).push(r); }
   for (const id of ids) out.set(id, mapRowsToResult(byId.get(id) || []));
@@ -332,7 +332,7 @@ export async function snomedConceptsForIcd10cm(icdCode) {
       WHERE m.icd_code = ?
         AND (UPPER(TRIM(m.map_rule)) = 'TRUE' OR UPPER(TRIM(m.map_rule)) = 'OTHERWISE TRUE')
         AND m.snomed_id IS NOT NULL AND m.snomed_id <> ''
-      ORDER BY d.us_preferred DESC, CHAR_LENGTH(d.term)`, [code]);
+      ORDER BY d.us_preferred DESC, CHAR_LENGTH(d.term), m.snomed_id, d.term`, [code]);
   const seen = new Map();
   for (const r of rows) {
     const id = String(r.snomed_id);
