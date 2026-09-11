@@ -50,8 +50,11 @@ export async function payscale(req, res, next) {
     const cfKind = oneOf(req.query.cfKind, ['standard', 'apm'], 'standard');
     const localityCode = oneOf(req.query.locality, ['99', '03', '04'], '99');
     const setting = oneOf(req.query.setting, ['facility', 'office'], 'facility');
+    // includePaid=1 → the FULL breakdown for the period (used by the per-period statement table, which must
+    // still show a period's procedures after it is finalized). Default excludes already-paid (amount owed).
+    const excludePaid = req.query.includePaid !== '1';
     res.json(await providerPayscale(req.authUserId, {
-      from, to, credentials: req.user?.credentials || [], cfKind, localityCode, setting,
+      from, to, credentials: req.user?.credentials || [], cfKind, localityCode, setting, excludePaid,
     }));
   } catch (err) { next(err); }
 }

@@ -91,13 +91,28 @@ export async function providerPayscale(providerId, { from = null, to = null, cre
   // already-paid RVUs can never appear on a later paycheck (structural no-double-pay). finalizePeriod calls
   // with excludePaid:false only to see the raw period, but the ledger insert itself enforces pay-once.
   if (excludePaid) where.push('pnl.note_id IS NULL');
+  // Modifier-aware pricing: each procedure is priced against the mpfs_rvu row for its ACTUAL payment
+  // modifier — -TC (technical, 0 work → $0 to the provider), -26 (professional), else the global/base row
+  // (which is also the CMS-correct price for informational modifiers like 25/59). `mm` is the modifier row
+  // (may be absent), `mb` the base row; COALESCE prefers the modifier row and falls to base only when the
+  // code has no PC/TC split — never a wrong price. So the same CPT billed -TC vs -26 vs global pays its own
+  // real work RVU, not a single static figure.
+  const modCase = "CASE WHEN UPPER(COALESCE(c.modifiers,'')) REGEXP '(^|[^A-Z])TC([^A-Z]|$)' THEN 'TC' "
+    + "WHEN COALESCE(c.modifiers,'') REGEXP '(^|[^0-9])26([^0-9]|$)' THEN '26' ELSE '' END";
   const [rows] = await execute(
     `SELECT n.id AS note_id, c.code, c.description, COALESCE(c.units, 1) AS units, n.note_type AS note_type, n.pos_code AS pos_code,
-            m.work_rvu, m.fac_pe_rvu, m.nonfac_pe_rvu, m.mp_rvu, m.conv_factor, m.status_code
+            ${modCase} AS price_mod,
+            COALESCE(mm.work_rvu, mb.work_rvu) AS work_rvu,
+            COALESCE(mm.fac_pe_rvu, mb.fac_pe_rvu) AS fac_pe_rvu,
+            COALESCE(mm.nonfac_pe_rvu, mb.nonfac_pe_rvu) AS nonfac_pe_rvu,
+            COALESCE(mm.mp_rvu, mb.mp_rvu) AS mp_rvu,
+            COALESCE(mm.conv_factor, mb.conv_factor) AS conv_factor,
+            COALESCE(mm.status_code, mb.status_code) AS status_code
        FROM encounter_notes n
        JOIN encounter_note_codes c ON c.note_id = n.id AND c.kind = 'proc'
        LEFT JOIN paid_note_ledger pnl ON pnl.note_id = n.id
-       LEFT JOIN mpfs_rvu m ON m.hcpcs = c.code AND m.modifier = '' AND m.year = :year
+       LEFT JOIN mpfs_rvu mm ON mm.hcpcs = c.code AND mm.year = :year AND mm.modifier = ${modCase}
+       LEFT JOIN mpfs_rvu mb ON mb.hcpcs = c.code AND mb.year = :year AND mb.modifier = ''
       WHERE ${where.join(' AND ')}`, params);
 
   const byCode = new Map();
@@ -109,36 +124,37 @@ export async function providerPayscale(providerId, { from = null, to = null, cre
     if (!inDataset) { unpriced.add(r.code); continue; }                 // not in the MPFS RVU file
     if (r.status_code && !PAYABLE_STATUS.has(r.status_code)) continue;  // not separately payable by RVUs
     const work = Number(r.work_rvu) || 0;
-    if (work <= 0) continue;                                            // no work RVU → no provider pay
+    if (work <= 0) continue;                                            // no work RVU (e.g. -TC) → no provider pay
     if (datasetCf == null && Number(r.conv_factor) > 0) datasetCf = Number(r.conv_factor);
     paidNoteIds.add(r.note_id);                                         // this note contributed payable work
     const units = Number(r.units) || 1;
     const pos = posInfo(r.pos_code, r.note_type);                            // REAL per-encounter POS (fac vs office PE)
-    const key = `${r.code}|${pos.code}`;
+    const mod = r.price_mod || '';                                           // pricing modifier ('', '26', 'TC')
+    const key = `${r.code}|${pos.code}|${mod}`;                              // keep distinct modifiers from mixing work RVUs
     const agg = byCode.get(key) || {
-      code: r.code, description: r.description, setting: pos.setting, placeOfService: pos.label,
+      code: r.code, description: r.description, modifier: mod, setting: pos.setting, placeOfService: pos.label,
       units: 0, workRvu: work, fac_pe: Number(r.fac_pe_rvu) || 0, nonfac_pe: Number(r.nonfac_pe_rvu) || 0, mp: Number(r.mp_rvu) || 0,
     };
     agg.units += units;
     byCode.set(key, agg);
   }
 
-  const cf = conversionFactor(cfKind, datasetCf); // live dataset CF (standard) or CMS APM CF
-  const rate = providerRatePerWorkRvu(cf);        // DERIVED: 60% × CF (→ $20.0405 at standard CF)
+  const cf = conversionFactor(cfKind, datasetCf);      // live dataset CF (standard) or CMS APM CF
+  const rate = providerRatePerWorkRvu(cf, gpci.work);  // DERIVED: 60% × CF × PW-GPCI (→ $20.0405 in FL)
   const lines = [];
   let totalWorkRvu = 0, providerPay = 0, medicareWorkValue = 0, fullFeeRef = 0;
   for (const a of byCode.values()) {
     const totWork = a.workRvu * a.units;
-    const linePay = round2(totWork * rate);                                   // pay: round the total (workbook Step 7)
-    const lineWorkValue = round2(a.units * round2(a.workRvu * cf));           // reference: round per-encounter, then × (Steps 9–10)
-    const pe = a.setting === 'facility' ? a.fac_pe : a.nonfac_pe;             // POS-driven PE (facility vs non-facility)
+    const linePay = round2(totWork * rate);                                          // pay: round the total (workbook Step 7)
+    const lineWorkValue = round2(a.units * round2(a.workRvu * gpci.work * cf));       // Work value = Work RVU × PW-GPCI × CF
+    const pe = a.setting === 'facility' ? a.fac_pe : a.nonfac_pe;                     // POS-driven PE (facility vs non-facility)
     const perEncFee = round2((a.workRvu * gpci.work + pe * gpci.pe + a.mp * gpci.mp) * cf);
-    const lineFee = round2(a.units * perEncFee);                              // full FL physician fee (reference only)
+    const lineFee = round2(a.units * perEncFee);                                      // full FL physician fee (reference only)
     totalWorkRvu += totWork;
     providerPay += linePay;
     medicareWorkValue += lineWorkValue;
     fullFeeRef += lineFee;
-    lines.push({ code: a.code, description: a.description, placeOfService: a.placeOfService, encounters: a.units, workRvu: round2(totWork), providerPay: linePay, medicareWorkValue: lineWorkValue, fullFee: lineFee });
+    lines.push({ code: a.code, description: a.description, modifier: a.modifier || undefined, placeOfService: a.placeOfService, encounters: a.units, workRvu: round2(totWork), providerPay: linePay, medicareWorkValue: lineWorkValue, fullFee: lineFee });
   }
   lines.sort((x, y) => y.providerPay - x.providerPay);
   providerPay = round2(providerPay);
@@ -186,12 +202,17 @@ export async function providerMonthlyStatement(providerId, { year, month, creden
   const y = Number(year); const mo = Number(month); // month is 1-12
   const from = `${y}-${String(mo).padStart(2, '0')}-01`;
   const to = new Date(Date.UTC(y, mo, 1)).toISOString().slice(0, 10); // first of next month
+  const locality = localityFor(localityCode);
+  const modCase = "CASE WHEN UPPER(COALESCE(c.modifiers,'')) REGEXP '(^|[^A-Z])TC([^A-Z]|$)' THEN 'TC' "
+    + "WHEN COALESCE(c.modifiers,'') REGEXP '(^|[^0-9])26([^0-9]|$)' THEN '26' ELSE '' END";
   const [rows] = await execute(
     `SELECT c.code, c.description, COALESCE(c.units, 1) AS units, DAY(n.signed_at) AS d, n.note_type AS note_type, n.pos_code AS pos_code,
-            m.work_rvu, m.conv_factor, m.status_code
+            ${modCase} AS price_mod,
+            COALESCE(mm.work_rvu, mb.work_rvu) AS work_rvu, COALESCE(mm.conv_factor, mb.conv_factor) AS conv_factor, COALESCE(mm.status_code, mb.status_code) AS status_code
        FROM encounter_notes n
        JOIN encounter_note_codes c ON c.note_id = n.id AND c.kind = 'proc'
-       LEFT JOIN mpfs_rvu m ON m.hcpcs = c.code AND m.modifier = '' AND m.year = :year
+       LEFT JOIN mpfs_rvu mm ON mm.hcpcs = c.code AND mm.year = :year AND mm.modifier = ${modCase}
+       LEFT JOIN mpfs_rvu mb ON mb.hcpcs = c.code AND mb.year = :year AND mb.modifier = ''
       WHERE n.provider_id = :pid AND n.status = 'signed' AND n.signed_at >= :from AND n.signed_at < :to`,
     { pid: providerId, year: RVU_YEAR, from, to });
 
@@ -201,29 +222,45 @@ export async function providerMonthlyStatement(providerId, { year, month, creden
     if (r.work_rvu == null && r.conv_factor == null) continue;         // unpriced
     if (r.status_code && !PAYABLE_STATUS.has(r.status_code)) continue; // not payable by RVUs
     const work = Number(r.work_rvu) || 0;
-    if (work <= 0) continue;
+    if (work <= 0) continue;                                           // no work RVU (e.g. -TC)
     if (datasetCf == null && Number(r.conv_factor) > 0) datasetCf = Number(r.conv_factor);
     const units = Number(r.units) || 1;
     const wk = Math.min(5, Math.max(1, Math.ceil(Number(r.d) / 7)));   // Week 1–5 of the month
     const pos = posInfo(r.pos_code, r.note_type);                           // REAL per-encounter POS
-    const key = `${r.code}|${pos.code}`;
-    const agg = byCode.get(key) || { code: r.code, description: r.description, work, weeks: [0, 0, 0, 0, 0], total: 0, placeOfService: pos.label };
+    const mod = r.price_mod || '';
+    const key = `${r.code}|${pos.code}|${mod}`;
+    const agg = byCode.get(key) || { code: r.code, description: r.description, modifier: mod, work, weeks: [0, 0, 0, 0, 0], total: 0, placeOfService: pos.label };
     agg.weeks[wk - 1] += units;
     agg.total += units;
     byCode.set(key, agg);
   }
   const cf = conversionFactor(cfKind, datasetCf);
-  const rate = providerRatePerWorkRvu(cf);
+  const rate = providerRatePerWorkRvu(cf, locality.gpci.work);
   const lines = [];
+  // FLAT statement rows: one per (procedure code + POS + week) with encounters and pay for that week. The
+  // per-week pays are RECONCILED so each code's weeks sum EXACTLY to that code's period pay (the penny of
+  // rounding is absorbed into the busiest week), and the code totals sum to the same period pay shown in
+  // the hero — no drift between the table rows and the headline number.
+  const stmtRows = [];
   let totalPay = 0, totalEnc = 0;
   for (const a of byCode.values()) {
-    const pay = round2(a.work * a.total * rate);
-    totalPay += pay; totalEnc += a.total;
-    lines.push({ code: a.code, description: a.description, weeks: a.weeks, encounters: a.total, placeOfService: a.placeOfService, pay });
+    const linePay = round2(a.work * a.total * rate);
+    totalPay += linePay; totalEnc += a.total;
+    lines.push({ code: a.code, description: a.description, weeks: a.weeks, encounters: a.total, placeOfService: a.placeOfService, pay: linePay, workRvu: a.work });
+    // Per-week rows for weeks that had encounters, reconciled to linePay.
+    const wkRows = [];
+    a.weeks.forEach((enc, i) => { if (enc > 0) wkRows.push({ week: i + 1, code: a.code, modifier: a.modifier || undefined, description: a.description, placeOfService: a.placeOfService, encounters: enc, pay: round2(a.work * enc * rate) }); });
+    const drift = round2(linePay - wkRows.reduce((s, w) => s + w.pay, 0));
+    if (drift !== 0 && wkRows.length) { // absorb the rounding penny into the busiest week
+      let bi = 0; for (let i = 1; i < wkRows.length; i++) if (wkRows[i].encounters > wkRows[bi].encounters) bi = i;
+      wkRows[bi].pay = round2(wkRows[bi].pay + drift);
+    }
+    stmtRows.push(...wkRows);
   }
   lines.sort((x, y) => y.pay - x.pay);
+  stmtRows.sort((x, y) => (x.week - y.week) || (y.pay - x.pay)); // by week, then largest pay
   return {
-    year: y, month: mo, from, to,
+    year: y, month: mo, from, to, rows: stmtRows,
     label: new Date(Date.UTC(y, mo - 1, 1)).toLocaleString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' }),
     providerRatePerWorkRvu: rate,
     lines, totalEncounters: totalEnc, totalPay: round2(totalPay),
@@ -252,17 +289,24 @@ export async function adminProviderPayscale({ facilityUuid = null, providerUuid 
     facilityJoin = 'JOIN provider_facilities pf ON pf.provider_id = n.provider_id JOIN facilities f ON f.id = pf.facility_id';
     where.push('f.uuid = :fuuid'); params.fuuid = facilityUuid;
   }
+  // Modifier-aware pricing (same policy as the provider payscale): price each code against its actual
+  // payment modifier row (-TC = 0 work → $0, -26 professional, else base), so a technical component is
+  // never paid as if it were the global service.
+  const modCase = "CASE WHEN UPPER(COALESCE(c.modifiers,'')) REGEXP '(^|[^A-Z])TC([^A-Z]|$)' THEN 'TC' "
+    + "WHEN COALESCE(c.modifiers,'') REGEXP '(^|[^0-9])26([^0-9]|$)' THEN '26' ELSE '' END";
   const [rows] = await execute(
     `SELECT u.uuid AS provider_uuid, u.full_name_enc, u.credentials, u.role,
-            c.code, SUM(COALESCE(c.units, 1)) AS units, m.work_rvu, m.conv_factor, m.status_code
+            c.code, ${modCase} AS price_mod, SUM(COALESCE(c.units, 1)) AS units,
+            COALESCE(mm.work_rvu, mb.work_rvu) AS work_rvu, COALESCE(mm.conv_factor, mb.conv_factor) AS conv_factor, COALESCE(mm.status_code, mb.status_code) AS status_code
        FROM encounter_notes n
        JOIN users u ON u.id = n.provider_id
        LEFT JOIN paid_note_ledger pnl ON pnl.note_id = n.id
        ${facilityJoin}
        JOIN encounter_note_codes c ON c.note_id = n.id AND c.kind = 'proc'
-       LEFT JOIN mpfs_rvu m ON m.hcpcs = c.code AND m.modifier = '' AND m.year = :year
+       LEFT JOIN mpfs_rvu mm ON mm.hcpcs = c.code AND mm.year = :year AND mm.modifier = ${modCase}
+       LEFT JOIN mpfs_rvu mb ON mb.hcpcs = c.code AND mb.year = :year AND mb.modifier = ''
       WHERE ${where.join(' AND ')}
-      GROUP BY u.uuid, u.full_name_enc, u.credentials, u.role, c.code, m.work_rvu, m.conv_factor, m.status_code`,
+      GROUP BY u.uuid, u.full_name_enc, u.credentials, u.role, c.code, price_mod, work_rvu, conv_factor, status_code`,
     params);
 
   const byProv = new Map();
@@ -326,7 +370,7 @@ export async function providerPayPeriods(providerId, { periodType = 'monthly', c
   return {
     periodType: periodType === 'biweekly' ? 'biweekly' : 'monthly',
     providerType: providerType(credentials),
-    providerRatePerWorkRvu: providerRatePerWorkRvu(conversionFactor(cfKind)),
+    providerRatePerWorkRvu: providerRatePerWorkRvu(conversionFactor(cfKind), localityFor(localityCode).gpci.work),
     periods: out,
   };
 }

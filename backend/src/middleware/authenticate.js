@@ -50,7 +50,10 @@ export async function authenticate(req, res, next) {
     // ('ok' | 'setup' | 'pending') comes from the signed token claim (can't be forged).
     req.mfaEnabled = !!row.mfa_enabled;
     req.mfaConfirmed = !!row.mfa_confirmed_at;
-    req.mfaClaim = claims.mfa || 'ok';
+    // A normally-issued token always carries an `mfa` claim. If it is ABSENT, do NOT assume satisfied for a
+    // user who is MFA-enrolled — treat it as 'pending' so the MFA gate re-challenges (a claimless but
+    // validly-signed token can't skip the second factor). Non-MFA users are unaffected ('ok').
+    req.mfaClaim = claims.mfa || ((row.mfa_enabled && row.mfa_confirmed_at) ? 'pending' : 'ok');
     next();
   } catch (err) {
     next(err);

@@ -42,11 +42,27 @@ export function conversionFactor(kind = 'standard', datasetCf = null) {
   return Number(datasetCf) > 0 ? Number(datasetCf) : CONVERSION_FACTORS.standard; // prefer the live dataset CF
 }
 
-// Revenue split (on the Work-RVU value). Provider rate is DERIVED = PROVIDER_SHARE × CF (never hardcoded).
+// Revenue split (on the Work-RVU value). Provider rate is DERIVED — never hardcoded — from the live CF and
+// the locality's WORK GPCI: rate = PROVIDER_SHARE × CF × PW-GPCI. In every Florida locality PW-GPCI is the
+// 1.000 statutory floor, so the rate is $20.0405 at the standard CF (unchanged); in a county/state whose
+// PW-GPCI ≠ 1.000 the rate scales geographically, so pay is accurate everywhere — nothing is static.
 export const PROVIDER_SHARE = Number(process.env.PAYSCALE_PROVIDER_SHARE || 0.60);
 export const GROUP_SHARE = Math.round((1 - PROVIDER_SHARE) * 1e6) / 1e6;
-export function providerRatePerWorkRvu(cf) {
-  return Math.round(Number(cf) * PROVIDER_SHARE * 1e4) / 1e4; // 4 dp, matches the workbook ($20.0405)
+export function providerRatePerWorkRvu(cf, workGpci = 1) {
+  return Math.round(Number(cf) * (Number(workGpci) || 1) * PROVIDER_SHARE * 1e4) / 1e4; // 4 dp
+}
+
+/**
+ * The CMS payment modifier that changes a procedure's WORK RVU: TC (technical component — no physician
+ * work, work RVU 0) and 26 (professional component). Informational modifiers (25, 59, 57, 24, 76, …) do
+ * NOT have their own RVU row — they price at the global/base ('') row, which is the CMS-correct behavior.
+ * A procedure billed -TC must be paid on the -TC row (0 work → $0 to the provider), never the global row.
+ */
+export function pricingModifier(modifiers) {
+  const s = String(modifiers || '').toUpperCase();
+  if (/(^|[^A-Z])TC([^A-Z]|$)/.test(s)) return 'TC';
+  if (/(^|\D)26(\D|$)/.test(s)) return '26';
+  return '';
 }
 
 // MPFS status indicators separately payable by RVUs (A active, R restricted-coverage, T same-day-only).

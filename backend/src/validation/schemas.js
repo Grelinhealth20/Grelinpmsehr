@@ -95,7 +95,7 @@ export const createSpecialtySchema = z
   .object({
     name: z.string().trim().min(2, 'Name is too short.').max(120),
     // Optional admin override of the clinical service line. Omitted → derived from the name.
-    serviceLine: z.enum(['snf', 'pain', 'tcm']).optional(),
+    serviceLine: z.enum(['snf', 'pain', 'pi', 'tcm']).optional(),
   })
   .strict();
 

@@ -37,7 +37,7 @@ export default function Reports() {
   const period = periods[selected];
   useEffect(() => {
     if (!period) { setDetail(null); setStatement(null); return; }
-    reportsApi.payscale({ from: period.from, to: period.to })
+    reportsApi.payscale({ from: period.from, to: period.to, includePaid: 1 })
       .then(({ data }) => setDetail(data))
       .catch((e) => setErr(toApiError(e).message));
     if (periodType === 'monthly') {
@@ -141,37 +141,38 @@ export default function Reports() {
           {loading && <div className="rep-muted">Loading…</div>}
           {!loading && periods.length === 0 && <div className="rep-muted">No signed encounters in this window yet.</div>}
 
-          {/* Monthly statement — Procedure × Weeks × Encounters × Place of Service × Pay */}
-          {periodType === 'monthly' && statement?.lines?.length > 0 && (
+          {/* Monthly statement — Month · Week · Procedure Code · POS · Encounters · Provider Pay */}
+          {periodType === 'monthly' && statement?.rows?.length > 0 && (
             <div className="rep-stmt">
               <span className="rep-types-lbl">{statement.label} · statement</span>
               <div className="rep-table-wrap">
                 <table className="rep-table">
                   <thead>
                     <tr>
-                      <th>Procedure</th>
-                      <th className="r">Wk 1</th><th className="r">Wk 2</th><th className="r">Wk 3</th><th className="r">Wk 4</th><th className="r">Wk 5</th>
-                      <th className="r">Encounters</th>
+                      <th>Month</th>
+                      <th>Week</th>
+                      <th>Procedure code</th>
                       <th>Place of service</th>
-                      <th className="r">Pay</th>
+                      <th className="r">Encounters</th>
+                      <th className="r">Provider pay</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {statement.lines.map((l) => (
-                      <tr key={l.code}>
-                        <td><span className="mono">{l.code}</span> <span className="rep-desc">{l.description || ''}</span></td>
-                        {l.weeks.map((w, i) => <td key={i} className="r">{w || '—'}</td>)}
-                        <td className="r strong">{l.encounters}</td>
-                        <td className="rep-pos">{l.placeOfService}</td>
-                        <td className="r strong">{money(l.pay)}</td>
+                    {statement.rows.map((r, i) => (
+                      <tr key={`${r.week}|${r.code}|${r.placeOfService}|${i}`}>
+                        <td>{statement.label}</td>
+                        <td>Week {r.week}</td>
+                        <td><span className="mono">{r.code}{r.modifier ? `-${r.modifier}` : ''}</span>{r.description ? <span className="rep-desc"> {r.description}</span> : ''}</td>
+                        <td className="rep-pos">{r.placeOfService}</td>
+                        <td className="r strong">{r.encounters}</td>
+                        <td className="r strong">{money(r.pay)}</td>
                       </tr>
                     ))}
                   </tbody>
                   <tfoot>
                     <tr>
-                      <td colSpan="6" className="r">Total — {statement.label}</td>
+                      <td colSpan="4" className="r">Total — {statement.label}</td>
                       <td className="r strong">{statement.totalEncounters}</td>
-                      <td />
                       <td className="r strong">{money(statement.totalPay)}</td>
                     </tr>
                   </tfoot>
@@ -180,24 +181,41 @@ export default function Reports() {
             </div>
           )}
 
-          {/* Bi-weekly breakdown — Procedure × Encounters × Pay */}
+          {/* Bi-weekly breakdown — Period · Procedure code · POS · Encounters · Provider pay */}
           {periodType === 'biweekly' && detail?.lines?.length > 0 && (
-            <div className="rep-table-wrap">
-              <table className="rep-table">
-                <thead><tr><th>Code</th><th>Procedure</th><th className="r">Encounters</th><th>Place of service</th><th className="r">Pay</th></tr></thead>
-                <tbody>
-                  {detail.lines.map((l) => (
-                    <tr key={`${l.code}|${l.placeOfService}`}>
-                      <td className="mono">{l.code}</td>
-                      <td className="rep-desc">{l.description || '—'}</td>
-                      <td className="r">{l.encounters}</td>
-                      <td className="rep-pos">{l.placeOfService}</td>
-                      <td className="r strong">{money(l.providerPay)}</td>
+            <div className="rep-stmt">
+              <span className="rep-types-lbl">{period?.label} · statement</span>
+              <div className="rep-table-wrap">
+                <table className="rep-table">
+                  <thead>
+                    <tr>
+                      <th>Period</th>
+                      <th>Procedure code</th>
+                      <th>Place of service</th>
+                      <th className="r">Encounters</th>
+                      <th className="r">Provider pay</th>
                     </tr>
-                  ))}
-                </tbody>
-                <tfoot><tr><td colSpan="4" className="r">Total</td><td className="r strong">{money(detail.providerPay)}</td></tr></tfoot>
-              </table>
+                  </thead>
+                  <tbody>
+                    {detail.lines.map((l) => (
+                      <tr key={`${l.code}|${l.placeOfService}`}>
+                        <td>{period?.label}</td>
+                        <td><span className="mono">{l.code}{l.modifier ? `-${l.modifier}` : ''}</span>{l.description ? <span className="rep-desc"> {l.description}</span> : ''}</td>
+                        <td className="rep-pos">{l.placeOfService}</td>
+                        <td className="r strong">{l.encounters}</td>
+                        <td className="r strong">{money(l.providerPay)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr>
+                      <td colSpan="3" className="r">Total — {period?.label}</td>
+                      <td className="r strong">{detail.lines.reduce((s, l) => s + l.encounters, 0)}</td>
+                      <td className="r strong">{money(detail.providerPay)}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
             </div>
           )}
 
