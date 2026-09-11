@@ -875,7 +875,15 @@ export async function ingestIncomingFax(rec = {}) {
   const priority = ['routine', 'urgent', 'stat'].includes(exReferral.urgency) ? exReferral.urgency : 'routine';
   const reasonEnc = exReferral.reason ? encrypt(exReferral.reason) : null;
   const diagnosisEnc = exReferral.diagnosis ? encrypt(exReferral.diagnosis) : null;
-  const extractedEnc = extracted ? encrypt(JSON.stringify(extracted)).slice(0, 16384) : null;
+  // Encrypt the WHOLE extraction JSON — NEVER slice the ciphertext (that would drop the AES-GCM auth tag
+  // and make it permanently undecryptable). If the valid ciphertext would overflow the VARBINARY(16384)
+  // column (extraction fields are bounded, so this is rare), store null rather than a corrupt truncation.
+  let extractedEnc = null;
+  if (extracted) {
+    const enc = encrypt(JSON.stringify(extracted));
+    extractedEnc = enc.length <= 16384 ? enc : null;
+    if (extractedEnc === null) logger.warn({ bytes: enc.length }, 'referral extraction JSON exceeds column — stored null instead of a corrupt truncation');
+  }
 
   const uuid = uuidv4();
   let ins;

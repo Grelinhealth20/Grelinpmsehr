@@ -33,8 +33,13 @@ export async function login(req, res, next) {
     const csrfToken = establishSession(res, result);
     let referrals = true;
     try { referrals = await referralsEnabledForProvider(result.user.id); } catch { referrals = true; }
+    // Do NOT reveal the account's identity (name / role / NPI / license) until the SECOND factor is
+    // satisfied: on an MFA-pending / enrollment-required login (password correct, code not yet entered) a
+    // stolen-password holder must not see the victim's professional identity. Return only the minimal
+    // handle the MFA screens need; the full profile is fetched from /me after MFA completes.
+    const settled = result.mfaStage === 'ok';
     res.json({
-      user: toPublicUser(result.user),
+      user: settled ? toPublicUser(result.user) : { uuid: result.user.uuid },
       mustResetPassword: result.mustResetPassword,
       mfaStage: result.mfaStage, // 'ok' | 'setup' (must scan QR) | 'pending' (must enter code)
       features: { referrals },

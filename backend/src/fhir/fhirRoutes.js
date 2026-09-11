@@ -10,6 +10,7 @@
 import { Router } from 'express';
 import { authenticate, requirePasswordSettled } from '../middleware/authenticate.js';
 import { authorize as authorizeRole } from '../middleware/authorize.js';
+import { requireEhrAccess } from '../middleware/permissions.js';
 import { csrfProtection } from '../middleware/csrf.js';
 import { ROLES, USER_STATUS } from '../config/env.js';
 import { findRawByUuid } from '../services/userService.js';
@@ -107,7 +108,9 @@ async function fhirAuth(req, res, next) {
     if (!claims) return send(res, 401, operationOutcome('error', 'login', 'Invalid or expired access token'));
     try {
       const u = await findRawByUuid(claims.sub);
-      if (!u || u.status === USER_STATUS.DISABLED) return send(res, 401, operationOutcome('error', 'login', 'User no longer valid'));
+      // Reject ANY non-active account (disabled AND restricted) — mirrors authenticate.js so a live SMART
+      // token stops working the moment the user is restricted, not only when fully disabled.
+      if (!u || u.status !== USER_STATUS.ACTIVE) return send(res, 401, operationOutcome('error', 'login', 'User no longer valid'));
       // Credential-cut / force-logout revocation — mirror authenticate.js so a SMART Bearer token can't
       // outlive a password reset, admin force-logout, or role/status change (all bump tokens_valid_after).
       // Without this, a live SMART token kept reading PHI for its full TTL after the user was revoked.
@@ -122,8 +125,11 @@ async function fhirAuth(req, res, next) {
       return next();
     } catch (err) { return next(err); }
   }
-  // Fall back to the app session cookie (same identity + gates as the rest of the API).
-  return authenticate(req, res, () => requirePasswordSettled(req, res, next));
+  // Fall back to the app session cookie (same identity + gates as the rest of the API): authenticate +
+  // password-settled + the EHR-access module permission — so the FHIR surface enforces the SAME module
+  // gate as /api/encounters and /api/reports (a cookie user whose ehr.access grant is revoked is 403'd
+  // here too, not just on the native routes). SMART Bearer callers are gated by token scope above instead.
+  return authenticate(req, res, () => requirePasswordSettled(req, res, () => requireEhrAccess(req, res, next)));
 }
 router.use(fhirAuth);
 // Scope enforcement (SMART-token callers only; cookie sessions keep full app authority). The resource

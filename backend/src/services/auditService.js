@@ -134,6 +134,18 @@ export async function verifyAuditChain({ limit = 1_000_000 } = {}) {
     prev = r.row_hash;
     checked += 1;
   }
+  // TAIL-TRUNCATION detection: the walk above proves rows 1..N are internally consistent, but deleting the
+  // most-recent K rows leaves a shorter chain that is ALSO internally consistent — so we must also compare
+  // the computed tail hash to the persisted chain head (`audit_chain.last_hash`, updated on every append).
+  // If they differ, rows were removed from the end (or the head was tampered) even though every surviving
+  // row links cleanly. Only meaningful when we actually read the whole table (not a LIMIT-capped prefix).
+  if (rows.length < lim) {
+    const [[headRow]] = [await execute('SELECT last_hash FROM audit_chain WHERE id = 1')];
+    const head = headRow[0]?.last_hash;
+    if (head !== undefined && head !== null && head !== prev) {
+      return { ok: false, checked, brokenAt: null, reason: 'chain head mismatch (rows removed from the end, or head tampered)' };
+    }
+  }
   return { ok: true, checked, brokenAt: null, reason: null };
 }
 

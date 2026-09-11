@@ -3,6 +3,7 @@ import AppointmentScheduler from './AppointmentScheduler.jsx';
 import Encounter from './Encounter.jsx';
 import ClinicalRecords from './ClinicalRecords.jsx';
 import Referrals from './Referrals.jsx';
+import Reports from './Reports.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
 
 const CalendarIcon = (
@@ -38,11 +39,22 @@ const ReferralIcon = (
   </svg>
 );
 
+// Bar chart — the symbol for the Reports system.
+const ReportsIcon = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M4 4v16h16" />
+    <rect x="7.5" y="12" width="2.6" height="5" rx="0.4" />
+    <rect x="12" y="8.5" width="2.6" height="8.5" rx="0.4" />
+    <rect x="16.5" y="5.5" width="2.6" height="11.5" rx="0.4" />
+  </svg>
+);
+
 const NAV = [
   { key: 'appointment', label: 'Appointment', icon: CalendarIcon },
   { key: 'encounter', label: 'Patients & Encounters', icon: EncounterIcon },
   { key: 'clinical', label: 'Clinical Records', icon: RecordsIcon },
   { key: 'referral', label: 'Referrals', icon: ReferralIcon },
+  { key: 'reports', label: 'Reports', icon: ReportsIcon },
 ];
 
 /**
@@ -126,6 +138,7 @@ export default function EhrSystem({ systems = [], active = null, onSwitch = null
         {view === 'encounter' && <Encounter />}
         {view === 'clinical' && <ClinicalRecords />}
         {view === 'referral' && referralsEnabled && <Referrals />}
+        {view === 'reports' && <Reports />}
       </main>
     </div>
   );

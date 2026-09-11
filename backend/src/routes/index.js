@@ -14,6 +14,7 @@ import terminologyRoutes from './terminologyRoutes.js';
 import codingRoutes from './codingRoutes.js';
 import aiLogsRoutes from './aiLogsRoutes.js';
 import referralRoutes from './referralRoutes.js';
+import reportsRoutes from './reportsRoutes.js';
 import faxRoutes from './faxRoutes.js';
 import fhirRoutes from '../fhir/fhirRoutes.js';
 
@@ -34,6 +35,7 @@ router.use('/audit', auditRoutes);
 router.use('/settings', settingsRoutes);
 router.use('/terminology', terminologyRoutes);
 router.use('/coding', codingRoutes);
+router.use('/reports', reportsRoutes);
 router.use('/ai-logs', aiLogsRoutes);
 router.use('/referrals', referralRoutes);
 router.use('/fax', faxRoutes);

@@ -154,6 +154,19 @@ export function noteServiceLineWhere(scope, alias = 'n') {
   return `(${lines.map((l) => lineNotePredicate(l, alias)).join(' OR ')})`;
 }
 
+/**
+ * WHERE fragment: the aliased row (a note/encounter) is OWNED by a provider whose service line is in the
+ * viewer's granted set — the same owner-based boundary `patientScopeWhere` uses. Unlike `noteServiceLineWhere`
+ * (which classifies by note_TYPE), this closes the gap where a UNIVERSAL note (hp/soap/progress) authored by
+ * another service line's provider would classify as SNF-by-type and be reachable by a cross-line facility-wide
+ * MD via its UUID. Deny (no fallback) when the viewer holds no service line.
+ */
+export function ownerServiceLineWhere(scope, alias = 'n') {
+  const lines = [...new Set(scope.serviceLines || [])].filter((l) => SERVICE_LINES.includes(l));
+  if (!lines.length) return '1=0';
+  return `(${lines.map((l) => ownerHasLinePredicate(l, alias)).join(' OR ')})`;
+}
+
 /** EXISTS predicate: the owning provider (aliased row's `provider_id`) practises `line`.
  *  SNF is the residual — an owner with a stored SNF specialty OR NO specialty at all counts
  *  as SNF, matching the note-type residual so purely-SNF patients aren't stranded. */

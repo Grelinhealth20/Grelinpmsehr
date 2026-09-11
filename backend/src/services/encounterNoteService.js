@@ -5,20 +5,23 @@ import { predictEncounterCoding } from './codePredictionService.js';
 import { calcRaf, deriveSegment } from './hccRafService.js';
 import { encrypt, decrypt } from '../utils/crypto.js';
 import { getOwnedEncounterId, getAccessibleEncounterId } from './encounterService.js';
-import { viewerScope, isFacilityWide, noteServiceLineWhere } from './accessScope.js';
+import { viewerScope, isFacilityWide, noteServiceLineWhere, ownerServiceLineWhere } from './accessScope.js';
 import { storeSignedNoteDoc } from './noteDocumentService.js';
 import { isBillableIcd } from './terminologyCache.js';
+import { posForNoteType } from './payscaleConfig.js';
 import { logger } from '../config/logger.js';
 
 // Build the READ-access SQL condition for a note by the viewer's scope: own note, OR a
 // facility-wide MD whose facilities include the patient's facility AND whose SERVICE
-// LINE matches the note (a Pain MD never sees SNF notes and vice versa). Own notes are
-// always the viewer's own service line, so they are unaffected.
+// LINE matches the note's OWNING PROVIDER (a Pain MD never sees an SNF-owned patient's
+// note and vice versa). Owner-based (not note-type based) so a UNIVERSAL note authored by
+// another line's provider isn't reachable cross-line by UUID — matches patientScopeWhere.
+// Own notes are always the viewer's own service line, so they are unaffected.
 function noteAccess(scope, userId, params) {
   params.pid = userId;
   if (!isFacilityWide(scope)) return 'e.provider_id = :pid';
   const ph = scope.facilityIds.map((id, i) => { params[`nf${i}`] = id; return `:nf${i}`; }).join(',');
-  return `(e.provider_id = :pid OR (p.facility_id IN (${ph}) AND ${noteServiceLineWhere(scope, 'n')}))`;
+  return `(e.provider_id = :pid OR (p.facility_id IN (${ph}) AND ${ownerServiceLineWhere(scope, 'n')}))`;
 }
 
 /**
@@ -457,14 +460,16 @@ export async function predictCodes(noteUuid, providerId) {
   return predictEncounterCoding(note.content || {}, { noteType: note.noteType });
 }
 
-export async function createNote({ encounterUuid, providerId, noteType, reason, content, createdBy }) {
+export async function createNote({ encounterUuid, providerId, noteType, reason, content, createdBy, pos }) {
   const encId = await getOwnedEncounterId(encounterUuid, providerId);
   if (!encId) return null;
   const uuid = uuidv4();
+  // Place of Service: explicit `pos` when provided, else seeded from the note type (SNF→31, office→11, …).
+  const posCode = (pos != null && String(pos).replace(/\D/g, '')) ? String(pos).replace(/\D/g, '').slice(0, 4) : posForNoteType(noteType);
   await execute(
-    `INSERT INTO encounter_notes (uuid, encounter_id, provider_id, note_type, reason, content_enc, status, created_by)
-     VALUES (:uuid, :e, :pid, :type, :reason, :content, 'draft', :createdBy)`,
-    { uuid, e: encId, pid: providerId, type: noteType, reason: reason || null,
+    `INSERT INTO encounter_notes (uuid, encounter_id, provider_id, note_type, pos_code, reason, content_enc, status, created_by)
+     VALUES (:uuid, :e, :pid, :type, :pos, :reason, :content, 'draft', :createdBy)`,
+    { uuid, e: encId, pid: providerId, type: noteType, pos: posCode, reason: reason || null,
       content: content ? encrypt(JSON.stringify(content)) : null, createdBy },
   );
   return getNote(uuid, providerId);
