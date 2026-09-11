@@ -206,6 +206,9 @@ export async function runMigrations() {
   // 10k+ records with a composite index matching ORDER BY status, created_at.
   await ensureIndex('encounter_notes', 'idx_note_provider_status_created', '`provider_id`, `status`, `created_at`');
   await ensureIndex('encounter_notes', 'idx_note_status_created', '`status`, `created_at`');
+  // CMS Place of Service on the note (seeded from the note type at creation, provider-overridable to any
+  // CMS POS — 11/12/31/32/10/…). Drives facility vs non-facility PE RVU in the payscale/coding. Not PHI.
+  await ensureColumn('encounter_notes', 'pos_code', '`pos_code` VARCHAR(4) NULL AFTER `note_type`');
   // Patient encounters sub-table (newest DOS first) — kept fast per patient at scale.
   await ensureIndex('encounters', 'idx_enc_patient_date', '`patient_id`, `encounter_date`');
   await ensureIndex('encounters', 'idx_enc_provider', '`provider_id`');
@@ -237,6 +240,53 @@ export async function runMigrations() {
        \`setting_value\` JSON NOT NULL,
        \`updated_by\` BIGINT UNSIGNED NULL,
        \`updated_at\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+  );
+  // Pay-period snapshots — IMMUTABLE payroll records. When a super/master admin FINALIZES a period, the
+  // computed pay per provider is frozen here so a later note edit/delete can never change a PAID period.
+  // Reporting reads the snapshot for finalized periods (real-time only for un-finalized ones). Not PHI
+  // (pay + RVU aggregates + code-level breakdown).
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS \`pay_period_snapshots\` (
+       \`id\` BIGINT UNSIGNED NOT NULL PRIMARY KEY AUTO_INCREMENT,
+       \`uuid\` CHAR(36) NOT NULL,
+       \`provider_id\` BIGINT UNSIGNED NOT NULL,
+       \`period_type\` VARCHAR(10) NOT NULL,
+       \`period_from\` DATE NOT NULL,
+       \`period_to\` DATE NOT NULL,
+       \`cf_kind\` VARCHAR(10) NOT NULL DEFAULT 'standard',
+       \`locality\` VARCHAR(4) NOT NULL DEFAULT '99',
+       \`rate\` DECIMAL(10,4) NOT NULL,
+       \`work_rvu\` DECIMAL(14,4) NOT NULL DEFAULT 0,
+       \`provider_pay\` DECIMAL(14,2) NOT NULL DEFAULT 0,
+       \`group_retained\` DECIMAL(14,2) NOT NULL DEFAULT 0,
+       \`medicare_value\` DECIMAL(14,2) NOT NULL DEFAULT 0,
+       \`lines_json\` LONGTEXT NULL,
+       \`status\` VARCHAR(10) NOT NULL DEFAULT 'finalized',
+       \`finalized_by\` BIGINT UNSIGNED NULL,
+       \`finalized_at\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+       UNIQUE KEY \`uq_snapshot\` (\`provider_id\`, \`period_from\`, \`period_to\`),
+       UNIQUE KEY \`uq_snapshot_uuid\` (\`uuid\`),
+       KEY \`idx_snapshot_period\` (\`period_from\`, \`period_to\`)
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+  );
+  // Paid-note ledger — the record of exactly which SIGNED notes have been PAID in a finalized snapshot.
+  // `note_id` is UNIQUE across the whole table, so a note can be paid in at most one period EVER: every
+  // live pay computation anti-joins this ledger, which makes double-paying an encounter structurally
+  // impossible ("already-paid RVUs never show on the next paycheck"). Reopening a period deletes its ledger
+  // rows, returning those notes to payable. Not PHI (note id + pay figures only).
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS \`paid_note_ledger\` (
+       \`id\` BIGINT UNSIGNED NOT NULL PRIMARY KEY AUTO_INCREMENT,
+       \`note_id\` BIGINT UNSIGNED NOT NULL,
+       \`snapshot_id\` BIGINT UNSIGNED NOT NULL,
+       \`provider_id\` BIGINT UNSIGNED NOT NULL,
+       \`work_rvu\` DECIMAL(14,4) NOT NULL DEFAULT 0,
+       \`provider_pay\` DECIMAL(14,2) NOT NULL DEFAULT 0,
+       \`paid_at\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+       UNIQUE KEY \`uq_paid_note\` (\`note_id\`),
+       KEY \`idx_paid_snapshot\` (\`snapshot_id\`),
+       KEY \`idx_paid_provider\` (\`provider_id\`)
      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
   );
   // Rotating key material (JWT signing secrets + gateway internal key). A single

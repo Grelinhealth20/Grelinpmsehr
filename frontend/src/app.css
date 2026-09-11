@@ -507,6 +507,93 @@
 .ehr-layout.is-collapsed .ehr-nav-item { justify-content: center; padding: 0; gap: 0; }
 .ehr-layout.is-collapsed .ehr-nav-label { opacity: 0; width: 0; }
 
+/* Reports subsystem — provider-focused practice summary + RVU payscale (wired below Referrals). */
+.ehr-reports { display: flex; flex-direction: column; height: 100%; min-height: 0; background: #f7f9fc; }
+.ehr-reports-head { padding: 18px 28px; border-bottom: 1px solid var(--c-line); background: #fff; display: flex; align-items: baseline; gap: 12px; }
+.ehr-reports-title { margin: 0; font-size: 18px; font-weight: 600; color: var(--c-dark-blue); letter-spacing: -0.01em; }
+.ehr-reports-sub { font-size: 12.5px; color: var(--c-ink-3); }
+.ehr-reports-body { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 28px; display: flex; flex-direction: column; gap: 18px; }
+.rep-error { background: rgba(192,57,43,0.06); border: 1px solid rgba(192,57,43,0.3); color: #b03a2e; padding: 10px 14px; border-radius: 10px; font-size: 13px; }
+.rep-muted { color: var(--c-ink-3); font-size: 13px; padding: 8px 2px; }
+
+.rep-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+.rep-card { background: #fff; border: 1px solid var(--c-line); border-radius: 14px; padding: 16px 18px; display: flex; flex-direction: column; gap: 4px; }
+.rep-card-value { font-size: 26px; font-weight: 600; color: var(--c-dark-blue); font-variant-numeric: tabular-nums; }
+.rep-card-label { font-size: 12px; color: var(--c-ink-3); font-weight: 500; }
+.rep-card.good .rep-card-value { color: #0a7d3f; }
+.rep-card.warn { border-color: rgba(217,151,20,0.4); background: rgba(217,151,20,0.05); }
+.rep-card.warn .rep-card-value { color: #92600a; }
+
+.rep-types { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.rep-types-lbl { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--c-ink-3); font-weight: 600; }
+.rep-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+.rep-chip { display: inline-flex; align-items: center; gap: 6px; background: #fff; border: 1px solid var(--c-line); border-radius: 999px; padding: 4px 10px; font-size: 12px; color: var(--c-dark-blue); text-transform: capitalize; }
+.rep-chip b { color: var(--c-blue); font-variant-numeric: tabular-nums; }
+
+.rep-pay { background: #fff; border: 1px solid var(--c-line); border-radius: 16px; padding: 18px 20px; display: flex; flex-direction: column; gap: 16px; }
+.rep-pay-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.rep-pay-title { margin: 0; font-size: 15px; font-weight: 600; color: var(--c-dark-blue); }
+.rep-pay-meta { font-size: 12px; color: var(--c-ink-3); text-transform: capitalize; }
+.rep-toggle { display: inline-flex; background: #eef2f8; border-radius: 999px; padding: 3px; }
+.rep-toggle-btn { border: none; background: transparent; padding: 6px 14px; border-radius: 999px; font-size: 12.5px; font-weight: 500; color: var(--c-ink-3); cursor: pointer; }
+.rep-toggle-btn.active { background: #fff; color: var(--c-dark-blue); box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+.rep-period { display: flex; flex-direction: column; gap: 12px; }
+.rep-period-sel { max-width: 280px; }
+.rep-pay-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.rep-pay-box { border: 1px solid var(--c-line); border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 3px; }
+.rep-pay-box.primary { background: linear-gradient(135deg, rgba(16,163,74,0.1), rgba(16,163,74,0.03)); border-color: rgba(16,163,74,0.35); }
+.rep-pay-num { font-size: 22px; font-weight: 600; color: var(--c-dark-blue); font-variant-numeric: tabular-nums; }
+.rep-pay-box.primary .rep-pay-num { color: #0a7d3f; }
+.rep-pay-lbl { font-size: 11.5px; color: var(--c-ink-3); font-weight: 500; }
+.rep-pay-hero { border: 1px solid rgba(16,163,74,0.35); background: linear-gradient(135deg, rgba(16,163,74,0.1), rgba(16,163,74,0.03)); border-radius: 14px; padding: 20px 22px; display: flex; flex-direction: column; gap: 4px; }
+.rep-pay-hero-num { font-size: 34px; font-weight: 700; color: #0a7d3f; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+.rep-pay-hero-lbl { font-size: 12.5px; color: var(--c-ink-3); font-weight: 500; display: inline-flex; align-items: center; gap: 8px; }
+.rep-paid-badge { display: inline-block; font-size: 11px; font-weight: 700; color: #8a5a00;
+  background: color-mix(in srgb, #f6c65b 22%, transparent); border: 1px solid #d8a943; border-radius: 999px; padding: 1px 8px; }
+.rep-open-badge { display: inline-block; font-size: 11px; font-weight: 600; color: var(--c-ink-3);
+  background: var(--c-surface-2, #f1f3f5); border: 1px solid var(--c-line, #e3e6ea); border-radius: 999px; padding: 1px 8px; }
+
+.rep-history { display: flex; flex-direction: column; gap: 8px; }
+.rep-table-wrap { overflow-x: auto; border: 1px solid var(--c-line); border-radius: 12px; }
+.rep-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.rep-table th, .rep-table td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--c-line); }
+.rep-table th { background: #f4f7fb; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--c-ink-3); font-weight: 600; }
+.rep-table tbody tr:last-child td { border-bottom: none; }
+.rep-table td.r, .rep-table th.r { text-align: right; font-variant-numeric: tabular-nums; }
+.rep-table td.mono { font-family: ui-monospace, Menlo, monospace; color: var(--c-blue); }
+.rep-table td.strong { font-weight: 600; color: var(--c-dark-blue); }
+.rep-table .rep-desc { color: var(--c-ink-3); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rep-table tbody tr.sel { background: rgba(16,163,74,0.06); }
+.rep-table tbody tr:hover { background: rgba(0,0,0,0.02); }
+.rep-table tfoot td { padding: 9px 12px; font-weight: 600; color: var(--c-dark-blue); border-top: 2px solid var(--c-line); }
+.rep-foot { font-size: 11.5px; color: var(--c-ink-3); line-height: 1.5; margin: 0; }
+.rep-stmt { display: flex; flex-direction: column; gap: 8px; }
+.rep-pos { font-size: 12px; color: var(--c-ink-3); white-space: nowrap; }
+
+/* Super Admin · Payscale tab */
+.pay-admin { display: flex; flex-direction: column; gap: 16px; }
+.pay-admin-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.pay-admin-title { margin: 0; font-size: 17px; font-weight: 600; color: var(--c-dark-blue); }
+.pay-admin-sub { font-size: 12.5px; color: var(--c-ink-3); }
+.pay-admin-filters { display: flex; gap: 14px; flex-wrap: wrap; }
+.pay-fld { display: flex; flex-direction: column; gap: 5px; min-width: 200px; }
+.pay-fld > span { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--c-ink-3); font-weight: 600; }
+.pay-admin-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+.pay-type { font-size: 12px; color: var(--c-ink-3); }
+.pay-dl { display: flex; gap: 8px; }
+/* Pay-period lock bar */
+.pay-lockbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+  padding: 12px 14px; border: 1px solid var(--c-line, #e3e6ea); border-radius: 10px; background: var(--c-surface-2, #f7f8fa); }
+.pay-lockbar.locked { border-color: #b9862f; background: color-mix(in srgb, #f6c65b 14%, transparent); }
+.pay-lock-status { display: flex; flex-direction: column; gap: 3px; min-width: 260px; }
+.pay-lock-badge { font-size: 12px; font-weight: 700; letter-spacing: 0.02em; color: #8a5a00; }
+.pay-lock-badge.open { color: var(--c-ink-3); }
+.pay-lock-sub { font-size: 12px; color: var(--c-ink-3); }
+.pay-lock-actions { display: flex; align-items: center; gap: 10px; }
+.pay-lock-note { font-size: 12px; color: var(--c-ink-3); font-style: italic; }
+.rep-downloads { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.rep-dl-lbl { font-size: 12px; color: var(--c-ink-3); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+
 /* Sidebar footer — cross-system "Access {module}" switcher (moved from header) */
 .ehr-side-foot { flex-shrink: 0; padding: 10px; border-top: 1px solid rgba(255, 255, 255, 0.07); display: flex; flex-direction: column; gap: 6px; }
 .ehr-side-access {

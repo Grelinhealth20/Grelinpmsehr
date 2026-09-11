@@ -14,6 +14,7 @@ import AiLogs from './AiLogs.jsx';
 import TablePager from '../../components/TablePager.jsx';
 import SystemSettings from './SystemSettings.jsx';
 import ReferralsAdmin from './ReferralsAdmin.jsx';
+import PayscaleAdmin from './PayscaleAdmin.jsx';
 
 const TABS = [
   { key: 'super', label: 'Super Admins', roles: ['super_admin', 'master_admin'], createRole: 'super_admin', createLabel: '+ Create Super Admin' },
@@ -50,6 +51,7 @@ export default function SuperAdminPanel() {
   const isAiLogs = tab === 'ailogs';
   const isSettings = tab === 'settings';
   const isReferrals = tab === 'referrals';
+  const isPayscale = tab === 'payscale';
 
   // Facilities state (loaded on demand when the Facilities tab is opened).
   const [facilities, setFacilities] = useState([]);
@@ -214,6 +216,14 @@ export default function SuperAdminPanel() {
           </button>
           <button
             role="tab"
+            aria-selected={isPayscale}
+            className={`sa-tab ${isPayscale ? 'active' : ''}`}
+            onClick={() => setTab('payscale')}
+          >
+            Payscale
+          </button>
+          <button
+            role="tab"
             aria-selected={isSettings}
             className={`sa-tab ${isSettings ? 'active' : ''}`}
             onClick={() => setTab('settings')}
@@ -222,7 +232,9 @@ export default function SuperAdminPanel() {
           </button>
         </div>
 
-        {isReferrals ? (
+        {isPayscale ? (
+          <PayscaleAdmin facilities={facilities} role={me?.role} />
+        ) : isReferrals ? (
           <ReferralsAdmin />
         ) : isSettings ? (
           <SystemSettings />

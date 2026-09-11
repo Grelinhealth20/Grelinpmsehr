@@ -138,6 +138,33 @@ export const providersApi = {
   myFacilities: () => api.get('/providers/facilities'),
 };
 
+// --- Reports + RVU Payscale (the logged-in provider only) -------------------
+export const reportsApi = {
+  summary: (params) => api.get('/reports/summary', { params }),
+  payscale: (params) => api.get('/reports/payscale', { params }),
+  payPeriods: (params) => api.get('/reports/pay-periods', { params }),
+  statement: (params) => api.get('/reports/statement', { params }),
+  adminPayscale: (params) => api.get('/reports/admin/payscale', { params }),
+  downloadEncounters: (params) => api.get('/reports/download/encounters', { params, responseType: 'blob' }),
+  downloadBilling: (params) => api.get('/reports/download/billing', { params, responseType: 'blob' }),
+  adminDownloadEncounters: (params) => api.get('/reports/admin/download/encounters', { params, responseType: 'blob' }),
+  adminDownloadBilling: (params) => api.get('/reports/admin/download/billing', { params, responseType: 'blob' }),
+  // Payroll pay-period LOCK (super/master admin)
+  finalizePeriod: (body) => api.post('/reports/admin/payroll/finalize', body),
+  finalizedSnapshots: (params) => api.get('/reports/admin/payroll/snapshots', { params }),
+  reopenPeriod: (uuid) => api.post(`/reports/admin/payroll/reopen/${uuid}`),
+};
+
+/** Trigger a browser download from an axios blob response. */
+export function saveBlob(res, fallbackName) {
+  const cd = res.headers?.['content-disposition'] || '';
+  const m = /filename="?([^"]+)"?/.exec(cd);
+  const name = (m && m[1]) || fallbackName;
+  const url = URL.createObjectURL(new Blob([res.data], { type: res.data?.type || 'application/octet-stream' }));
+  const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click();
+  a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 // --- Facilities (Super/Master admin) ---------------------------------------
 export const facilitiesApi = {
   list: (params) => api.get('/facilities', { params }),

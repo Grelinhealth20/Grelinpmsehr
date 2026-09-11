@@ -8,6 +8,7 @@ import { getOwnedEncounterId, getAccessibleEncounterId } from './encounterServic
 import { viewerScope, isFacilityWide, noteServiceLineWhere } from './accessScope.js';
 import { storeSignedNoteDoc } from './noteDocumentService.js';
 import { isBillableIcd } from './terminologyCache.js';
+import { posForNoteType } from './payscaleConfig.js';
 import { logger } from '../config/logger.js';
 
 // Build the READ-access SQL condition for a note by the viewer's scope: own note, OR a
@@ -457,14 +458,16 @@ export async function predictCodes(noteUuid, providerId) {
   return predictEncounterCoding(note.content || {}, { noteType: note.noteType });
 }
 
-export async function createNote({ encounterUuid, providerId, noteType, reason, content, createdBy }) {
+export async function createNote({ encounterUuid, providerId, noteType, reason, content, createdBy, pos }) {
   const encId = await getOwnedEncounterId(encounterUuid, providerId);
   if (!encId) return null;
   const uuid = uuidv4();
+  // Place of Service: explicit `pos` when provided, else seeded from the note type (SNF→31, office→11, …).
+  const posCode = (pos != null && String(pos).replace(/\D/g, '')) ? String(pos).replace(/\D/g, '').slice(0, 4) : posForNoteType(noteType);
   await execute(
-    `INSERT INTO encounter_notes (uuid, encounter_id, provider_id, note_type, reason, content_enc, status, created_by)
-     VALUES (:uuid, :e, :pid, :type, :reason, :content, 'draft', :createdBy)`,
-    { uuid, e: encId, pid: providerId, type: noteType, reason: reason || null,
+    `INSERT INTO encounter_notes (uuid, encounter_id, provider_id, note_type, pos_code, reason, content_enc, status, created_by)
+     VALUES (:uuid, :e, :pid, :type, :pos, :reason, :content, 'draft', :createdBy)`,
+    { uuid, e: encId, pid: providerId, type: noteType, pos: posCode, reason: reason || null,
       content: content ? encrypt(JSON.stringify(content)) : null, createdBy },
   );
   return getNote(uuid, providerId);
