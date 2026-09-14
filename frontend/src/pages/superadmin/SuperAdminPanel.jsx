@@ -102,10 +102,12 @@ export default function SuperAdminPanel() {
   }, [tab, search]);
 
   useEffect(() => {
-    // Facilities power the Facilities tab AND the audit-log facility filter.
-    if ((isFacilities || isLogs) && facilities.length === 0) loadFacilities();
+    // Facilities power the Facilities tab, the audit-log facility filter, AND the Payscale facility filter
+    // (so its dropdown is populated in real time whenever the Payscale tab is opened, not only after a
+    // visit to the Facilities/Logs tab).
+    if ((isFacilities || isLogs || isPayscale) && facilities.length === 0) loadFacilities();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isFacilities, isLogs]);
+  }, [isFacilities, isLogs, isPayscale]);
 
   const counts = useMemo(() => {
     const c = {};

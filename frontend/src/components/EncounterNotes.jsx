@@ -100,6 +100,17 @@ function deriveSectionOrder(note) {
 const PHYSICIAN_CREDS = ['MD', 'DO'];
 const hasMD = (user) => (user?.credentials || []).some((c) => PHYSICIAN_CREDS.includes(String(c).toUpperCase().trim()));
 const blankRx = () => ({ drug: '', dose: '', route: '', frequency: '', quantity: '', refills: '', sig: '' });
+// CMS Place of Service codes a SNF / Pain / PI provider realistically documents at. The provider sets the
+// ACTUAL POS for the encounter; when left on "Auto", the server identifies it from the documented record.
+// MAJOR, specialty-aligned CMS Place-of-Service codes a SNF / Pain / PI provider actually bills — not the
+// full CMS list. SNF core first, then office/home/telehealth, then the occasional hospital/ASC/hospice/rehab.
+const POS_OPTIONS = [
+  { code: '31', name: 'Skilled nursing facility' }, { code: '32', name: 'Nursing facility' }, { code: '33', name: 'Custodial care facility' }, { code: '13', name: 'Assisted living facility' },
+  { code: '11', name: 'Office' }, { code: '12', name: 'Home' }, { code: '10', name: 'Telehealth — patient home' }, { code: '02', name: 'Telehealth — other than home' },
+  { code: '21', name: 'Inpatient hospital' }, { code: '22', name: 'Hospital outpatient' }, { code: '24', name: 'Ambulatory surgical center' }, { code: '23', name: 'Emergency room' },
+  { code: '34', name: 'Hospice' }, { code: '62', name: 'Outpatient rehabilitation facility' },
+];
+const POS_NAME = Object.fromEntries(POS_OPTIONS.map((o) => [o.code, o.name]));
 // Structured vital signs (Objective). Reference ranges are shown Epic-style beside each field.
 const VITALS = [
   { k: 'temp', label: 'Temp °F', ph: '98.6', range: '97–99' },
@@ -266,6 +277,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   const [showVitals, setShowVitals] = useState(false); // vitals revealed under Chief Complaint (on demand)
   const [content, setContent] = useState({ vitals: {}, sections: {}, checks: {}, prescriptions: [] });
   const [reason, setReason] = useState('');
+  const [pos, setPos] = useState(''); // Place of Service (CMS 2-digit) — the ACTUAL POS for this encounter
   const [pharmacy, setPharmacy] = useState(null);   // pharmacy/PBM vendor from benefits
   const [rxCarry, setRxCarry] = useState(null);      // carry-forward source info
   const [billing, setBilling] = useState(null);      // live coding-engine predictions (ICD/CPT/modifiers)
@@ -285,11 +297,13 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   // Auto-save engine refs — persistence must never silently drop an edit.
   const contentRef = useRef(content); // always the LATEST content (avoids stale closures)
   const reasonRef = useRef(reason);
+  const posRef = useRef(pos);
   const savingRef = useRef(false);    // a save request is in flight
   const dirtyRef = useRef(false);     // edits exist that are not yet confirmed saved
   const retryRef = useRef(null);      // pending retry timer after a failed save
   contentRef.current = content;
   reasonRef.current = reason;
+  posRef.current = pos;
 
   // Fetch the backend-authoritative note-type templates once. No static fallback — the
   // server defs are the single source of truth for the note structure.
@@ -434,6 +448,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
           : deriveSectionOrder(data.note)),
       });
       setReason(data.note.reason || '');
+      setPos(data.note.pos || '');
       setRxCarry(null);
       setShowVitals(false); // vitals auto-show only if this note already has vitals data
       setTab('note');
@@ -543,7 +558,12 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
     savingRef.current = true;
     setAutoState('saving');
     try {
-      await encountersApi.updateNote(active.uuid, { content: contentRef.current, reason: reasonRef.current });
+      await encountersApi.updateNote(active.uuid, {
+        content: contentRef.current, reason: reasonRef.current,
+        // Only send a valid 2-digit CMS POS — never an empty/partial value (which the server would reject),
+        // so changing POS persists but a legacy note with no POS keeps saving normally.
+        ...(/^\d{2}$/.test(posRef.current || '') ? { pos: posRef.current } : {}),
+      });
       savingRef.current = false;
       if (dirtyRef.current) { dirtyRef.current = false; return flushSave(); } // edits arrived mid-save
       setAutoState('saved');
@@ -567,7 +587,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
     setAutoState('saving');
     const t = setTimeout(() => { flushSave(); }, 800);
     return () => clearTimeout(t);
-  }, [content, reason]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [content, reason, pos]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Warn before leaving with unsaved edits (tab close / refresh within the save window).
   useEffect(() => {
@@ -966,6 +986,21 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
                       encType={content.encounterType} readOnly={readOnly}
                       onEncType={(v) => setContent((c) => ({ ...c, encounterType: v }))} />
 
+                    <section className="pf-card pf-pos-card">
+                      <div className="pf-card-h">Place of Service</div>
+                      {readOnly ? (
+                        <div className="pf-body">{active?.pos ? `POS ${active.pos} · ${POS_NAME[active.pos] || 'Place of service'}` : 'Identified from the documented record'}</div>
+                      ) : (
+                        <div className="pf-pos-row">
+                          <select className="select" value={pos} onChange={(e) => setPos(e.target.value)} aria-label="Place of Service">
+                            <option value="">Auto — identify from the note</option>
+                            {POS_OPTIONS.map((o) => <option key={o.code} value={o.code}>{o.code} · {o.name}</option>)}
+                          </select>
+                          <span className="pf-pos-hint">{pos ? 'Set by you for this encounter.' : 'Left on Auto, the system identifies the POS from what you document (real-time). You can override it any time.'}</span>
+                        </div>
+                      )}
+                    </section>
+
                     <section className="pf-card">
                       <div className="pf-card-h">Chief complaint</div>
                       {readOnly ? (
@@ -1036,18 +1071,6 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
                         </div>
                       ) : (
                         <Fragment key={s.key}>
-                        {/* BILLING — a FREE-FORM note section (saved in content.sections.billing) PLUS the
-                            live coding-engine predictions, rendered directly ABOVE Attestation & Signature
-                            on every template. */}
-                        {s.key === 'attestation' && (
-                          <BillingSection
-                            value={content.sections?.billing || ''}
-                            onChange={(v) => setSection('billing', v)}
-                            readOnly={readOnly}
-                            billing={billing}
-                            loading={billingLoading}
-                          />
-                        )}
                         <div className="pf-sec">
                           <div className="pf-sec-h">
                             <span className="pf-sec-hl"><span className="pf-sec-tick" aria-hidden="true" /><span className="pf-sec-t">{s.label}</span></span>
@@ -1137,6 +1160,21 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
                         </div>
                         </Fragment>
                       ))) : <div className="pf-body"><span className="pf-muted">This note has no documentation.</span></div>}
+
+                      {/* BILLING — the free-form billing note PLUS the live predicted codes (ICD-10-CM with
+                          SNOMED CT id, then CPT & modifiers). Rendered ONCE here, after the note body and
+                          before the signature, so it is ALWAYS visible — on drafts AND on reopened signed
+                          notes — independent of section content-filtering (the sign/attestation section is
+                          filtered out of the read view when blank, so billing must not be anchored to it). */}
+                      {template && template.length > 0 && (
+                        <BillingSection
+                          value={content.sections?.billing || ''}
+                          onChange={(v) => setSection('billing', v)}
+                          readOnly={readOnly}
+                          billing={billing}
+                          loading={billingLoading}
+                        />
+                      )}
 
                       {signed && (
                         <div className="pf-sign">
@@ -1663,20 +1701,48 @@ function BillingSection({ value, onChange, readOnly, billing, loading }) {
             DYNAMIC: nothing appears on a blank note — codes surface only from what is documented, and refresh
             after each save. CPT/HCPCS + ICD-10-CM as chips; hover a diagnosis for its description. */}
         {(px.length || dx.length) ? (
-          <div className="pf-bill-inline">
-            {px.map((p, i) => (
-              <span className="pf-code-chip proc" key={`p-${p.cpt}-${i}`} title={p.description || ''}>
-                {p.cpt}{mods(p.modifiers) ? `-${mods(p.modifiers)}` : ''}{p.units > 1 ? ` ×${p.units}` : ''}
-              </span>
-            ))}
-            {dx.map((d, i) => (
-              <span className={`pf-code-chip dx${d.primary ? ' primary' : ''}`} key={`d-${d.icd}-${i}`} title={d.description || ''}>
-                {d.icd}{d.primary ? ' • primary' : ''}
-              </span>
-            ))}
+          <div className="pf-bill-pred-groups">
+            {/* DIAGNOSES — each predicted ICD-10-CM on its own aligned row: the ICD code in a fixed column,
+                then its official description with the SNOMED CT concept id directly beneath it. */}
+            {dx.length > 0 && (
+              <div className="pf-bill-codegrp">
+                <div className="pf-bill-codegrp-lbl">Diagnoses — ICD-10-CM</div>
+                <div className="pf-bill-rows">
+                  {dx.map((d, i) => (
+                    <div className={`pf-bill-row dx${d.primary ? ' primary' : ''}`} key={`d-${d.icd}-${i}`}>
+                      <span className="pf-bill-row-code">{d.icd}</span>
+                      <span className="pf-bill-row-body">
+                        <span className="pf-bill-row-desc">
+                          {d.description || '—'}
+                          {d.primary ? <span className="pf-bill-primary-tag">Primary</span> : null}
+                        </span>
+                        <span className="pf-bill-row-sct">SNOMED CT&nbsp;{d.snomedCode || '—'}</span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {/* PROCEDURES — CPT with its modifiers, listed BELOW the diagnoses. */}
+            {px.length > 0 && (
+              <div className="pf-bill-codegrp">
+                <div className="pf-bill-codegrp-lbl">Procedures — CPT &amp; Modifiers</div>
+                <div className="pf-bill-rows">
+                  {px.map((p, i) => (
+                    <div className="pf-bill-row px" key={`p-${p.cpt}-${i}`}>
+                      <span className="pf-bill-row-code">{p.cpt}{p.units > 1 ? <span className="pf-bill-units">×{p.units}</span> : null}</span>
+                      <span className="pf-bill-row-body">
+                        <span className="pf-bill-row-desc">{p.description || '—'}</span>
+                        <span className="pf-bill-row-mods">{mods(p.modifiers) ? `Modifiers: ${mods(p.modifiers).split(',').map((m) => m.trim()).filter(Boolean).join(', ')}` : 'No modifiers'}</span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             <span className="pf-code-hint">Suggested from your documentation — verify before billing</span>
           </div>
-        ) : (!loading ? <div className="pf-bill-empty">Suggested billing codes are generated from your completed note when you Sign &amp; Finalize.</div> : null)}
+        ) : (!loading && !readOnly ? <div className="pf-bill-empty">Suggested billing codes are generated from your completed note when you Sign &amp; Finalize.</div> : null)}
         {(() => {
           // denialSummary is a COUNT object { errors, warnings, info } — never render it directly (that
           // throws "Objects are not valid as a React child"). Surface only actionable error/warning

@@ -133,7 +133,7 @@ export const NOTE_TYPE_TEMPLATES = [
     noteType: 'progress', label: 'Progress Note', category: 'SNF Progress Note · Physician E/M (Part B)',
     sections: [
       sec('chiefComplaint', 'Reason for Visit', 'The problems you are here to manage today — name the conditions.', 2),
-      sec('interval', 'Interval History', 'Since the last visit: symptoms, response to treatment, ED/hospital transfers with dates, response to treatment, intake and weight trend, sleep, behavior, falls; who gave the history if not the patient.', 4),
+      sec('interval', 'HPI', 'History of the present illness since the last visit: symptoms and their course, response to treatment, ED/hospital transfers with dates, intake and weight trend, sleep, behavior, falls; who gave the history if not the patient.', 4),
       sec('medChanges', 'Medication Changes', 'What you started, stopped, or changed and why; courses ending (stewardship review); psychotropic indication and any dose reduction; PRNs expiring; anything needing lab monitoring.', 3),
       sec('exam', 'Focused Exam', 'Systems relevant to today’s problems; wounds with site, side, stage, size, drainage; one clear statement of orientation and mental status; one line on mobility and function.', 3),
       sec('results', 'Labs & Results', 'Each result with date and value, trended against the previous value; what you ordered and when.', 3),
@@ -268,6 +268,7 @@ export const PI_NOTE_TEMPLATES = [
       sec('piServicesTimed', 'Services Rendered (record times for timed services)', 'Each service/modality with CPT and START/STOP or total minutes for timed codes; supervision as required.', 3, null, A),
       sec('piAssessment', 'Assessment — Progressing?', 'Is the patient progressing toward goals? Objective evidence; barriers.', 3, null, A),
       sec('piPlan', 'Plan — Next Steps', 'Continue/modify plan, next visit, any new orders or referrals; re-exam due.', 3, null, A),
+      sec('piAttest', 'Sign & Attest', '"I personally performed or supervised the services rendered on the date of service." Credentials (MD/DO/PA/DC) and NPI; electronic signature and date captured automatically.', 2, null, A),
     ],
   },
   {
@@ -279,6 +280,7 @@ export const PI_NOTE_TEMPLATES = [
       sec('piOutcomeScores', 'Outcome Questionnaire Scores', 'Validated outcome measures (ODI / NDI / VAS / PSFS) with dates and change from baseline.', 2, null, O),
       sec('piUpdatedDx', 'Updated Diagnoses & Need for Continued Care', 'Updated diagnoses and the medical necessity rationale for continued treatment.', 3, null, A),
       sec('piUpdatedPlan', 'Updated Plan & Work Status', 'Revised plan, frequency/duration, work status/restrictions, next re-exam.', 3, null, A),
+      sec('piAttest', 'Sign & Attest', '"I personally performed this re-examination on the date of service." Credentials (MD/DO) and NPI; electronic signature and date captured automatically.', 2, null, A),
     ],
   },
   {

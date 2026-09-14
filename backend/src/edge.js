@@ -55,6 +55,15 @@ const WAF_SIGNATURES = [
 ];
 const SCANNER_UA_RE = /(sqlmap|nikto|nmap|masscan|acunetix|nessus|openvas|dirbuster|gobuster|wpscan|hydra|metasploit|zgrab|nuclei|fuzz|w3af|arachni)/i;
 const WAF_SKIP_KEYS = new Set(['password', 'currentpassword', 'newpassword', 'temporarypassword', 'confirmpassword', 'token', 'csrftoken']);
+// Clinical FREE-TEXT endpoints — the request BODY is PHI prose authored by an AUTHENTICATED, authorized
+// clinician (note content, custom-template headings, referral letters), persisted ONLY via parameterized
+// queries and stored ENCRYPTED — never interpolated into SQL, a shell, or rendered as unescaped HTML. It is
+// therefore not an injection vector, while real clinical prose legitimately contains strings the SQLi
+// signature would match ("Foley catheter INSERT INTO the bladder", "SELECT ... FROM the formulary", "poor
+// SLEEP (7 hrs)", "DROP" for medication drops). Scanning it would BLOCK the note auto-save and LOSE the
+// note — so these paths skip the BODY scan. Their URL + query are STILL scanned (traversal etc.), and every
+// other endpoint's body is fully scanned. Scoped to the specific clinical-content routes by path.
+const WAF_BODY_SKIP_PATH = /\/(?:notes|custom-templates|referrals)(?:\/|$)/i;
 
 function clientIp(req) { return req.ip || req.socket?.remoteAddress || ''; }
 function scanValue(value) { if (!value) return null; for (const sig of WAF_SIGNATURES) if (sig.re.test(value)) return sig.name; return null; }
@@ -99,7 +108,10 @@ export function waf(req, res, next) {
   // path — an encoded payload placed in a body field can no longer slip past the signatures).
   const collected = [];
   collectScannable(req.query || {}, collected);
-  if (req.body && typeof req.body === 'object') collectScannable(req.body, collected);
+  // Skip the BODY scan for clinical free-text routes (still scanning URL + query above) — a real note that
+  // reads "catheter insert into the bladder" or "poor sleep (7 hrs)" must NEVER be blocked / silently lost.
+  const skipBody = WAF_BODY_SKIP_PATH.test(req.path || req.originalUrl || '');
+  if (!skipBody && req.body && typeof req.body === 'object') collectScannable(req.body, collected);
   for (const s of collected) { haystacks.push(s); const d = deepDecode(s); if (d !== s) haystacks.push(d); }
   for (const h of haystacks) {
     const hit = scanValue(h);

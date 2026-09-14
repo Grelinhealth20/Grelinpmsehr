@@ -149,6 +149,7 @@ export const reportsApi = {
   downloadBilling: (params) => api.get('/reports/download/billing', { params, responseType: 'blob' }),
   adminDownloadEncounters: (params) => api.get('/reports/admin/download/encounters', { params, responseType: 'blob' }),
   adminDownloadBilling: (params) => api.get('/reports/admin/download/billing', { params, responseType: 'blob' }),
+  adminDownloadPayscale: (params) => api.get('/reports/admin/download/payscale', { params, responseType: 'blob' }),
   // Payroll pay-period LOCK (super/master admin)
   finalizePeriod: (body) => api.post('/reports/admin/payroll/finalize', body),
   finalizedSnapshots: (params) => api.get('/reports/admin/payroll/snapshots', { params }),

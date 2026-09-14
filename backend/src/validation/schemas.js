@@ -336,13 +336,17 @@ export const createEncounterSchema = z
 
 // Reason may be a string, empty, omitted, or null (a loaded note's reason is null).
 const noteReason = optStr(120).nullable();
+// Place of Service — a 2-digit CMS POS code (11 Office, 12 Home, 31 SNF, 32 NF, 10 Telehealth-home, 02
+// Telehealth, 21 Inpatient, 22 Hospital outpatient, 23 ER, 13 Assisted living, …). Optional on every note
+// write; the server keeps the current POS when omitted. Real code only — never inferred.
+const notePos = z.string().trim().regex(/^\d{2}$/, 'Place of Service must be a 2-digit CMS POS code.').optional();
 
 export const createNoteSchema = z
-  .object({ noteType: z.enum(NOTE_TYPES), reason: noteReason, content: noteContentSchema })
+  .object({ noteType: z.enum(NOTE_TYPES), reason: noteReason, content: noteContentSchema, pos: notePos })
   .strict();
 
 export const updateNoteSchema = z
-  .object({ noteType: z.enum(NOTE_TYPES).optional(), reason: noteReason, content: noteContentSchema })
+  .object({ noteType: z.enum(NOTE_TYPES).optional(), reason: noteReason, content: noteContentSchema, pos: notePos })
   .strict();
 
 export const signNoteSchema = z

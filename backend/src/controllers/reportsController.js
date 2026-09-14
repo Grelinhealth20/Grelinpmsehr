@@ -4,7 +4,7 @@
  * cross-provider leakage). Read-only.
  */
 import { providerSummary, providerPayscale, providerPayPeriods, providerMonthlyStatement, adminProviderPayscale } from '../services/reportsService.js';
-import { encountersRows, buildEncountersWorkbook, billingDetailRows, buildBillingWorkbook } from '../services/reportExportService.js';
+import { encountersRows, buildEncountersWorkbook, billingDetailRows, buildBillingWorkbook, payscaleDetailRows, buildPayscaleDetailWorkbook } from '../services/reportExportService.js';
 import { findProviderIdByUuid } from '../services/userService.js';
 import { finalizePeriod, listSnapshots, reopenSnapshot } from '../services/payrollService.js';
 import { recordAudit } from '../services/auditService.js';
@@ -118,6 +118,26 @@ export async function adminDownloadBilling(req, res, next) {
     const meta = { Scope: providerUuid ? 'Provider' : facilityUuid ? 'Facility' : 'All providers', Period: periodLabel(from, to), Generated: new Date().toISOString().slice(0, 10) };
     const buf = await buildBillingWorkbook({ title: 'Billing Report', meta, rows });
     sendXlsx(res, buf, `billing_${from || 'all'}_${to || 'today'}.xlsx`);
+  } catch (err) { next(err); }
+}
+
+/** ADMIN: download the COMPLETE processed RVUs (per-line, by DOS) for the applied filters — the detailed
+ *  Excel behind the payscale table. Deterministic, real data (no mock/placeholders). */
+export async function adminDownloadPayscale(req, res, next) {
+  try {
+    const from = dateParam(req.query.from), to = dateParam(req.query.to);
+    const facilityUuid = uuidParam(req.query.facility);
+    const providerUuid = uuidParam(req.query.provider);
+    const cfKind = oneOf(req.query.cfKind, ['standard', 'apm'], 'standard');
+    const rows = await payscaleDetailRows({ facilityUuid, providerUuid, from, to, cfKind });
+    const meta = {
+      Scope: providerUuid ? 'Provider' : facilityUuid ? 'Facility' : 'All providers',
+      Period: periodLabel(from, to),
+      'Pay model': 'Work RVU × 60% provider / 40% group — CMS 2026 Physician Fee Schedule, Central Florida',
+      Generated: new Date().toISOString().slice(0, 10),
+    };
+    const buf = await buildPayscaleDetailWorkbook({ title: 'Processed RVUs — Provider Pay Detail', meta, rows });
+    sendXlsx(res, buf, `processed_rvus_${from || 'all'}_${to || 'today'}.xlsx`);
   } catch (err) { next(err); }
 }
 

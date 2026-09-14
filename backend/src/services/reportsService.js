@@ -341,23 +341,27 @@ export async function adminProviderPayscale({ facilityUuid = null, providerUuid 
   const cf = conversionFactor(cfKind, datasetCf);
   const rate = providerRatePerWorkRvu(cf);
   const providers = [];
-  let totalPay = 0, totalEnc = 0;
+  let totalPay = 0, totalEnc = 0, totalWrvu = 0, totalMedValue = 0, totalGroup = 0;
   for (const p of byProv.values()) {
-    let pay = 0, wrvu = 0, enc = 0;
-    for (const cc of p.codes) { pay += round2(cc.work * cc.units * rate); wrvu += cc.work * cc.units; enc += cc.units; }
-    pay = round2(pay); totalPay += pay; totalEnc += enc;
+    let pay = 0, wrvu = 0, enc = 0, medValue = 0;
+    // Per line: provider pay = round2(work×units×rate) [60%]; Medicare Work-RVU value = round2(work×units×CF)
+    // [100%]; group share = value − pay [40%]. Summed per provider (each line rounded, matching the workbook).
+    for (const cc of p.codes) { pay += round2(cc.work * cc.units * rate); wrvu += cc.work * cc.units; enc += cc.units; medValue += round2(cc.work * cc.units * cf); }
+    pay = round2(pay); medValue = round2(medValue); const group = round2(medValue - pay);
+    totalPay += pay; totalEnc += enc; totalWrvu += wrvu; totalMedValue += medValue; totalGroup += group;
     let creds = []; try { creds = Array.isArray(p.credentials) ? p.credentials : JSON.parse(p.credentials || '[]'); } catch { creds = []; }
     providers.push({
       providerUuid: p.providerUuid,
       name: p.nameEnc ? (() => { try { return decrypt(p.nameEnc); } catch { return '—'; } })() : '—',
       providerType: providerType(creds),
-      encounters: enc, workRvu: round2(wrvu), providerPay: pay,
+      encounters: enc, workRvu: round2(wrvu), medicareValue: medValue, groupShare: group, providerPay: pay,
     });
   }
-  providers.sort((a, b) => b.providerPay - a.providerPay);
+  providers.sort((a, b) => b.providerPay - a.providerPay || String(a.providerUuid).localeCompare(String(b.providerUuid)));
   return {
     conversionFactor: cf, providerRatePerWorkRvu: rate,
-    providerCount: providers.length, totalEncounters: totalEnc, totalPay: round2(totalPay),
+    providerCount: providers.length, totalEncounters: totalEnc,
+    totalWorkRvu: round2(totalWrvu), totalMedicareValue: round2(totalMedValue), totalGroupShare: round2(totalGroup), totalPay: round2(totalPay),
     providers,
   };
 }

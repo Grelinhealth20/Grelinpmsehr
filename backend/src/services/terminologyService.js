@@ -46,7 +46,7 @@ export async function searchSnomed(query, { pageSize = 20 } = {}) {
       `SELECT d.concept_id AS code, d.term AS name, d.us_preferred AS preferred
          FROM snomed_descriptions d JOIN snomed_concepts c ON c.id = d.concept_id
         WHERE d.concept_id = ? AND d.active = 1 AND c.active = 1
-        ORDER BY d.us_preferred DESC, (d.type_id = ?) DESC LIMIT ?`,
+        ORDER BY d.us_preferred DESC, (d.type_id = ?) DESC, d.concept_id, d.term LIMIT ?`,
       [q, SCT_SYNONYM, limit]);
     return rows.map((r) => ({ code: String(r.code), name: r.name, source: 'SNOMEDCT_US', preferred: !!r.preferred }));
   }
@@ -61,7 +61,7 @@ export async function searchSnomed(query, { pageSize = 20 } = {}) {
               MATCH(d.term) AGAINST(? IN BOOLEAN MODE) AS score
          FROM snomed_descriptions d JOIN snomed_concepts c ON c.id = d.concept_id
         WHERE d.active = 1 AND c.active = 1 AND MATCH(d.term) AGAINST(? IN BOOLEAN MODE)
-        ORDER BY (d.term LIKE ?) DESC, d.us_preferred DESC, CHAR_LENGTH(d.term), score DESC LIMIT ?`,
+        ORDER BY (d.term LIKE ?) DESC, d.us_preferred DESC, CHAR_LENGTH(d.term), score DESC, d.concept_id, d.term LIMIT ?`,
       [boolean, boolean, `${q}%`, limit * 4]);
   }
   if (!rows.length) {
@@ -69,7 +69,7 @@ export async function searchSnomed(query, { pageSize = 20 } = {}) {
       `SELECT d.concept_id AS code, d.term AS name, d.us_preferred AS preferred
          FROM snomed_descriptions d JOIN snomed_concepts c ON c.id = d.concept_id
         WHERE d.active = 1 AND c.active = 1 AND d.term LIKE ?
-        ORDER BY d.us_preferred DESC, CHAR_LENGTH(d.term) LIMIT ?`, [`${q}%`, limit]);
+        ORDER BY d.us_preferred DESC, CHAR_LENGTH(d.term), d.concept_id, d.term LIMIT ?`, [`${q}%`, limit]);
   }
   // One row per concept (prefer the us_preferred/highest-scoring synonym already ordered first).
   const seen = new Set(); const out = [];
@@ -249,17 +249,9 @@ export async function listCptModifiers() {
  * map_group 1 / lowest priority is the default; rules other than TRUE/OTHERWISE TRUE are context
  * dependent (age/sex/etc.) and flagged so the UI can prompt the clinician to confirm.
  */
-export async function snomedToIcd10cm(conceptId) {
-  const id = String(conceptId || '').trim();
-  if (!/^\d+$/.test(id)) return { primary: null, candidates: [] };
-  const [rows] = await pool.query(
-    `SELECT m.map_group, m.map_priority, m.map_rule, m.map_advice, m.icd_code,
-            t.term AS icd_desc, (v.code IS NOT NULL) AS billable
-       FROM snomed_map_icd10cm m
-       LEFT JOIN terminology_cache t ON t.source = 'ICD10CM' AND t.code = m.icd_code
-       LEFT JOIN icd10cm_valid v ON v.code = m.icd_code
-      WHERE m.snomed_id = ? AND m.icd_code IS NOT NULL AND m.icd_code <> ''
-      ORDER BY m.map_group, m.map_priority`, [id]);
+// Shared row→candidate mapping + primary selection, so the single and BATCH map lookups below are
+// byte-for-byte identical (no logic drift). Rows must already be ordered by (map_group, map_priority).
+function mapRowsToResult(rows) {
   const candidates = rows.map((r) => {
     const rule = (r.map_rule || '').trim().toUpperCase();
     return {
@@ -281,6 +273,41 @@ export async function snomedToIcd10cm(conceptId) {
     || arr.find((c) => c.billable) || arr.find((c) => !c.contextDependent) || arr[0];
   const primary = pick(g1) || pick(candidates) || null;
   return { primary, candidates };
+}
+
+const MAP_SELECT = `SELECT m.snomed_id, m.map_group, m.map_priority, m.map_rule, m.map_advice, m.icd_code,
+            t.term AS icd_desc, (v.code IS NOT NULL) AS billable
+       FROM snomed_map_icd10cm m
+       LEFT JOIN terminology_cache t ON t.source = 'ICD10CM' AND t.code = m.icd_code
+       LEFT JOIN icd10cm_valid v ON v.code = m.icd_code`;
+
+export async function snomedToIcd10cm(conceptId) {
+  const id = String(conceptId || '').trim();
+  if (!/^\d+$/.test(id)) return { primary: null, candidates: [] };
+  const [rows] = await pool.query(
+    `${MAP_SELECT} WHERE m.snomed_id = ? AND m.icd_code IS NOT NULL AND m.icd_code <> ''
+      ORDER BY m.map_group, m.map_priority, m.icd_code`, [id]);
+  return mapRowsToResult(rows);
+}
+
+/**
+ * BATCH of snomedToIcd10cm — resolve the ICD map for MANY SNOMED concepts in ONE query (WHERE snomed_id
+ * IN (...)) instead of one remote round-trip per concept. Returns Map<snomedId(string), {primary,
+ * candidates}> with the SAME per-concept result the single lookup produces (rows are ordered by
+ * snomed_id then map_group/map_priority and grouped in JS, preserving the exact selection order). This is
+ * the dominant real-time latency win for multi-problem notes (was up to 10 sequential map queries/phrase).
+ */
+export async function snomedToIcd10cmBatch(conceptIds) {
+  const ids = [...new Set((conceptIds || []).map((c) => String(c || '').trim()).filter((c) => /^\d+$/.test(c)))];
+  const out = new Map();
+  if (!ids.length) return out;
+  const [rows] = await pool.query(
+    `${MAP_SELECT} WHERE m.snomed_id IN (?) AND m.icd_code IS NOT NULL AND m.icd_code <> ''
+      ORDER BY m.snomed_id, m.map_group, m.map_priority, m.icd_code`, [ids]);
+  const byId = new Map();
+  for (const r of rows) { const k = String(r.snomed_id); if (!byId.has(k)) byId.set(k, []); byId.get(k).push(r); }
+  for (const id of ids) out.set(id, mapRowsToResult(byId.get(id) || []));
+  return out;
 }
 
 /**
@@ -305,7 +332,7 @@ export async function snomedConceptsForIcd10cm(icdCode) {
       WHERE m.icd_code = ?
         AND (UPPER(TRIM(m.map_rule)) = 'TRUE' OR UPPER(TRIM(m.map_rule)) = 'OTHERWISE TRUE')
         AND m.snomed_id IS NOT NULL AND m.snomed_id <> ''
-      ORDER BY d.us_preferred DESC, CHAR_LENGTH(d.term)`, [code]);
+      ORDER BY d.us_preferred DESC, CHAR_LENGTH(d.term), m.snomed_id, d.term`, [code]);
   const seen = new Map();
   for (const r of rows) {
     const id = String(r.snomed_id);

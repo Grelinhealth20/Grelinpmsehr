@@ -218,9 +218,9 @@ const SECTION_ORDER = [
 // record reads identically to what the provider saw on screen).
 export const NOTE_LABEL_OVERRIDES = {
   // SNF note types — headings match the facility's SNF documentation templates exactly.
-  hp: { chiefComplaint: 'Chief Complaint', codeStatus: 'Code Status', hospitalCourse: 'HPI', medications: 'Medications & Allergies', pmh: 'Past Medical History', socialHistory: 'Social History', vitals: 'Vitals', exam: 'Physical Examination', functionalStatus: 'Function & Cognition', results: 'Labs & Imaging', assessment: 'Assessment & Plan', timeSpent: 'Time / Complexity' },
-  soap: { chiefComplaint: 'Chief Complaint', codeStatus: 'Code Status', hpi: 'HPI', allergies: 'Allergy', medications: 'Home Medications', results: 'Labs / Imaging / Microbiology', assessment: 'Assessment & Plan', vitals: 'Vitals' },
-  progress: { chiefComplaint: 'Reason for Visit', interval: 'Interval History', medChanges: 'Medication Changes', vitals: 'Vitals', exam: 'Focused Exam', results: 'Labs & Results', assessment: 'Assessment & Plan', followUp: 'Follow-Up & Time' },
+  hp: { chiefComplaint: 'Chief Complaint', codeStatus: 'Code Status', hospitalCourse: 'HPI', medications: 'Medications & Allergies', pmh: 'Past Medical & Surgical History', socialHistory: 'Social History', vitals: 'Vitals', exam: 'Physical Examination', functionalStatus: 'Function & Cognition', results: 'Labs & Imaging', assessment: 'Assessment & Plan', timeSpent: 'Time / Complexity' },
+  soap: { chiefComplaint: 'Chief Complaint', codeStatus: 'Code Status', hpi: 'HPI', allergies: 'Allergy', medications: 'Medications & Allergies', results: 'Labs / Imaging / Microbiology', assessment: 'Assessment & Plan', vitals: 'Vitals' },
+  progress: { chiefComplaint: 'Reason for Visit', interval: 'HPI', medChanges: 'Medication Changes', vitals: 'Vitals', exam: 'Focused Exam', results: 'Labs & Results', assessment: 'Assessment & Plan', followUp: 'Follow-Up & Time' },
   discharge: { chiefComplaint: 'Reason for SNF Admission', hospitalCourse: 'Course in Facility', functionalStatus: 'Condition at Discharge', dischargeMeds: 'Discharge Medications', pendingFollowUp: 'Pending Items', followUp: 'Follow-Up Appointments', dischargeInstructions: 'Instructions Given', timeSpent: 'Time Spent on Discharge' },
   // SNF added note types — headings mirror the editor templates EXACTLY (PDF == on-screen note).
   acuteChange: { chiefComplaint: 'Reason for Unscheduled Visit', changeDescription: 'Presenting Change / Event', interval: 'Focused History', vitals: 'Vital Signs', exam: 'Focused Physical Examination', results: 'Labs / Tests', assessment: 'Assessment', disposition: 'Disposition: Treat in Place or Transfer', orders: 'Orders & Monitoring', timeSpent: 'Time / Complexity' },
@@ -229,7 +229,8 @@ export const NOTE_LABEL_OVERRIDES = {
   hospice: { chiefComplaint: 'Reason for Visit & Relation to Terminal Illness', interval: 'Interval History', symptomAssessment: 'Symptom Assessment', vitals: 'Vital Signs', exam: 'Physical Examination', goals: 'Goals of Care', assessment: 'Assessment & Plan', careCoordination: 'Coordination With Hospice & Family', timeSpent: 'Time / Complexity' },
   telehealth: { chiefComplaint: 'Visit This Attestation Attaches To', telehealthEligibility: 'Telehealth Eligibility', consent: 'Patient Consent', locations: 'Patient & Provider Locations', staffPresent: 'Staff Present With Patient', examLimitations: 'Exam Performed & Limitations', technicalQuality: 'Technical Quality', timeSpent: 'Time' },
   hp_admission: { chiefComplaint: 'Reason for Admission', results: 'Diagnostic Data on Admission', medications: 'Admission Medication Reconciliation', functionalStatus: 'Functional / Rehabilitation Status', prognosis: 'Rehabilitation Potential & Prognosis' },
-  progress: { chiefComplaint: 'Reason for Visit', interval: 'Interval History (Since Last Visit)', exam: 'Focused Interval Examination' },
+  // NOTE: `progress` and `discharge` are defined ONCE, above. Do not redefine them here — a duplicate key
+  // silently overrides the correct labels (this previously made the Progress "HPI" heading revert on the PDF).
   acute_visit: { chiefComplaint: 'Presenting Acute Problem', exam: 'Focused Examination (Problem-Directed)', results: 'Point-of-Care / STAT Data' },
   change_in_condition: { exam: 'Focused Examination', orders: 'Interventions & STAT Orders' },
   follow_up: { chiefComplaint: 'Problem Being Followed Up', interval: 'Response Since Last Evaluation', exam: 'Focused Examination (Targeted to the Problem)', results: 'Repeat / Trending Results' },
@@ -239,7 +240,6 @@ export const NOTE_LABEL_OVERRIDES = {
   lab_imaging: { chiefComplaint: 'Result Being Reviewed', results: 'Result & Interpretation' },
   wound_care: { chiefComplaint: 'Reason for Wound Care', interval: 'Wound Progress Since Last Visit', exam: 'Relevant Physical Examination' },
   advance_care: { chiefComplaint: 'Reason for Advance Care Planning Discussion', timeSpent: 'Total Face-to-Face Time (required for 99497/99498)' },
-  discharge: { hospitalCourse: 'Summary of SNF Stay', procedures: 'Significant Treatments / Procedures During Stay', functionalStatus: 'Functional Status at Discharge' },
   procedure_note: { timeSpent: 'Total Procedure Time & Attestation' },
   behavioral_health: { chiefComplaint: 'Reason for Psychiatric Visit', interval: 'Interval / Symptom Status', medications: 'Current Psychotropic Medications', assessment: 'Psychiatric Assessment (DSM-5 / ICD-10)' },
   cognitive_care: { chiefComplaint: 'Reason for Cognitive Assessment', functionalStatus: 'Functional Assessment (ADL / IADL)', medications: 'Medication Reconciliation (High-Risk / Deliriogenic)', timeSpent: 'Total Time (99483 is time-based) & Attestation' },

@@ -8,7 +8,7 @@ import { getOwnedEncounterId, getAccessibleEncounterId } from './encounterServic
 import { viewerScope, isFacilityWide, noteServiceLineWhere, ownerServiceLineWhere } from './accessScope.js';
 import { storeSignedNoteDoc } from './noteDocumentService.js';
 import { isBillableIcd } from './terminologyCache.js';
-import { posForNoteType } from './payscaleConfig.js';
+import { posForNoteType, detectPosFromRecord } from './payscaleConfig.js';
 import { logger } from '../config/logger.js';
 
 // Build the READ-access SQL condition for a note by the viewer's scope: own note, OR a
@@ -216,7 +216,7 @@ export async function getNote(noteUuid, providerId) {
   const params = { u: noteUuid };
   const access = noteAccess(scope, providerId, params);
   const [rows] = await execute(
-    `SELECT n.uuid, n.note_type, n.reason, n.content_enc, n.status, n.billing_ready, n.signed_by_name,
+    `SELECT n.uuid, n.note_type, n.reason, n.content_enc, n.status, n.billing_ready, n.signed_by_name, n.pos_code,
         DATE_FORMAT(n.signed_at, '%Y-%m-%dT%H:%i:%sZ') AS signed_at,
         (e.provider_id = :pid) AS is_owner
       FROM encounter_notes n
@@ -231,7 +231,7 @@ export async function getNote(noteUuid, providerId) {
     uuid: r.uuid, noteType: r.note_type, reason: r.reason,
     content: parseNoteBody(r.content_enc),
     status: r.status, billingReady: !!r.billing_ready,
-    signedByName: r.signed_by_name, signedAt: r.signed_at,
+    signedByName: r.signed_by_name, signedAt: r.signed_at, pos: r.pos_code || null,
     isOwner: !!Number(r.is_owner),
   };
 }
@@ -367,7 +367,11 @@ async function persistPredictedCodes(noteId, content, noteType, { replace = fals
     const [existing] = await execute('SELECT COUNT(*) AS n FROM encounter_note_codes WHERE note_id = :id', { id: noteId });
     if (Number(existing[0]?.n) > 0) return { skipped: 'codes already present' };
   }
-  const pred = await predictEncounterCoding(content || {}, { noteType });
+  // Effective POS for POS-authoritative E/M: the provider's explicit pos_code when set, else identified from
+  // the documented record (deterministic backup). Always passed so the E/M family is never mis-derived.
+  const [prow] = await execute('SELECT pos_code FROM encounter_notes WHERE id = :id LIMIT 1', { id: noteId });
+  const pos = prow[0]?.pos_code || detectPosFromRecord(content, noteType);
+  const pred = await predictEncounterCoding(content || {}, { noteType, pos });
   const rows = [];
   (pred.diagnoses || []).forEach((d, i) => {
     if (d && d.icd) rows.push([noteId, 'dx', 'ICD10CM', String(d.icd).slice(0, 20), (String(d.description ?? '')).slice(0, 512) || null,
@@ -457,7 +461,10 @@ export async function scrubNoteCodes(noteUuid, providerId, patientOverride) {
 export async function predictCodes(noteUuid, providerId) {
   const note = await getNote(noteUuid, providerId);
   if (!note) return null;
-  return predictEncounterCoding(note.content || {}, { noteType: note.noteType });
+  // Explicit POS wins; otherwise identify it from the documented record (real-time deterministic backup) so
+  // the POS-authoritative E/M family is correct even when the provider hasn't set a POS yet.
+  const pos = note.pos || detectPosFromRecord(note.content, note.noteType);
+  return predictEncounterCoding(note.content || {}, { noteType: note.noteType, pos });
 }
 
 export async function createNote({ encounterUuid, providerId, noteType, reason, content, createdBy, pos }) {
@@ -484,17 +491,21 @@ async function findDraft(noteUuid, providerId) {
   return rows[0] || null;
 }
 
-export async function updateNote(noteUuid, providerId, { content, reason, noteType }) {
+export async function updateNote(noteUuid, providerId, { content, reason, noteType, pos }) {
   const r = await findDraft(noteUuid, providerId);
   if (!r) return null;
   if (r.status === 'signed') return { locked: true }; // signed notes are immutable
   const sets = [];
   const params = { id: r.id };
   // Only overwrite content when the caller actually sends it — a metadata-only
-  // PATCH (e.g. reason/noteType) must NOT wipe the existing draft body (PHI loss).
+  // PATCH (e.g. reason/noteType/pos) must NOT wipe the existing draft body (PHI loss).
   if (content !== undefined) { sets.push('content_enc = :content'); params.content = content ? encrypt(JSON.stringify(content)) : null; }
   if (reason !== undefined) { sets.push('reason = :reason'); params.reason = reason || null; }
   if (noteType !== undefined) { sets.push('note_type = :type'); params.type = noteType; }
+  // Place of Service override — the provider sets the ACTUAL POS for this encounter (a SNF provider may
+  // document at 31 SNF, 32 NF, 11 office, 12 home, 10 telehealth, 21 inpatient, …). Only a real numeric
+  // CMS POS is stored (never inferred/fabricated); an empty/invalid value is ignored, keeping the current.
+  if (pos !== undefined) { const posCode = String(pos).replace(/\D/g, '').slice(0, 4); if (posCode) { sets.push('pos_code = :pos'); params.pos = posCode; } }
   if (!sets.length) return getNote(noteUuid, providerId); // nothing to change
   // `AND status = 'draft'` makes the DB the arbiter: if a concurrent sign/amend
   // flipped this note to signed between our read and write, this update no-ops.

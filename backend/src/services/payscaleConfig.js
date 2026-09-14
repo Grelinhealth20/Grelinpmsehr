@@ -102,6 +102,54 @@ export function posForNoteType(noteType, dflt = '31') {
   return dflt;
 }
 
+/**
+ * BACKUP Place-of-Service identification from the DOCUMENTED record — used only when the provider has NOT
+ * explicitly set a POS on the note. DETERMINISTIC and evidence-based: it reads the note's own text and
+ * returns the CMS POS that the documentation actually states (telehealth / SNF / nursing facility / office
+ * / home / inpatient / ER / …), ordered most-specific first. It NEVER fabricates: with no explicit POS in
+ * the text it returns the compliance-safe note-type default (posForNoteType) — the same seed used at note
+ * creation — which the provider/coder can override. The explicit `encounter_notes.pos_code` always wins;
+ * this is the fallback so the POS-authoritative E/M and the POS shown on billing are accurate in real time.
+ */
+function posRecordText(content) {
+  if (!content || typeof content !== 'object') return '';
+  const parts = [];
+  const walk = (v) => { if (typeof v === 'string') parts.push(v); else if (Array.isArray(v)) v.forEach(walk); else if (v && typeof v === 'object') Object.values(v).forEach(walk); };
+  walk(content.sections); walk(content.encounterType); walk(content.reason);
+  return parts.join('  ').toLowerCase();
+}
+// Ordered, evidence-based POS rules (CMS POS set). FIRST match wins, so the list is MOST-SPECIFIC first —
+// a facility type that contains a generic word ("skilled NURSING FACILITY", "rural health CLINIC") is placed
+// before the generic term it contains. Telehealth is handled separately (modality overrides location).
+// MAJOR, specialty-aligned CMS POS only (SNF / Pain / PI) — the same set the note-editor POS picker offers.
+// A location outside this set (school, prison, dialysis, psych, FQHC, …) is not something this practice
+// bills, so it is NOT force-detected; it falls through to the compliance-safe note-type default instead.
+const POS_RULES = [
+  ['31', /\bskilled nursing\b|\bs\.?n\.?f\b|\bsub-?acute (rehab|unit|care|nursing)\b|\bsnf\b/],           // Skilled nursing facility
+  ['32', /\bnursing facility\b|\blong[- ]?term care\b|\bl\.?t\.?c\b|\bltc\b|\bnursing home\b/],           // Nursing facility
+  ['33', /\bcustodial care\b|\bcustodial (facility|nursing)\b/],                                          // Custodial care facility
+  ['13', /\bassisted living\b|\ba\.?l\.?f\b|\balf\b/],                                                    // Assisted living facility
+  ['34', /\bhospice\b|\bend-?of-?life care\b/],                                                           // Hospice
+  ['62', /\b(comprehensive )?outpatient rehab(ilitation)?\b|\bcorf\b|\boutpatient (pt|physical therapy|ot|occupational therapy)\b/], // Outpatient rehab
+  ['24', /\bambulatory surgical center\b|\basc\b|\bsurgery center\b|\boutpatient surgery center\b/],       // Ambulatory surgical center
+  ['23', /\bemergency (department|room|dept)\b|\be\.?d\.? visit\b|\be\.?r\.? visit\b|\bemergency room\b/], // Emergency room
+  ['22', /\b(on-?campus )?hospital outpatient\b|\bhospital outpatient (department|clinic)\b|\bopd\b/],     // Hospital outpatient
+  ['21', /\binpatient\b|\badmitted to (the )?hospital\b|\bhospital (ward|floor|service|admission|inpatient)\b|\bacute care hospital\b/], // Inpatient hospital
+  ['12', /\b(home visit|house call|seen at home|in the (patient'?s )?home|homebound|patient'?s residence|at the residence)\b/], // Home
+  ['11', /\b(office visit|in[- ]?office|clinic visit|in (the )?clinic|outpatient office|physician office|private office)\b/],   // Office
+];
+export function detectPosFromRecord(content, noteType) {
+  const t = posRecordText(content);
+  if (t) {
+    // Telehealth first — the MODALITY overrides the physical-location words that may also appear in the note.
+    if (/\btelehealth\b|\bvideo visit\b|\bvirtual visit\b|\btele[- ]?health\b|\btelemedicine\b/.test(t)) {
+      return /\b(home|patient'?s home|in[- ]?home|residence|at home)\b/.test(t) ? '10' : '02';
+    }
+    for (const [code, re] of POS_RULES) { if (re && re.test(t)) return code; }
+  }
+  return posForNoteType(noteType); // no explicit evidence → compliance-safe note-type default (never fabricated)
+}
+
 // Provider type from credentials — reported for transparency. The workbook applies the SAME $/Work-RVU
 // rate to every provider (Medicare's NPP 85% differential is about what Medicare pays an NPP, not this
 // group's internal Work-RVU rate), so this labels the provider without changing comp.
