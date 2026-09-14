@@ -27,7 +27,7 @@ router.post('/', csrfProtection, validate(createFacilitySchema), ctrl.create);
 router.get('/:uuid', validate(uuidParam, 'params'), ctrl.getOne);
 router.patch('/:uuid', csrfProtection, validate(uuidParam, 'params'), validate(updateFacilitySchema), ctrl.update);
 router.post('/:uuid/status', csrfProtection, validate(uuidParam, 'params'), validate(facilityStatusSchema), ctrl.status);
-// Per-facility feature switches: coding engine (claims scrubbing) and eligibility verification.
+// Per-facility feature switches: SNOMED CT (claims scrubbing) and eligibility verification.
 router.post('/:uuid/flags', csrfProtection, validate(uuidParam, 'params'), validate(facilityFlagsSchema), ctrl.flags);
 // Per-facility referral FAX numbers: { incomingNumber?, outgoingNumber?, enabled? }
 router.put('/:uuid/fax-config', csrfProtection, validate(uuidParam, 'params'), validate(facilityFaxConfigSchema), ctrl.faxConfigSet);

@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { execute, pool, withTransaction } from '../db/pool.js';
-import { scrubClaim } from './codingService.js';
-import { predictEncounterCoding } from './codePredictionService.js';
+import { scrubClaim } from './snomedctservices.js';
+import { predictEncounterCoding } from './Somedct.js';
 import { calcRaf, deriveSegment } from './hccRafService.js';
 import { encrypt, decrypt } from '../utils/crypto.js';
 import { getOwnedEncounterId, getAccessibleEncounterId } from './encounterService.js';
@@ -364,7 +364,7 @@ export async function saveNoteCodes(noteUuid, providerId, { diagnoses = [], proc
 }
 
 /**
- * Persist the coding engine's DETERMINISTIC prediction as the note's structured billing codes at sign
+ * Persist the SNOMED CT's DETERMINISTIC prediction as the note's structured billing codes at sign
  * time — so the finalized record, the downloaded PDF/DOCX, and the FHIR Condition/Procedure resources
  * all carry the SAME codes shown under the note's Billing heading. Called inside signNote, by note id
  * (the signer is already authorized). It NEVER overwrites codes that already exist (e.g. hand-curated in

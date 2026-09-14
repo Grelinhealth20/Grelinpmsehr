@@ -4,7 +4,7 @@ import { facilitiesApi, settingsApi, toApiError } from '../../lib/api.js';
 
 /**
  * Per-facility feature switches (super-admin only). Each facility can INDEPENDENTLY turn off
- * the coding engine (claims scrubbing) and real-time eligibility verification. Enforced
+ * the SNOMED CT (claims scrubbing) and real-time eligibility verification. Enforced
  * server-side — when a feature is off for a facility, its endpoints refuse and the EHR hides the
  * controls for patients at that facility. This UI just reflects and flips the flags.
  *
@@ -50,7 +50,7 @@ export default function SystemSettings() {
     try {
       const { data } = await facilitiesApi.setFlags(fac.uuid, { [flag]: next });
       setFacilities((cur) => cur.map((f) => (f.uuid === fac.uuid ? { ...f, ...data.facility } : f)));
-      const label = flag === 'codingEnabled' ? 'Coding engine'
+      const label = flag === 'codingEnabled' ? 'SNOMED CT'
         : flag === 'autoCreatePatients' ? 'Automatic patient creation from faxes'
           : 'Eligibility verification';
       toast.success(`${label} ${next ? 'enabled' : 'disabled'} for ${fac.name}.`);
@@ -119,7 +119,7 @@ export default function SystemSettings() {
       <div className="sysset-head">
         <h2 className="sysset-h2">Feature Switches by Facility</h2>
         <p className="sysset-lede">
-          Turn the coding engine (claims scrubbing) and real-time eligibility verification on or off
+          Turn the SNOMED CT (claims scrubbing) and real-time eligibility verification on or off
           for each facility independently. Changes take effect immediately and are enforced server-side.
         </p>
       </div>
@@ -137,7 +137,7 @@ export default function SystemSettings() {
             </div>
             <div className="sysset-row">
               <div className="sysset-info">
-                <span className="sysset-title">Coding engine</span>
+                <span className="sysset-title">SNOMED CT</span>
                 <span className="sysset-desc">Automatic coding &amp; claims scrubbing (NCCI, medical necessity, risk score) in the note editor. When off, the coding panel is hidden and the server refuses coding requests for this facility.</span>
               </div>
               <Switch fac={f} flag="codingEnabled" />

@@ -14,7 +14,7 @@ import { logger } from '../config/logger.js';
 import {
   RVU_YEAR, PAYABLE_STATUS, PROVIDER_SHARE, GROUP_SHARE, providerRatePerWorkRvu,
   conversionFactor, localityFor, providerType, DEFAULT_LOCALITY, posSetting, posForNoteType,
-  medicareFactorForType,
+  medicareFactorForType, pricingModifier,
 } from './payscaleConfig.js';
 import { isNppDifferentialEnabled } from './settingsService.js';
 
@@ -42,6 +42,9 @@ function posInfo(posCode, noteType) {
   const name = POS_NAME[code] || (setting === 'facility' ? 'Facility' : 'Office');
   return { code, setting, label: `${name} (POS ${code})` };
 }
+
+/** Human POS label for a note's CMS place-of-service (real POS_NAME map) — used by the FHIR Claim export. */
+export function posInfoLabel(posCode, noteType) { return posInfo(posCode, noteType).label; }
 
 /** Provider report summary — total & typed encounters, signed/unsigned notes, patients visited. Owner-only. */
 export async function providerSummary(providerId, { from = null, to = null } = {}) {
@@ -197,6 +200,49 @@ export async function providerPayscale(providerId, { from = null, to = null, cre
     procedureCount: lines.length, lines, unpricedCodes: [...unpriced],
     noteIds: [...paidNoteIds],   // exact signed notes that produced this pay (for the paid-note ledger)
   };
+}
+
+/**
+ * Real Medicare allowed amount per claim line (FL locality) — the SAME mpfs_rvu × GPCI × CF math as
+ * providerPayscale (per-encounter fee = (Work·PW-GPCI + PE·PE-GPCI + MP·MP-GPCI) × CF × NPP-factor, then
+ * × units), so the FHIR Claim's monetary `net` is the true reference allowed amount, never hardcoded or
+ * fabricated. A code not in the MPFS RVU file, or not separately payable by RVUs (status ∉ A/R/T), returns
+ * allowedAmount:null so the Claim OMITS the amount rather than inventing one. POS (facility vs office)
+ * selects the PE RVU exactly as the payscale does; a -TC/-26 pricing modifier prices its own MPFS row.
+ * `lines`: [{ code, units, posCode, noteType, modifiers }].
+ */
+export async function medicareAllowedForLines(lines, { localityCode = DEFAULT_LOCALITY, cfKind = 'standard', credentials = [] } = {}) {
+  const items = (Array.isArray(lines) ? lines : []).map((l) => ({
+    code: String(l.code || ''), units: Number(l.units) || 1, posCode: l.posCode || null,
+    setting: posSetting(l.posCode || posForNoteType(l.noteType)), pmod: pricingModifier(l.modifiers),
+    allowedAmount: null, priced: false,
+  }));
+  const codes = [...new Set(items.map((i) => i.code).filter(Boolean))];
+  if (!codes.length) return items;
+  const inList = codes.map((_, i) => `:c${i}`).join(',');
+  const params = { year: RVU_YEAR };
+  codes.forEach((c, i) => { params[`c${i}`] = c; });
+  const [rows] = await execute(
+    `SELECT hcpcs, modifier, work_rvu, fac_pe_rvu, nonfac_pe_rvu, mp_rvu, conv_factor, status_code
+       FROM mpfs_rvu WHERE year = :year AND hcpcs IN (${inList}) AND modifier IN ('', 'TC', '26')`, params);
+  const byKey = new Map();
+  let datasetCf = null;
+  for (const r of rows) { byKey.set(`${r.hcpcs}|${r.modifier || ''}`, r); if (datasetCf == null && Number(r.conv_factor) > 0) datasetCf = Number(r.conv_factor); }
+  const gpci = localityFor(localityCode).gpci;
+  const cf = conversionFactor(cfKind, datasetCf);
+  const factor = medicareFactorForType(providerType(credentials), await isNppDifferentialEnabled());
+  for (const it of items) {
+    const row = byKey.get(`${it.code}|${it.pmod}`) || byKey.get(`${it.code}|`);
+    if (!row) continue;                                                  // not in MPFS → no fabricated price
+    if (row.status_code && !PAYABLE_STATUS.has(row.status_code)) continue; // not separately RVU-payable → no amount
+    const work = Number(row.work_rvu) || 0;
+    const pe = (it.setting === 'facility' ? Number(row.fac_pe_rvu) : Number(row.nonfac_pe_rvu)) || 0;
+    const mp = Number(row.mp_rvu) || 0;
+    const perEnc = round2((work * gpci.work + pe * gpci.pe + mp * gpci.mp) * cf * factor);
+    it.allowedAmount = round2(it.units * perEnc);
+    it.priced = true;
+  }
+  return items;
 }
 
 /** Bi-weekly / monthly period boundaries (UTC), most-recent first. Bi-weekly anchored to 2024-01-01 (Mon). */

@@ -16,11 +16,11 @@ import { ROLES, USER_STATUS } from '../config/env.js';
 import { findRawByUuid } from '../services/userService.js';
 import {
   toPatient, toPractitioner, toEncounter, toCondition, toMedicationRequest, toAllergyIntolerance, toObservation,
-  toProcedure, toDocumentReference, toProvenance, searchsetBundle, operationOutcome, fhirInstant,
+  toProcedure, toDocumentReference, toProvenance, toClaim, toClaimResponse, toCoverage, toExplanationOfBenefit, searchsetBundle, operationOutcome, fhirInstant,
 } from './mappers.js';
 import {
   fhirPatients, fhirPatientById, fhirPractitioners, fhirEncounters, fhirConditions, fhirMedications, fhirAllergies,
-  fhirObservations, fhirProcedures, fhirDocumentReferences, fhirProvenance,
+  fhirObservations, fhirProcedures, fhirDocumentReferences, fhirProvenance, fhirClaims, fhirClaimResponses, fhirCoverage, fhirEobs,
 } from './fhirData.js';
 import { smartConfiguration, authorize, token, registerClient, verifySmartToken, scopeAllowsRead } from './smart.js';
 
@@ -61,6 +61,13 @@ function capabilityStatement() {
         resource('Procedure', 'us-core-procedure', [['patient', 'reference'], ['encounter', 'reference']]),
         resource('DocumentReference', 'us-core-documentreference', [['patient', 'reference'], ['encounter', 'reference']]),
         resource('Provenance', 'us-core-provenance', [['patient', 'reference']]),
+        resource('Coverage', 'us-core-coverage', [['_id', 'token'], ['patient', 'reference']]),
+        // Base R4 (no US Core profile exists for these): professional Claim built from signed coded data,
+        // and ClaimResponse as a pre-submission scrub predetermination. read + search-type, patient/encounter.
+        { type: 'Claim', profile: 'http://hl7.org/fhir/StructureDefinition/Claim', interaction: [{ code: 'read' }, { code: 'search-type' }], searchParam: [{ name: 'patient', type: 'reference' }, { name: 'encounter', type: 'reference' }] },
+        { type: 'ClaimResponse', profile: 'http://hl7.org/fhir/StructureDefinition/ClaimResponse', interaction: [{ code: 'read' }, { code: 'search-type' }], searchParam: [{ name: 'patient', type: 'reference' }, { name: 'encounter', type: 'reference' }] },
+        // Pre-adjudication estimate (predetermination) — base R4 EOB; the only money is the CMS MPFS allowed amount.
+        { type: 'ExplanationOfBenefit', profile: 'http://hl7.org/fhir/StructureDefinition/ExplanationOfBenefit', interaction: [{ code: 'read' }, { code: 'search-type' }], searchParam: [{ name: 'patient', type: 'reference' }, { name: 'encounter', type: 'reference' }] },
       ],
       operation: [{ name: 'export', definition: 'http://hl7.org/fhir/uv/bulkdata/OperationDefinition/export' }],
     }],
@@ -134,7 +141,7 @@ async function fhirAuth(req, res, next) {
 router.use(fhirAuth);
 // Scope enforcement (SMART-token callers only; cookie sessions keep full app authority). The resource
 // type is the first path segment (/Patient/123 → Patient); reject if the token's scope doesn't grant read.
-const FHIR_TYPES = new Set(['Patient', 'Practitioner', 'Encounter', 'Condition', 'MedicationRequest', 'AllergyIntolerance', 'Observation', 'Procedure', 'DocumentReference', 'Provenance']);
+const FHIR_TYPES = new Set(['Patient', 'Practitioner', 'Encounter', 'Condition', 'MedicationRequest', 'AllergyIntolerance', 'Observation', 'Procedure', 'DocumentReference', 'Provenance', 'Coverage', 'Claim', 'ClaimResponse', 'ExplanationOfBenefit']);
 router.use((req, res, next) => {
   if (!req.smartToken) return next();
   const type = (req.path.split('/')[1] || '').trim();
@@ -259,10 +266,41 @@ searchRoute('/AllergyIntolerance', fhirAllergies, toAllergyIntolerance);
 searchRoute('/Procedure', fhirProcedures, toProcedure);
 searchRoute('/DocumentReference', fhirDocumentReferences, toDocumentReference);
 searchRoute('/Provenance', fhirProvenance, toProvenance);
+searchRoute('/Coverage', fhirCoverage, toCoverage);
 searchRoute('/Observation', fhirObservations, toObservation, (req, res) => {
   const cat = req.query.category ? String(req.query.category).split('|').pop() : null;
   if (cat && cat !== 'vital-signs') { send(res, 200, searchsetBundle([], { baseUrl: selfUrl(req) })); return false; }
   return true;
+});
+searchRoute('/Claim', fhirClaims, toClaim);
+searchRoute('/ClaimResponse', fhirClaimResponses, toClaimResponse);
+searchRoute('/ExplanationOfBenefit', fhirEobs, toExplanationOfBenefit);
+
+/* ---- Claim / ClaimResponse read-by-id (id = "<note-uuid>-claim" / "-claimresponse") ---- */
+const claimById = (suffix, fetch, map) => async (req, res, next) => {
+  try {
+    const noteUuid = String(req.params.id).replace(new RegExp(`-${suffix}$`), '');
+    const rows = await fetch(req.authUserId, { noteUuid });
+    const src = rows.find((r) => `${r.note_uuid}-${suffix}` === req.params.id);
+    if (!src) return notFound(res, suffix === 'claim' ? 'Claim' : 'ClaimResponse', req.params.id);
+    if (!patientVisible(req, src.patient_uuid)) return notFound(res, suffix === 'claim' ? 'Claim' : 'ClaimResponse', req.params.id);
+    send(res, 200, map(src));
+  } catch (err) { next(err); }
+};
+router.get('/Claim/:id', claimById('claim', fhirClaims, toClaim));
+router.get('/ClaimResponse/:id', claimById('claimresponse', fhirClaimResponses, toClaimResponse));
+router.get('/ExplanationOfBenefit/:id', claimById('eob', fhirEobs, toExplanationOfBenefit));
+
+/* ---- Coverage read-by-id (id = "<patient-uuid>-coverage-<n>") ---- */
+router.get('/Coverage/:id', async (req, res, next) => {
+  try {
+    const patientUuid = String(req.params.id).replace(/-coverage-\d+$/, '');
+    if (!patientVisible(req, patientUuid)) return notFound(res, 'Coverage', req.params.id);
+    const rows = await fhirCoverage(req.authUserId, { patientUuid });
+    const cov = rows.map(toCoverage).find((c) => c.id === req.params.id);
+    if (!cov) return notFound(res, 'Coverage', req.params.id);
+    send(res, 200, cov);
+  } catch (err) { next(err); }
 });
 
 /* ---- Bulk Data $export (Flat FHIR, provider- and patient-context scoped) ---- */
@@ -290,6 +328,10 @@ async function bulkExport(req, res, next) {
     await add('Procedure', fhirProcedures, toProcedure);
     await add('DocumentReference', fhirDocumentReferences, toDocumentReference);
     await add('Provenance', fhirProvenance, toProvenance);
+    await add('Coverage', fhirCoverage, toCoverage);
+    await add('Claim', fhirClaims, toClaim);
+    await add('ClaimResponse', fhirClaimResponses, toClaimResponse);
+    await add('ExplanationOfBenefit', fhirEobs, toExplanationOfBenefit);
     // Synchronous Flat-FHIR NDJSON (one resource per line). Spec-conformant async kick-off (202 +
     // polling manifest) is the next refinement; the data + scoping here are production-real.
     res.status(200).type('application/fhir+ndjson; charset=utf-8').send(lines.join('\n') + (lines.length ? '\n' : ''));

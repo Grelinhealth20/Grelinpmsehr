@@ -71,26 +71,44 @@ export async function estimatePayment(hcpcs, { workGpci = 1, peGpci = 1, mpGpci 
 
 // ---- Claim scrubbing --------------------------------------------------------------------------
 
-async function ncciPtpFindings(codes) {
+// The NCCI-associated modifiers that make a column-2 (component) service SEPARATELY PAYABLE on a
+// modifier-indicator-1 PTP edit when the services are truly distinct: 59 and the more specific X{EPSU}.
+const NCCI_OVERRIDE_MODS = new Set(['59', 'XE', 'XS', 'XP', 'XU']);
+// `lines` (not just codes) so the check is MODIFIER-AWARE: an indicator-1 edit is BYPASSED (not warned)
+// when an appropriate 59/X modifier is actually present, and an inactive (indicator-9) edit is not flagged.
+async function ncciPtpFindings(lines) {
   const findings = [];
+  const codes = [...new Set(lines.map((l) => norm(l.cpt)).filter(Boolean))];
   if (codes.length < 2) return findings;
-  // Check every unordered pair in both column1/column2 orientations.
+  // Codes that carry an appropriate NCCI-associated (distinct-service) modifier on THIS claim.
+  const overridden = new Set();
+  for (const l of lines) {
+    const c = norm(l.cpt); if (!c) continue;
+    if (splitModifiers(l.modifiers).some((m) => NCCI_OVERRIDE_MODS.has(String(m).toUpperCase()))) overridden.add(c);
+  }
   const [rows] = await pool.query(
     'SELECT column1, column2, modifier_indicator FROM ncci_ptp WHERE column1 IN (?) AND column2 IN (?)',
     [codes, codes]);
   for (const r of rows) {
     if (r.column1 === r.column2) continue;
-    findings.push({
-      type: 'NCCI_PTP',
-      severity: r.modifier_indicator === 0 ? 'error' : 'warning',
-      column1: r.column1, column2: r.column2, modifierIndicator: r.modifier_indicator,
-      message: r.modifier_indicator === 0
-        ? `${r.column2} is bundled into ${r.column1} and cannot be billed together (no modifier override).`
-        : r.modifier_indicator === 1
-          ? `${r.column2} is bundled into ${r.column1}; separately payable only with an appropriate NCCI-associated modifier — 59, or the more specific XE/XS/XP/XU, on ${r.column2} when the services are truly distinct.`
-          : `${r.column2}/${r.column1} PTP edit is inactive (indicator 9).`,
-      source: 'ncci_ptp',
-    });
+    const ind = Number(r.modifier_indicator);
+    if (ind === 9) continue; // inactive edit — the pair is NOT bundled, so it is never a denial risk (no noise)
+    if (ind === 0) {
+      findings.push({ type: 'NCCI_PTP', severity: 'error', column1: r.column1, column2: r.column2, modifierIndicator: 0,
+        message: `${r.column2} is bundled into ${r.column1} and cannot be billed together — modifier indicator 0: NO modifier (including 59/X) can override this edit.`,
+        source: 'ncci_ptp' });
+      continue;
+    }
+    // indicator 1: bundled, but a 59/X modifier on EITHER code of the pair unbundles it when the services
+    // are truly distinct. Honor a present modifier (INFO — bypassed) instead of repeating the warning.
+    const bypassed = overridden.has(norm(r.column2)) || overridden.has(norm(r.column1));
+    findings.push(bypassed
+      ? { type: 'NCCI_PTP', severity: 'info', column1: r.column1, column2: r.column2, modifierIndicator: 1, bypassed: true,
+        message: `${r.column2}/${r.column1} PTP edit is BYPASSED by an appropriate NCCI-associated modifier (59 or X{EPSU}) — separately payable when the services are truly distinct; confirm the documentation supports a separate service.`,
+        source: 'ncci_ptp' }
+      : { type: 'NCCI_PTP', severity: 'warning', column1: r.column1, column2: r.column2, modifierIndicator: 1,
+        message: `${r.column2} is bundled into ${r.column1}; separately payable only with an appropriate NCCI-associated modifier — 59, or the more specific XE/XS/XP/XU, on ${r.column2} when the services are truly distinct.`,
+        source: 'ncci_ptp' });
   }
   return findings;
 }
@@ -546,7 +564,7 @@ export async function scrubClaim(claim = {}) {
 
   const jurisdiction = claim.jurisdiction || 'FL'; // Medicare Part B, Central FL (First Coast)
   const checks = [
-    ncciPtpFindings(codes),
+    ncciPtpFindings(lines),
     mueFindings(lines),
     aocFindings(codes),
     modifierFindings(lines),

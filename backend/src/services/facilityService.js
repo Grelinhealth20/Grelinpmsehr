@@ -232,7 +232,7 @@ export async function setFacilityStatus(uuid, status) {
 
 /**
  * SUPER-ADMIN: set the per-facility feature switches. Only the flags present in `flags` are changed.
- * These govern whether the coding engine (claims scrubbing) and real-time eligibility are available
+ * These govern whether the SNOMED CT (claims scrubbing) and real-time eligibility are available
  * for patients at this facility. Enforced server-side; the EHR also hides the controls when off.
  */
 export async function setFacilityFlags(uuid, flags = {}) {

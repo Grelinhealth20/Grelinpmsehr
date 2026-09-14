@@ -27,11 +27,13 @@ const WAF_SIGNATURES = [
   // hits quote-comment auth-bypass injections, but a double-quoted clinical phrase followed by a dash
   // ("reports pain \"stable\" -- continue meds") is NO LONGER a false positive (double quotes are not a
   // MySQL string delimiter and were the source of the FP). Bare prose dashes never matched.
-  // UNION-based: `union … select` (incl. `union ALL/DISTINCT/**/%0a select`) followed WITHIN a window by a
-  // real SQL-exfil token (from | @@ | null | 0x… | concat | group_concat | information_schema | char()).
-  // Requiring that continuation keeps ordinary prose that merely juxtaposes "union" and "select" (e.g.
-  // "bony union … select vessels") from firing, while every real UNION-extraction still matches.
-  { name: 'sqli', re: /(\bunion\b[\s\S]{0,12}?\bselect\b[\s\S]{0,120}?(?:\bfrom\b|@@|\bnull\b|0x[0-9a-f]|\bconcat\b|group_concat|information_schema|\bchar\s*\(|\d,\d))|(\bselect\b\s+\*\s+\bfrom\b)|(\binsert\b\s+\binto\b)|(\bdrop\b\s+\btable\b)|(\b(?:or|and)\b\s+(?:\d+\s*=\s*\d+|'[^']{0,30}'\s*=\s*'|"[^"]{0,30}"\s*=\s*"))|('\s*--(?:\s|$))|(\/\*[\s\S]{0,200}?\*\/)|(\bsleep\s*\()|(\bbenchmark\s*\()|(\bwaitfor\b\s+\bdelay\b)|(\binformation_schema\b)/i },
+  // UNION-based: `union [ALL|DISTINCT] … select` where the select is IMMEDIATELY a SQL select-list start
+  // (* | digit | null | quote | @ | `(` — covering column-count probes like `UNION ALL SELECT 1`) OR is
+  // followed WITHIN a window by a real exfil token (from | @@ | null | 0x… | concat | group_concat |
+  // information_schema | char() | `\d,\d`). A prose juxtaposition of "union … select <word>" (e.g. "bony
+  // union … select vessels") still never fires — the word after select is neither a list-start token nor an
+  // exfil continuation. Note bodies are skipped from scanning entirely, so clinical prose is unaffected.
+  { name: 'sqli', re: /(\bunion\b(?:\s+(?:all|distinct))?[\s\S]{0,12}?\bselect\b\s*(?:[*\d@]|null\b|['"(]|[\s\S]{0,120}?(?:\bfrom\b|@@|\bnull\b|0x[0-9a-f]|\bconcat\b|group_concat|information_schema|\bchar\s*\(|\d,\d)))|(\bselect\b\s+\*\s+\bfrom\b)|(\binsert\b\s+\binto\b)|(\bdrop\b\s+\btable\b)|(\b(?:or|and)\b\s+(?:\d+\s*=\s*\d+|'[^']{0,30}'\s*=\s*'|"[^"]{0,30}"\s*=\s*"))|('\s*--(?:\s|$))|(\/\*[\s\S]{0,200}?\*\/)|(\bsleep\s*\()|(\bbenchmark\s*\()|(\bwaitfor\b\s+\bdelay\b)|(\binformation_schema\b)/i },
   // The event-handler rule allows ANY non-name separator before `on<handler>=` — a space, tab, newline,
   // slash or backtick — so filter-evasion tags like `<svg/onload=…>` and `<img/onerror=…>` are caught,
   // not just space-separated `<svg onload=…>`. The leading `<[a-z]` tag-start guard keeps it off ordinary

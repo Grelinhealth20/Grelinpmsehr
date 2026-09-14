@@ -11,7 +11,7 @@ import facilityRoutes from './facilityRoutes.js';
 import payerRoutes from './payerRoutes.js';
 import settingsRoutes from './settingsRoutes.js';
 import terminologyRoutes from './terminologyRoutes.js';
-import codingRoutes from './codingRoutes.js';
+import codingRoutes from './snomedctroutes.js';
 import aiLogsRoutes from './aiLogsRoutes.js';
 import referralRoutes from './referralRoutes.js';
 import reportsRoutes from './reportsRoutes.js';

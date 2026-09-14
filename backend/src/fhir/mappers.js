@@ -216,6 +216,203 @@ export function toProcedure(c) {
   });
 }
 
+// CPT/HCPCS modifier codings: numeric (25/50/59/…) are AMA CPT; alpha (RT/LT/XE/GA/…) are CMS HCPCS L2.
+function modifierConcepts(modifiers) {
+  const parts = String(modifiers || '').split(/[^0-9A-Za-z]+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
+  if (!parts.length) return undefined;
+  return parts.map((code) => ({ coding: [{ system: /^[0-9]+$/.test(code) ? 'http://www.ama-assn.org/go/cpt' : 'https://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets', code }] }));
+}
+
+const POS_SYSTEM = 'https://www.cms.gov/Medicare/Coding/place-of-service-codes';
+// Data-absent-reason for a REQUIRED FHIR element whose value is genuinely not on file — used instead of
+// fabricating a payer when the patient has no coverage recorded. Honest "unknown", not an invented value.
+const ABSENT = (url) => ({ extension: [{ url: 'http://hl7.org/fhir/StructureDefinition/data-absent-reason', valueCode: 'unknown' }] });
+
+/**
+ * FHIR R4 professional Claim ← one SIGNED note's coded data. Every element is real EHR data: diagnoses and
+ * procedure lines from encounter_note_codes (with the documented modifiers, units and POS), the rendering
+ * provider, and the true Medicare allowed amount (mpfs_rvu × GPCI × CF) as item.net — omitted when a code
+ * is unpriced (no fabricated money). `insurance` uses the patient's on-file payer, or a data-absent-reason
+ * when none is recorded — never an invented coverage. `c` = { note_uuid, patient_uuid, provider_uuid,
+ * encounter_uuid, created, payer, diagnoses:[{code,description,snomed_code,snomed_term,is_primary}],
+ * items:[{code,description,modifiers,units,posCode,posLabel,allowedAmount,priced}] }.
+ */
+// Shared diagnosis[] builder (ICD-10-CM + SNOMED, principal/secondary from is_primary) — used by BOTH the
+// Claim and the ExplanationOfBenefit so the two can never diverge on how coded diagnoses are represented.
+function buildDiagnoses(diagnoses) {
+  return (diagnoses || []).map((d, i) => {
+    const coding = [];
+    if (d.code) coding.push({ system: 'http://hl7.org/fhir/sid/icd-10-cm', code: String(d.code), display: clean(d.description) });
+    if (d.snomed_code) coding.push({ system: 'http://snomed.info/sct', code: String(d.snomed_code), display: clean(d.snomed_term) });
+    return {
+      sequence: i + 1,
+      diagnosisCodeableConcept: coding.length ? { coding, text: clean(d.description) || clean(d.snomed_term) } : { text: clean(d.description) || 'Unspecified' },
+      type: [{ coding: [{ system: 'http://terminology.hl7.org/CodeSystem/ex-diagnosistype', code: d.is_primary ? 'principal' : 'secondary' }] }],
+    };
+  });
+}
+
+export function toClaim(c) {
+  const diagnosis = buildDiagnoses(c.diagnoses);
+  const dxSeq = diagnosis.map((d) => d.sequence);
+  const item = (c.items || []).map((it, i) => ({
+    sequence: i + 1,
+    // Encounter-level dx↔proc association (the note records diagnoses per encounter, not per line): link
+    // each line to the encounter's diagnoses. Never asserts a line-specific pointer we do not have.
+    diagnosisSequence: dxSeq.length ? dxSeq : undefined,
+    productOrService: it.code
+      ? { coding: [{ system: 'http://www.ama-assn.org/go/cpt', code: String(it.code), display: clean(it.description) }], text: clean(it.description) }
+      : { text: clean(it.description) || 'Unspecified procedure' },
+    modifier: modifierConcepts(it.modifiers),
+    quantity: it.units ? { value: Number(it.units) } : undefined,
+    locationCodeableConcept: it.posCode ? { coding: [{ system: POS_SYSTEM, code: String(it.posCode), display: clean(it.posLabel) }] } : undefined,
+    net: it.allowedAmount != null ? { value: Number(it.allowedAmount), currency: 'USD' } : undefined,
+  }));
+  // total only when EVERY line is priced — never present a partial sum as the claim total.
+  const allPriced = (c.items || []).length > 0 && (c.items || []).every((it) => it.priced);
+  const total = allPriced ? Math.round((c.items.reduce((s, it) => s + Number(it.allowedAmount), 0)) * 100) / 100 : null;
+  // Reference the patient's real Coverage resource when one is on file; else the payer name; else an honest
+  // data-absent-reason — never a fabricated payer for a patient with no coverage recorded.
+  const coverage = c.coverageRef
+    ? { reference: `Coverage/${c.coverageRef}`, ...(clean(c.payer) ? { display: clean(c.payer) } : {}) }
+    : (clean(c.payer) ? { display: clean(c.payer) } : ABSENT());
+  return prune({
+    resourceType: 'Claim',
+    id: `${c.note_uuid}-claim`,
+    status: 'active',
+    type: { coding: [{ system: 'http://terminology.hl7.org/CodeSystem/claim-type', code: 'professional' }] },
+    use: 'claim',
+    patient: c.patient_uuid ? { reference: `Patient/${c.patient_uuid}` } : undefined,
+    created: fhirInstant(c.created),
+    provider: c.provider_uuid ? { reference: `Practitioner/${c.provider_uuid}` } : undefined,
+    priority: { coding: [{ system: 'http://terminology.hl7.org/CodeSystem/processpriority', code: 'normal' }] },
+    careTeam: c.provider_uuid ? [{ sequence: 1, provider: { reference: `Practitioner/${c.provider_uuid}` }, role: { coding: [{ system: 'http://terminology.hl7.org/CodeSystem/claimcareteamrole', code: 'primary' }] } }] : undefined,
+    diagnosis: diagnosis.length ? diagnosis : undefined,
+    insurance: [{ sequence: 1, focal: true, coverage }],
+    item: item.length ? item : undefined,
+    total: total != null ? { value: total, currency: 'USD' } : undefined,
+  });
+}
+
+/**
+ * FHIR R4 ClaimResponse ← the REAL claim-scrubber determination for one signed note. This is a
+ * PREDETERMINATION (use='predetermination') — an internal pre-submission check produced by this system
+ * against the licensed CMS edit tables (NCCI PTP/MUE/AOC, modifier policy, ICD edits, First Coast medical
+ * necessity), NOT a payer remittance. Every error/note is a real scrubClaim finding; outcome is 'error'
+ * when the scrub found a denial-level edit, else 'complete'. `cr` = { note_uuid, patient_uuid, created,
+ * findings:[{type,severity,code,message,source,itemSequence?}], summary:{errors,warnings,info} }.
+ */
+export function toClaimResponse(cr) {
+  const s = cr.summary || { errors: 0, warnings: 0, info: 0 };
+  const findings = cr.findings || [];
+  const disposition = `Pre-submission claim scrub (First Coast / Medicare Part B): ${s.errors} error(s), ${s.warnings} warning(s), ${s.info} advisory. Internal predetermination — not a payer remittance.`;
+  return prune({
+    resourceType: 'ClaimResponse',
+    id: `${cr.note_uuid}-claimresponse`,
+    status: 'active',
+    type: { coding: [{ system: 'http://terminology.hl7.org/CodeSystem/claim-type', code: 'professional' }] },
+    use: 'predetermination',
+    patient: cr.patient_uuid ? { reference: `Patient/${cr.patient_uuid}` } : undefined,
+    created: fhirInstant(cr.created),
+    insurer: { display: 'Grelin Health — internal claim scrub (pre-submission)' },
+    requestor: cr.provider_uuid ? { reference: `Practitioner/${cr.provider_uuid}` } : undefined,
+    request: { reference: `Claim/${cr.note_uuid}-claim` },
+    outcome: s.errors > 0 ? 'error' : 'complete',
+    disposition,
+    error: findings.length ? findings.map((f) => ({
+      itemSequence: f.itemSequence || undefined,
+      code: { coding: [{ system: 'https://grelinhealth.com/fhir/CodeSystem/claim-scrub-edit', code: String(f.type) }], text: clean(f.message) },
+    })) : undefined,
+    processNote: findings.length ? findings.map((f, i) => ({ number: i + 1, type: 'print', text: `[${f.severity}] ${clean(f.message)}${f.source ? ` (source: ${f.source})` : ''}` })) : undefined,
+  });
+}
+
+/**
+ * FHIR R4 ExplanationOfBenefit ← one signed note, as a PRE-ADJUDICATION ESTIMATE (use='predetermination').
+ * We do NOT receive a payer remittance, so NOTHING here is a fabricated payment/adjudication: the only money
+ * is the real CMS MPFS allowed amount (adjudication category 'eligible' — the fee-schedule eligible amount,
+ * identical to the Claim's item.net), and `outcome` + the notes come from the real claim scrubber. `insurer`
+ * is labeled as this system's internal estimate, not a payer. Coverage is referenced when on file, else a
+ * data-absent-reason. `e` = { note_uuid, patient_uuid, provider_uuid, created, payer, coverageRef,
+ * diagnoses:[…], items:[{code,description,modifiers,units,posCode,posLabel,allowedAmount,priced}],
+ * scrub:{findings,summary} }.
+ */
+export function toExplanationOfBenefit(e) {
+  const diagnosis = buildDiagnoses(e.diagnoses);
+  const dxSeq = diagnosis.map((d) => d.sequence);
+  const ELIGIBLE = { coding: [{ system: 'http://terminology.hl7.org/CodeSystem/adjudication', code: 'eligible' }] };
+  const item = (e.items || []).map((it, i) => ({
+    sequence: i + 1,
+    diagnosisSequence: dxSeq.length ? dxSeq : undefined,
+    productOrService: it.code
+      ? { coding: [{ system: 'http://www.ama-assn.org/go/cpt', code: String(it.code), display: clean(it.description) }], text: clean(it.description) }
+      : { text: clean(it.description) || 'Unspecified procedure' },
+    modifier: modifierConcepts(it.modifiers),
+    quantity: it.units ? { value: Number(it.units) } : undefined,
+    locationCodeableConcept: it.posCode ? { coding: [{ system: POS_SYSTEM, code: String(it.posCode), display: clean(it.posLabel) }] } : undefined,
+    // Real MPFS fee-schedule 'eligible' amount only — never a fabricated payer payment/benefit.
+    adjudication: it.allowedAmount != null ? [{ category: ELIGIBLE, amount: { value: Number(it.allowedAmount), currency: 'USD' } }] : undefined,
+  }));
+  const allPriced = (e.items || []).length > 0 && (e.items || []).every((it) => it.priced);
+  const total = allPriced ? Math.round((e.items.reduce((s, it) => s + Number(it.allowedAmount), 0)) * 100) / 100 : null;
+  const s = e.scrub?.summary || { errors: 0, warnings: 0, info: 0 };
+  const findings = e.scrub?.findings || [];
+  const coverage = e.coverageRef
+    ? { reference: `Coverage/${e.coverageRef}`, ...(clean(e.payer) ? { display: clean(e.payer) } : {}) }
+    : (clean(e.payer) ? { display: clean(e.payer) } : ABSENT());
+  return prune({
+    resourceType: 'ExplanationOfBenefit',
+    id: `${e.note_uuid}-eob`,
+    status: 'active',
+    type: { coding: [{ system: 'http://terminology.hl7.org/CodeSystem/claim-type', code: 'professional' }] },
+    use: 'predetermination',
+    patient: e.patient_uuid ? { reference: `Patient/${e.patient_uuid}` } : undefined,
+    created: fhirInstant(e.created),
+    insurer: { display: 'Grelin Health — internal pre-adjudication estimate' },
+    provider: e.provider_uuid ? { reference: `Practitioner/${e.provider_uuid}` } : undefined,
+    claim: { reference: `Claim/${e.note_uuid}-claim` },
+    outcome: s.errors > 0 ? 'error' : 'complete',
+    disposition: `Pre-adjudication estimate (CMS MPFS allowed amounts, First Coast / Medicare Part B): ${s.errors} error(s), ${s.warnings} warning(s), ${s.info} advisory. Not a payer Explanation of Benefits — no remittance received.`,
+    diagnosis: diagnosis.length ? diagnosis : undefined,
+    insurance: [{ focal: true, coverage }],
+    item: item.length ? item : undefined,
+    total: total != null ? [{ category: ELIGIBLE, amount: { value: total, currency: 'USD' } }] : undefined,
+    processNote: findings.length ? findings.map((f, i) => ({ number: i + 1, type: 'print', text: `[${f.severity}] ${clean(f.message)}${f.source ? ` (source: ${f.source})` : ''}` })) : undefined,
+  });
+}
+
+/**
+ * FHIR R4 Coverage ← one real on-file insurance policy (decrypted patients.insurance_enc). Every element is
+ * the patient's actual coverage data: payer, member/subscriber id, Medicare MBI, group/plan class, and rank.
+ * A policy with NO payer/plan on file marks `payor` with a data-absent-reason rather than inventing one.
+ * `cov` = { patient_uuid, seq, payer, payerId, memberId, mbi, group, plan, relationship, order, status }.
+ */
+export function toCoverage(cov) {
+  const payorDisplay = clean(cov.payer) || clean(cov.plan);
+  const payor = payorDisplay
+    ? [{ display: payorDisplay, ...(clean(cov.payerId) ? { identifier: { value: clean(cov.payerId) } } : {}) }]
+    : [ABSENT()];
+  const identifier = [];
+  if (clean(cov.mbi)) identifier.push({ system: 'http://hl7.org/fhir/sid/us-mbi', value: clean(cov.mbi) });
+  const klass = [];
+  if (clean(cov.group)) klass.push({ type: { coding: [{ system: 'http://terminology.hl7.org/CodeSystem/coverage-class', code: 'group' }] }, value: clean(cov.group) });
+  if (clean(cov.plan)) klass.push({ type: { coding: [{ system: 'http://terminology.hl7.org/CodeSystem/coverage-class', code: 'plan' }] }, value: clean(cov.plan) });
+  return prune({
+    resourceType: 'Coverage',
+    id: `${cov.patient_uuid}-coverage-${cov.seq ?? 0}`,
+    // A recorded policy is an active coverage unless it carries an explicit status; status is REQUIRED and
+    // is the coverage's own state, not fabricated clinical data.
+    status: clean(cov.status) || 'active',
+    identifier: identifier.length ? identifier : undefined,
+    subscriberId: clean(cov.memberId) || clean(cov.mbi) || undefined,
+    beneficiary: cov.patient_uuid ? { reference: `Patient/${cov.patient_uuid}` } : undefined,
+    relationship: clean(cov.relationship) ? { coding: [{ system: 'http://terminology.hl7.org/CodeSystem/subscriber-relationship', code: clean(cov.relationship).toLowerCase() }] } : undefined,
+    payor,
+    class: klass.length ? klass : undefined,
+    order: Number.isFinite(Number(cov.order)) && Number(cov.order) > 0 ? Number(cov.order) : undefined,
+  });
+}
+
 const DOC_TYPE_LOINC = {
   clinical_note: { code: '34109-9', display: 'Note' },
   license_front: { code: '00000-0', display: 'Identity document' },

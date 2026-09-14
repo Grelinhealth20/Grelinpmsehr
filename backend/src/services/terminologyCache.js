@@ -2,7 +2,7 @@ import { pool } from '../db/pool.js';
 import { logger } from '../config/logger.js';
 
 /**
- * In-process LOCAL CACHE of the hot, small terminology datasets the coding engine validates against
+ * In-process LOCAL CACHE of the hot, small terminology datasets the SNOMED CT validates against
  * on every prediction. The full reference tables live on the remote DB; validating a code there means
  * a network round-trip per call, and the prediction path calls isBillableIcd() dozens of times per
  * note. We load the COMPLETE billable ICD-10-CM set once into memory (code → description) so every

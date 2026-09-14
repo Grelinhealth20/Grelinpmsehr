@@ -69,7 +69,7 @@ export async function status(req, res, next) {
   } catch (err) { next(err); }
 }
 
-/** SUPER-ADMIN: turn the coding engine and/or eligibility on/off for this facility. */
+/** SUPER-ADMIN: turn the SNOMED CT and/or eligibility on/off for this facility. */
 export async function flags(req, res, next) {
   try {
     const patch = {};

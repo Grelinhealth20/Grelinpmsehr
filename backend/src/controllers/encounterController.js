@@ -25,7 +25,7 @@ import {
   addEncounterDocument, getEncounterDocuments, encounterDocumentUrl, removeEncounterDocument,
 } from '../services/encounterDocumentService.js';
 
-const CODING_DISABLED = { error: 'The coding engine is turned off for this facility.', code: 'CODING_DISABLED' };
+const CODING_DISABLED = { error: 'The SNOMED CT is turned off for this facility.', code: 'CODING_DISABLED' };
 import { recordAudit } from '../services/auditService.js';
 import { notePdf } from '../services/pdfExport.js';
 

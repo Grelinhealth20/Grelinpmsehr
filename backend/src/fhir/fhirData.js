@@ -76,7 +76,10 @@ export async function fhirEncounters(providerId, { patientUuid = null, uuid = nu
   return rows;
 }
 
-/** Encounter-diagnosis Conditions for the caller's patients. */
+/** Encounter-diagnosis Conditions for the caller's patients. SIGNED notes only: a draft note's codes are
+ *  non-final engine predictions (persisted by the real-time PUT /codes path, then REPLACED at sign) — the
+ *  FHIR coded-data export must reflect the attested legal record, the same signed basis as Provenance.
+ *  Exporting draft codes would assert them as verificationStatus=confirmed with no Provenance to attribute. */
 export async function fhirConditions(providerId, { patientUuid = null, encounterUuid = null } = {}) {
   const params = { pid: providerId };
   let sql = `SELECT c.code, c.description, c.snomed_code, c.snomed_term, c.seq,
@@ -86,7 +89,7 @@ export async function fhirConditions(providerId, { patientUuid = null, encounter
       JOIN encounter_notes n ON n.id = c.note_id
       JOIN encounters e ON e.id = n.encounter_id
       JOIN patients p ON p.id = e.patient_id
-     WHERE c.kind = 'dx' AND p.provider_id = :pid`;
+     WHERE c.kind = 'dx' AND n.status = 'signed' AND p.provider_id = :pid`;
   if (patientUuid) { sql += ' AND p.uuid = :pu'; params.pu = patientUuid; }
   if (encounterUuid) { sql += ' AND e.uuid = :eu'; params.eu = encounterUuid; }
   sql += ' ORDER BY n.created_at DESC, c.seq LIMIT 1000';
@@ -177,7 +180,9 @@ export async function fhirObservations(providerId, { patientUuid = null, encount
   return out;
 }
 
-/** Procedures (CPT) for the caller's patients. */
+/** Procedures (CPT) for the caller's patients. SIGNED notes only: a draft note's codes are non-final engine
+ *  predictions (persisted by the real-time PUT /codes path, then REPLACED at sign) — exporting them would
+ *  assert an unsigned procedure as status=completed with no Provenance. Mirror the attested legal record. */
 export async function fhirProcedures(providerId, { patientUuid = null, encounterUuid = null } = {}) {
   const params = { pid: providerId };
   let sql = `SELECT c.code, c.description, c.seq, n.uuid AS note_uuid, n.created_at,
@@ -186,7 +191,7 @@ export async function fhirProcedures(providerId, { patientUuid = null, encounter
       JOIN encounter_notes n ON n.id = c.note_id
       JOIN encounters e ON e.id = n.encounter_id
       JOIN patients p ON p.id = e.patient_id
-     WHERE c.kind = 'proc' AND p.provider_id = :pid`;
+     WHERE c.kind = 'proc' AND n.status = 'signed' AND p.provider_id = :pid`;
   if (patientUuid) { sql += ' AND p.uuid = :pu'; params.pu = patientUuid; }
   if (encounterUuid) { sql += ' AND e.uuid = :eu'; params.eu = encounterUuid; }
   sql += ' ORDER BY n.created_at DESC, c.seq LIMIT 1000';
@@ -242,6 +247,166 @@ export async function fhirProvenance(providerId, { patientUuid = null } = {}) {
   sql += ' ORDER BY n.signed_at DESC LIMIT 500';
   const [rows] = await execute(sql, params);
   return rows;
+}
+
+/* ============================ Claim / ClaimResponse (coded billing data) ============================ */
+import { medicareAllowedForLines } from '../services/reportsService.js';
+import { scrubClaim } from '../services/snomedctservices.js';
+import { posInfoLabel } from '../services/reportsService.js';
+
+/** Decrypt patients.insurance_enc → real policy objects. `undecryptable` distinguishes a corrupt/rotated
+ *  ciphertext (skip + log, never blank-substitute) from a patient who simply has no coverage on file. */
+export function normalizeInsurance(insuranceEnc) {
+  const raw = decJson(insuranceEnc);
+  if (raw === undefined) return { policies: [], undecryptable: true };
+  if (raw === null) return { policies: [], undecryptable: false };
+  const arr = Array.isArray(raw) ? raw : [raw];
+  return { policies: arr.filter((x) => x && typeof x === 'object'), undecryptable: false };
+}
+const payerOf = (pol) => { const v = pol && (pol.payer || pol.payerName); return v ? String(v).trim() || null : null; };
+/** Index of the primary policy (explicit primary flag / order 1, else the first); -1 when none. */
+function primaryPolicyIndex(policies) {
+  if (!policies.length) return -1;
+  const i = policies.findIndex((x) => x && (x.primary || x.isPrimary || Number(x.order) === 1 || Number(x.rank) === 1));
+  return i >= 0 ? i : 0;
+}
+
+/** FHIR Coverage resources ← the caller's patients' REAL on-file insurance policies (decrypted). One
+ *  Coverage per policy. Undecryptable insurance is skipped+logged; a patient with no coverage yields none —
+ *  never a fabricated policy. */
+export async function fhirCoverage(providerId, { patientUuid = null } = {}) {
+  const params = { pid: providerId };
+  let sql = 'SELECT p.uuid AS patient_uuid, p.insurance_enc, p.created_at FROM patients p WHERE p.provider_id = :pid AND p.insurance_enc IS NOT NULL';
+  if (patientUuid) { sql += ' AND p.uuid = :pu'; params.pu = patientUuid; }
+  sql += ' ORDER BY p.created_at DESC LIMIT 5000';
+  const [rows] = await execute(sql, params);
+  const out = [];
+  for (const r of rows) {
+    const { policies, undecryptable } = normalizeInsurance(r.insurance_enc);
+    if (undecryptable) { logger.warn({ patient: r.patient_uuid }, 'FHIR: skipping patient with undecryptable insurance'); continue; }
+    policies.forEach((pol, seq) => {
+      const payer = payerOf(pol);
+      const plan = pol.plan || pol.planName || null;
+      // Nothing real to represent (empty policy slot) → skip; do not emit a hollow Coverage.
+      if (!payer && !plan && !pol.memberId && !pol.mbi) return;
+      out.push({
+        patient_uuid: r.patient_uuid, seq,
+        payer, payerId: pol.payerId || null, memberId: pol.memberId || null, mbi: pol.mbi || null,
+        group: pol.group || pol.groupNumber || null, plan,
+        relationship: pol.relationship || null,
+        order: Number(pol.order) || Number(pol.rank) || (seq === 0 ? 1 : seq + 1),
+        status: pol.status || null,
+      });
+    });
+  }
+  return out;
+}
+
+/** SIGNED notes (with ≥1 procedure code) for the caller's patients, plus each note's dx + proc code rows.
+ *  Signed-only, exactly like the coded-data export and Provenance: a Claim/ClaimResponse is built only from
+ *  the attested legal record, never a draft's non-final engine predictions. */
+async function claimNotes(providerId, { patientUuid = null, encounterUuid = null, noteUuid = null } = {}) {
+  const params = { pid: providerId };
+  let sql = `SELECT n.id AS note_id, n.uuid AS note_uuid, n.pos_code, n.note_type, n.signed_at, n.created_at,
+        e.uuid AS encounter_uuid, p.uuid AS patient_uuid, p.insurance_enc,
+        u.uuid AS provider_uuid, u.credentials AS provider_credentials
+      FROM encounter_notes n
+      JOIN encounters e ON e.id = n.encounter_id
+      JOIN patients p ON p.id = e.patient_id
+      LEFT JOIN users u ON u.id = n.provider_id
+     WHERE n.status = 'signed' AND p.provider_id = :pid
+       AND EXISTS (SELECT 1 FROM encounter_note_codes c WHERE c.note_id = n.id AND c.kind = 'proc')`;
+  if (patientUuid) { sql += ' AND p.uuid = :pu'; params.pu = patientUuid; }
+  if (encounterUuid) { sql += ' AND e.uuid = :eu'; params.eu = encounterUuid; }
+  if (noteUuid) { sql += ' AND n.uuid = :nu'; params.nu = noteUuid; }
+  sql += ' ORDER BY n.signed_at DESC, n.id DESC LIMIT 500';
+  const [notes] = await execute(sql, params);
+  if (!notes.length) return [];
+  const ids = notes.map((n) => n.note_id);
+  const inList = ids.map((_, i) => `:n${i}`).join(',');
+  const cp = {}; ids.forEach((id, i) => { cp[`n${i}`] = id; });
+  const [codes] = await execute(
+    `SELECT note_id, kind, code, description, snomed_code, snomed_term, modifiers, units, is_primary, seq
+       FROM encounter_note_codes WHERE note_id IN (${inList}) ORDER BY note_id, kind, is_primary DESC, seq`, cp);
+  const byNote = new Map();
+  for (const c of codes) {
+    if (!byNote.has(c.note_id)) byNote.set(c.note_id, { dx: [], proc: [] });
+    byNote.get(c.note_id)[c.kind === 'dx' ? 'dx' : 'proc'].push(c);
+  }
+  return notes.map((n) => {
+    const { policies } = normalizeInsurance(n.insurance_enc);
+    const pi = primaryPolicyIndex(policies);
+    const payer = pi >= 0 ? payerOf(policies[pi]) : null;
+    // Reference the patient's real primary Coverage resource when a policy is on file (ties Claim↔Coverage).
+    const coverageRef = pi >= 0 ? `${n.patient_uuid}-coverage-${pi}` : null;
+    return { ...n, payer, coverageRef, codes: byNote.get(n.note_id) || { dx: [], proc: [] } };
+  });
+}
+
+function parseCreds(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === 'string') { try { const v = JSON.parse(raw); return Array.isArray(v) ? v : []; } catch { return []; } }
+  return [];
+}
+
+/** Per-note priced claim objects (real coded data + real MPFS pricing) — the single source shared by the
+ *  Claim and ExplanationOfBenefit exports so they can never diverge on lines, diagnoses, POS, or amounts. */
+async function pricedNotes(providerId, opts) {
+  const notes = await claimNotes(providerId, opts);
+  const out = [];
+  for (const n of notes) {
+    const credentials = parseCreds(n.provider_credentials);
+    const procRows = n.codes.proc;
+    const priced = await medicareAllowedForLines(
+      procRows.map((c) => ({ code: c.code, units: c.units || 1, posCode: n.pos_code, noteType: n.note_type, modifiers: c.modifiers })),
+      { credentials });
+    const items = procRows.map((c, i) => ({
+      code: c.code, description: c.description, modifiers: c.modifiers, units: c.units || 1,
+      posCode: n.pos_code || null, posLabel: posInfoLabel(n.pos_code, n.note_type),
+      allowedAmount: priced[i] ? priced[i].allowedAmount : null, priced: priced[i] ? priced[i].priced : false,
+    }));
+    out.push({
+      note_uuid: n.note_uuid, patient_uuid: n.patient_uuid, provider_uuid: n.provider_uuid,
+      encounter_uuid: n.encounter_uuid, created: n.signed_at || n.created_at, payer: n.payer, coverageRef: n.coverageRef,
+      diagnoses: n.codes.dx, items,
+    });
+  }
+  return out;
+}
+
+/** FHIR professional Claims (one per signed, procedure-bearing note) — real coded data + real MPFS pricing. */
+export async function fhirClaims(providerId, { patientUuid = null, encounterUuid = null, noteUuid = null } = {}) {
+  return pricedNotes(providerId, { patientUuid, encounterUuid, noteUuid });
+}
+
+/** FHIR ClaimResponses (pre-submission predetermination) — the REAL scrubClaim result per signed note. */
+export async function fhirClaimResponses(providerId, { patientUuid = null, encounterUuid = null, noteUuid = null } = {}) {
+  const notes = await claimNotes(providerId, { patientUuid, encounterUuid, noteUuid });
+  const out = [];
+  for (const n of notes) {
+    const lines = n.codes.proc.map((c) => ({ cpt: c.code, modifiers: c.modifiers, units: c.units || 1 }));
+    const diagnoses = n.codes.dx.map((c) => c.code).filter(Boolean);
+    const scrub = await scrubClaim({ lines, diagnoses, jurisdiction: 'FL' }); // real CMS-table scrub, Part B
+    out.push({
+      note_uuid: n.note_uuid, patient_uuid: n.patient_uuid, provider_uuid: n.provider_uuid,
+      created: n.signed_at || n.created_at, findings: scrub.findings, summary: scrub.summary,
+    });
+  }
+  return out;
+}
+
+/** FHIR ExplanationOfBenefit (pre-adjudication estimate) — the shared priced claim + the REAL scrub outcome.
+ *  Same signed-only, provider-scoped basis; the only money is the CMS MPFS allowed amount (no payer payment). */
+export async function fhirEobs(providerId, { patientUuid = null, encounterUuid = null, noteUuid = null } = {}) {
+  const priced = await pricedNotes(providerId, { patientUuid, encounterUuid, noteUuid });
+  const out = [];
+  for (const p of priced) {
+    const lines = p.items.map((it) => ({ cpt: it.code, modifiers: it.modifiers, units: it.units }));
+    const diagnoses = p.diagnoses.map((d) => d.code).filter(Boolean);
+    const scrub = await scrubClaim({ lines, diagnoses, jurisdiction: 'FL' });
+    out.push({ ...p, scrub: { findings: scrub.findings, summary: scrub.summary } });
+  }
+  return out;
 }
 
 export { ownedPatientIds };

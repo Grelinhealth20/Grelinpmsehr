@@ -2,7 +2,7 @@ import { pool } from '../db/pool.js';
 import { logger } from '../config/logger.js';
 import { searchSnomed, snomedToIcd10cm, snomedToIcd10cmBatch, snomedConceptsForIcd10cm, lookupCpt } from './terminologyService.js';
 import { isBillableIcd, icdDescription } from './terminologyCache.js';
-import { scrubClaim } from './codingService.js';
+import { scrubClaim } from './snomedctservices.js';
 
 /**
  * DETERMINISTIC clinical code prediction from a provider's note (Stage 1: ICD-10-CM diagnoses).
@@ -90,6 +90,27 @@ const STOP = new Set(['the', 'a', 'an', 'of', 'with', 'and', 'due', 'to', 'on', 
 // Tokens FULLTEXT can't require (its own stopwords + sub-min-length) — excluded from the search query
 // but KEPT for overlap scoring, so "type 2" still distinguishes from "type 1".
 const FT_UNUSABLE = new Set(['with', 'and', 'the', 'of', 'due', 'to', 'for', 'in', 'on', 'or', 'at', 'by', 'from', 'a', 'an']);
+
+// AFFIRMATIVE-presence matcher: true only when `re` matches `text` at a position NOT governed by a
+// negation cue in the same clause. A negated finding ("no septic shock", "denies worsening", "ruled out
+// sepsis", "without CKD", "not on insulin") must never drive a code OR an E/M acuity level — otherwise the
+// visit is UPCODED / the claim carries a ruled-out diagnosis. The window is clause-bounded (.,;) and a
+// CONTRAST conjunction ("no neuropathy BUT has CKD") flips the negation back to affirmative.
+const AFFIRM_NEG_TAIL = /(?:no|not|without|denies|denied|negative for|free of|absence of|no evidence of|no signs? of|resolved|never|ruled out|r\/o)\b(?:(?!\b(?:but|however|although|though|otherwise|except|aside)\b)[^.;,]){0,26}$/i;
+// POST-position negation — the cue follows the term ("sepsis RULED OUT", "exacerbation RESOLVED", "CHF
+// excluded"). Bounded to the same clause and cancelled by a contrast conjunction.
+const AFFIRM_NEG_POST = /^(?:(?!\b(?:but|however|although|though|otherwise|except)\b)[^.;,]){0,22}\b(?:ruled out|was ruled out|excluded|not present|unlikely|no longer (?:present|active|an issue)|has resolved|now resolved|resolved|resolving|not required|not needed|not indicated|avoided|averted|deferred|declined|prevented)\b/i;
+function matchesAffirmatively(text, re) {
+  const rx = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+  let m;
+  while ((m = rx.exec(text)) !== null) {
+    if (m.index === rx.lastIndex) rx.lastIndex += 1; // zero-width guard
+    const pre = text.slice(Math.max(0, m.index - 28), m.index);
+    const post = text.slice(rx.lastIndex, rx.lastIndex + 26);
+    if (!AFFIRM_NEG_TAIL.test(pre) && !AFFIRM_NEG_POST.test(post)) return true; // an un-negated occurrence
+  }
+  return false;
+}
 
 const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9\s./-]/g, ' ').replace(/\s+/g, ' ').trim();
 // Hyphens split into separate tokens so "End-stage" matches "end stage", "Non-pressure" → "non pressure".
@@ -308,10 +329,12 @@ export function extractProblemPhrases(rawContent = {}, noteType = 'hp') {
       // ALSO split an UNNUMBERED multi-sentence problem list ("…insulin use. Chronic constipation. Also
       // COPD.") — providers list problems as separate sentences without numbers, and without this only the
       // first sentence's head survived (parseProblemLine cuts its head at the first ". "), silently dropping
-      // the rest. Split only at a sentence period FOLLOWED by a capitalized/#-marked new clause and PRECEDED
-      // by a letter or ")" — so a decimal ("5.5"), an ICD code ("M54.16"), or "stage 3." (digit before the
-      // dot) is never split. Can only ADD segments (each matched independently) — never fabricates a code.
-      .flatMap((ln) => ln.split(/(?<=[A-Za-z)])\.\s+(?=[A-Z#])/))
+      // the rest. Split at a sentence period FOLLOWED by a space + capitalized/#-marked new clause. A decimal
+      // ("5.5") or an ICD code ("M54.16") is never split because it has NO space after the dot; a qualifier
+      // that ENDS a diagnosis ("…CKD stage 3. Essential hypertension.") DOES end the sentence, so a digit
+      // before the dot must still split (otherwise the next problem is swallowed as trailing narrative and
+      // dropped — HTN silently lost). Can only ADD segments (each matched independently) — never fabricates.
+      .flatMap((ln) => ln.split(/(?<=[A-Za-z0-9)])\.\s+(?=[A-Z#])/))
       .map((s) => s.replace(/^\s*#?\s*\d{1,2}[.)]?\s+/, '').trim()) // strip a leading "1." / "2)" / "#1" / "#2 " list marker
       .filter(Boolean)
       .flatMap(splitListLine);                          // split a comma/"and" diagnosis LIST into items
@@ -868,8 +891,11 @@ function mdmProxyLevel(content = {}, problemCount = 0, fam) {
     .join('  ').toLowerCase();
   // HIGH is reserved for genuine instability / threat to life — NOT a documented-but-managed acute
   // illness (professional coders level a managed acute respiratory failure at 99309 moderate, not high).
-  const highSig = /(threat to life|life.?threaten|hemodynamic instab|septic shock|respiratory arrest|cardiac arrest|status epilepticus|code (blue|status)|rapid response|icu transfer|impending (respiratory|cardiac|arrest|herniation)|actively dying|comfort care transition)/.test(acuityText);
-  const modSig = /(exacerbat|decompensat|worsening|progress(ion|ing)|acute (respiratory|hypoxic|hypercapnic|kidney|renal) (injury|failure)|\baki\b|\bsepsis\b|septic\b|newly diagnosed|new onset|new (problem|diagnosis)|poorly controlled|uncontrolled|acutely|admitted to (the )?hospital|transferr?ed to (the )?(hospital|er|emergency)|sent to (the )?(er|emergency|hospital)|acute (illness|complicated))/.test(acuityText);
+  // Acuity signals must be AFFIRMATIVELY documented — a NEGATED finding ("no septic shock", "denies
+  // worsening", "ruled out sepsis", "no acute decompensation") must NOT raise the visit level (that is
+  // E/M UPCODING). matchesAffirmatively skips negated occurrences.
+  const highSig = matchesAffirmatively(acuityText, /(threat to life|life.?threaten|hemodynamic instab|septic shock|respiratory arrest|cardiac arrest|status epilepticus|code (blue|status)|rapid response|icu transfer|transferr?ed to (?:the )?icu|(?:sent|admitted) to (?:the )?icu|icu admission|escalat\w* to (?:a )?higher level of care|higher level of care|impending (respiratory|cardiac|arrest|herniation)|actively dying|comfort care transition)/);
+  const modSig = matchesAffirmatively(acuityText, /(exacerbat|decompensat|worsening|progress(ion|ing)|acute (respiratory|hypoxic|hypercapnic|kidney|renal) (injury|failure)|\baki\b|\bsepsis\b|septic\b|newly diagnosed|new onset|new (problem|diagnosis)|poorly controlled|uncontrolled|acutely|admitted to (the )?hospital|transferr?ed to (the )?(hospital|er|emergency)|sent to (the )?(er|emergency|hospital)|acute (illness|complicated))/);
   const setLabel = fam.label;
   // Initial / new-patient visits are comprehensive by nature → default MODERATE, escalate to high on acuity.
   if (fam.kind === 'initial') { // NF initial: 99304/05/06 (3 codes)
@@ -1101,6 +1127,56 @@ export function predictProcedures(content = {}) {
   return out;
 }
 
+/**
+ * Correct laterality/bilateral modifiers on predicted procedures using the OFFICIAL MPFS bilateral-surgery
+ * indicator (mpfs_rvu.bilat_surg) — fully DATA-DRIVEN (deterministic + dynamic: read from the latest loaded
+ * MPFS year, never a hardcoded per-code list). Per CMS bilateral rules:
+ *   • 1 → the 150% bilateral adjustment applies: modifier 50 is correct on one line (kept).
+ *   • 0 or 3 → the 150% adjustment does NOT apply; a bilateral service is TWO separate sides → split the
+ *              50 line into RT + LT lines (each one unit).
+ *   • 2 (RVUs already bilateral) or 9 (concept does not apply) → report ONCE, no bilateral/laterality
+ *              modifier (drop 50/RT/LT), so the claim isn't reduced or denied.
+ * A unilateral RT/LT on a bilat_surg 2/9 code is likewise dropped. If the indicator can't be read, the codes
+ * are left unchanged (the downstream claim-scrub still flags modifier-policy issues — never a silent miss).
+ */
+async function applyBilateralPolicy(procedures) {
+  const codes = [...new Set(procedures.filter((p) => /\b(?:50|RT|LT)\b/.test(p.modifiers || '')).map((p) => p.cpt))];
+  if (!codes.length) return procedures;
+  let ind = new Map();
+  try {
+    const [rows] = await pool.query(
+      "SELECT hcpcs, bilat_surg FROM mpfs_rvu WHERE modifier = '' AND year = (SELECT MAX(year) FROM mpfs_rvu) AND hcpcs IN (?)",
+      [codes],
+    );
+    ind = new Map(rows.map((r) => [String(r.hcpcs), String(r.bilat_surg)]));
+  } catch (e) {
+    logger.warn({ err: e?.message }, 'bilateral-modifier policy: MPFS lookup failed — modifiers left as predicted (claim-scrub still validates)');
+    return procedures;
+  }
+  const out = [];
+  for (const p of procedures) {
+    const mods = String(p.modifiers || '').split(',').map((m) => m.trim()).filter(Boolean);
+    const b = ind.get(p.cpt);
+    if (!b || !(mods.includes('50') || mods.includes('RT') || mods.includes('LT'))) { out.push(p); continue; }
+    const rest = mods.filter((m) => !['50', 'RT', 'LT'].includes(m));
+    const withMod = (m) => [...rest, m].filter(Boolean).join(',');
+    if (mods.includes('50')) {
+      if (b === '1') { out.push(p); }
+      else if (b === '0' || b === '3') {
+        out.push({ ...p, modifiers: withMod('RT'), basis: `${p.basis || ''} — bilateral billed as separate RT + LT lines (MPFS bilateral indicator ${b}; 150% adjustment does not apply)`.trim() });
+        out.push({ ...p, modifiers: withMod('LT'), basis: `${p.basis || ''} — bilateral, contralateral (LT) side`.trim() });
+      } else {
+        out.push({ ...p, modifiers: rest.join(','), basis: `${p.basis || ''} — reported once; modifier 50 not applicable (MPFS bilateral indicator ${b})`.trim() });
+      }
+    } else if (b === '2' || b === '9') {
+      out.push({ ...p, modifiers: rest.join(','), basis: `${p.basis || ''} — laterality modifier not applicable (MPFS bilateral indicator ${b})`.trim() });
+    } else {
+      out.push(p);
+    }
+  }
+  return out;
+}
+
 export async function predictEncounterCoding(content = {}, { noteType = 'hp', pos } = {}) {
   content = content || {}; // NULL note content must never crash the coding prediction
   // Surface section text to the flat keys the extractors (diagnoses, E/M, procedures) read — real notes
@@ -1110,7 +1186,7 @@ export async function predictEncounterCoding(content = {}, { noteType = 'hp', po
   // `pos` is the facility Place of Service (authoritative when provided); otherwise the setting is
   // detected from the note text so an Assisted-Living / home visit bills the home-or-residence family.
   const em = predictEM(content, noteType, diagnoses.length, pos);
-  const procedures = [];
+  let procedures = [];
   // Every predicted CPT is VALIDATED against the real cpt_codes dataset and its description is pulled
   // FROM the dataset (dynamic + authoritative — never a standalone hard-coded code/label). A code the
   // rules select that is not in the dataset is surfaced as unmatched, never emitted unvalidated.
@@ -1125,12 +1201,20 @@ export async function predictEncounterCoding(content = {}, { noteType = 'hp', po
   // Interventional procedures documented in the note (injections, blocks, RFA, joint injections) —
   // real CMS CPTs with region/laterality, each validated against the dataset by emit() and deduped
   // against the E/M line. Confirm=true so the coder verifies level count, laterality, and imaging.
-  const emitted = new Set(procedures.map((p) => p.cpt));
+  // Dedup by CPT + MODIFIERS (not CPT alone): the same procedure performed on BOTH sides is two legitimate
+  // lines (64483-LT and 64483-RT); a CPT-only key silently dropped the second side (a documented procedure
+  // lost). The modifier-aware key keeps each distinct line while still de-duplicating a true repeat.
+  const emitted = new Set(procedures.map((p) => `${p.cpt}|${p.modifiers || ''}`));
   for (const pr of predictProcedures(content)) {
-    if (emitted.has(pr.cpt)) continue;
-    emitted.add(pr.cpt);
+    const key = `${pr.cpt}|${pr.modifiers || ''}`;
+    if (emitted.has(key)) continue;
+    emitted.add(key);
     await emit(pr.cpt, pr.units, pr.modifiers, pr.basis, pr.confirm, null);
   }
+  // Correct laterality/bilateral modifiers against the MPFS bilateral-surgery indicator, so a text-driven
+  // "bilateral" never emits a modifier 50 that would deny on a code that isn't 50-eligible (data-driven from
+  // mpfs_rvu — deterministic and dynamic, never a hardcoded per-code list).
+  procedures = await applyBilateralPolicy(procedures);
   // PROACTIVE denial-avoidance: scrub the predicted codes against the full CMS edit set (NCCI, ICD
   // billability/edits, LCD/Article medical necessity via mcd_* + article_coverage_*, modifier validity)
   // so LCD/medical-necessity and coding problems surface AT DOCUMENTATION TIME — before sign-off — with
@@ -1161,6 +1245,16 @@ async function applyLinkage(diagnoses, content) {
   const text = Object.values(content || {}).filter((v) => typeof v === 'string').join('  ').toLowerCase();
   const hasCode = (re) => out.some((d) => re.test(d.icd));
   const hasText = (re) => re.test(text);
+  // AFFIRMATIVE-presence text match: true only when the term occurs WITHOUT a negation cue immediately
+  // before it in the same clause. Combination/status linkage must never fire on a NEGATED mention — e.g.
+  // "no diabetic neuropathy", "denies CKD", "not on insulin", "without peripheral arterial disease" would
+  // otherwise falsely add E11.40 / N18.- / Z79.4 / E11.51 (a complication the note explicitly RULES OUT).
+  // The window is comma/period/semicolon-bounded, so a negation in a SEPARATE list item ("no diabetes,
+  // neuropathy present") does not suppress a later affirmative term. ("without" IS a negation cue here —
+  // it denies the following complication — even though the base phrase matcher treats it as an ICD specifier.)
+  // Negation-aware affirmative-presence match (shared module helper — single source of truth): a linkage
+  // trigger must never fire on a NEGATED mention ("no diabetic neuropathy", "denies CKD", "not on insulin").
+  const hasTextPos = (re) => matchesAffirmatively(text, re);
   // Descriptions are sourced from the official ICD-10-CM dataset (icdDescription) so the text is
   // authoritative and never a drifting hard-coded string; the passed description is only a fallback.
   const add = async (icd, description, linkage) => {
@@ -1179,8 +1273,8 @@ async function applyLinkage(diagnoses, content) {
 
   const hasDM2 = hasCode(/^E11\./);
   const hasCKD = hasCode(/^N18\./);
-  const esrd = out.some((d) => d.icd === 'N18.6') || hasText(/\besrd\b|end.?stage renal/);
-  const hasPAD = hasCode(/^I70\.|^I73\.9$/) || hasText(/peripheral (arterial|vascular) disease|\bpad\b|peripheral angiopath/);
+  const esrd = out.some((d) => d.icd === 'N18.6') || hasTextPos(/\besrd\b|end.?stage renal/);
+  const hasPAD = hasCode(/^I70\.|^I73\.9$/) || hasTextPos(/peripheral (arterial|vascular) disease|\bpad\b|peripheral angiopath/);
   const hasHF = hasCode(/^I50\./);
 
   // CKD documented in the narrative but not captured as a standalone N18 code (e.g. embedded in a
@@ -1189,7 +1283,7 @@ async function applyLinkage(diagnoses, content) {
   // never lost, which also enables the hypertensive-CKD combination below.
   // Detect CKD even in the abbreviated no-space form "CKD4"/"CKD3a" (\bckd\b alone fails there because a
   // digit follows with no word boundary), so the stage code is co-reported for "T2DM with CKD4" too.
-  const ckdDocumented = hasText(/chronic kidney disease|\bckd\b|\bckd\s?(?:3a|3b|[1-5])/) || esrd;
+  const ckdDocumented = hasTextPos(/chronic kidney disease|\bckd\b|\bckd\s?(?:3a|3b|[1-5])/) || esrd;
   if (ckdDocumented && !hasCode(/^N18\./)) {
     const sm = text.match(/(?:stage|ckd)\s*(3a|3b|[1-5])/);
     const stageCode = esrd ? 'N18.6'
@@ -1209,29 +1303,73 @@ async function applyLinkage(diagnoses, content) {
   // Add the UNSPECIFIED diabetic-complication combo ONLY when no MORE-SPECIFIC sibling is already coded —
   // otherwise "DM with diabetic polyneuropathy" (E11.42) would carry a redundant E11.40, and a specific
   // retinopathy (E11.311/E11.321/…) a redundant E11.319. The specific code from the phrase match stands.
-  if (hasDM2 && hasText(/neuropath/) && !hasCode(/^E11\.4[1-9]$/)) await add('E11.40', 'Type 2 diabetes mellitus with diabetic neuropathy, unspecified', 'DM + neuropathy');
-  if (hasDM2 && hasText(/retinopath/) && !hasCode(/^E11\.3[123][1-9]$/)) await add('E11.319', 'Type 2 diabetes mellitus with unspecified diabetic retinopathy without macular edema', 'DM + retinopathy');
+  if (hasDM2 && hasTextPos(/neuropath/) && !hasCode(/^E11\.4[1-9]$/)) await add('E11.40', 'Type 2 diabetes mellitus with diabetic neuropathy, unspecified', 'DM + neuropathy');
+  if (hasDM2 && hasTextPos(/retinopath/) && !hasCode(/^E11\.3[123][1-9]$/)) await add('E11.319', 'Type 2 diabetes mellitus with unspecified diabetic retinopathy without macular edema', 'DM + retinopathy');
 
   // Hypertensive chronic kidney disease (combination — ICD-10-CM PRESUMES the HTN↔CKD relationship).
   if (out.some((d) => d.icd === 'I10') && hasCKDnow) {
     await upgrade(/^I10$/, esrd ? 'I12.0' : 'I12.9',
       esrd ? 'Hypertensive chronic kidney disease with stage 5 CKD or end stage renal disease'
         : 'Hypertensive chronic kidney disease with stage 1 through stage 4 CKD, or unspecified CKD', 'HTN + CKD');
+  } else if (hasCKDnow && !hasCode(/^I1[0-3](\.|$)/) && hasTextPos(/\bhypertension\b|\bhypertensive\b|\bhtn\b/)) {
+    // A single COMBINED phrase ("essential hypertension with chronic kidney disease stage 3") can match to
+    // the CKD (N18.-) alone and drop the hypertension, so no I10 exists to upgrade. When hypertension is
+    // AFFIRMATIVELY documented (hasTextPos — never a negated/"no hypertension" mention) and CKD is present
+    // with no hypertensive code yet, establish the presumed combination I12.- directly (guideline I.C.9.a).
+    await add(esrd ? 'I12.0' : 'I12.9',
+      esrd ? 'Hypertensive chronic kidney disease with stage 5 CKD or end stage renal disease'
+        : 'Hypertensive chronic kidney disease with stage 1 through stage 4 CKD, or unspecified CKD', 'HTN + CKD (combined phrase)');
   }
   // Hypertensive HEART disease with heart failure (ICD-10-CM I.C.9.a.1). Unlike HTN+CKD, the relationship
   // is NOT presumed — it must be STATED or IMPLIED ("hypertensive heart disease", "hypertensive", "heart
   // failure DUE TO hypertension") or already coded (any I11.-). When it is: report I11.0 (upgrading a bare
   // I10 or an I11.9-without-HF), AND ALWAYS report the heart-failure TYPE additionally (I50.-, defaulting to
   // I50.9). Absent a stated relationship, HTN and HF are coded SEPARATELY (I10 + I50.-) — never presumed.
-  const hfDocumented = hasCode(/^I50\./) || hasText(/heart failure|congestive heart|\bchf\b|\bhfref\b|\bhfpef\b/);
+  // HF is "documented" from an I50.- code or an AFFIRMATIVE mention — a NEGATED mention ("no heart failure",
+  // "without CHF", "denies heart failure") must NOT count, or a hypertensive-heart note that explicitly rules
+  // OUT failure would be over-coded to the with-HF combination (I13.0 instead of I13.10).
+  const hfNegated = hasText(/\b(no|without|denies|negative for|resolved)\b[^.]{0,20}(heart failure|congestive|\bchf\b)|(heart failure|\bchf\b)[^.]{0,12}\b(ruled out|resolved|not present)\b/);
+  const hfDocumented = hasCode(/^I50\./) || (hasText(/heart failure|congestive heart|\bchf\b|\bhfref\b|\bhfpef\b/) && !hfNegated);
   // Allow a short interposed qualifier/parenthetical between "heart failure" and "due to hypertension"
   // ("systolic heart failure (HFrEF) due to hypertension") — [^.]{0,25}? stays within the same sentence.
   const htnHeartStated = hasCode(/^I11\./) || hasText(/hypertensive heart|(?:heart (?:disease|failure)|\bchf\b|\bhf\b)[^.]{0,25}?(?:due to|secondary to|from|related to|attributed to)\s+(?:hypertension|\bhtn\b)/);
-  if (hfDocumented && htnHeartStated) {
-    if (!(await upgrade(/^I10$|^I11\.9$/, 'I11.0', 'Hypertensive heart disease with heart failure', 'HTN + HF'))) {
-      await add('I11.0', 'Hypertensive heart disease with heart failure', 'HTN + HF');
+  if (htnHeartStated) {
+    if (hasCKDnow) {
+      // Hypertensive HEART AND chronic kidney disease → the single COMBINATION category I13.- (ICD-10-CM
+      // I.C.9.a): I11 (heart) and I12 (kidney) are SUBSUMED and never additionally coded. With heart failure
+      // → I13.0 (stage 1-4/unspec) / I13.2 (stage 5/ESRD); without heart failure → I13.10 / I13.11.
+      const target = hfDocumented ? (esrd ? 'I13.2' : 'I13.0') : (esrd ? 'I13.11' : 'I13.10');
+      const I13DESC = {
+        'I13.0': 'Hypertensive heart and chronic kidney disease with heart failure and stage 1 through stage 4 chronic kidney disease, or unspecified chronic kidney disease',
+        'I13.2': 'Hypertensive heart and chronic kidney disease with heart failure and with stage 5 chronic kidney disease, or end stage renal disease',
+        'I13.10': 'Hypertensive heart and chronic kidney disease without heart failure, with stage 1 through stage 4 chronic kidney disease, or unspecified chronic kidney disease',
+        'I13.11': 'Hypertensive heart and chronic kidney disease without heart failure, with stage 5 chronic kidney disease, or end stage renal disease',
+      };
+      if (!(await upgrade(/^I1[0-3](\.|$)/, target, I13DESC[target], 'HTN + heart + CKD (I13)'))) await add(target, I13DESC[target], 'HTN + heart + CKD (I13)');
+      // Drop any other hypertensive I10/I11.-/I12.- now subsumed by the single I13 combination code.
+      for (let i = out.length - 1; i >= 0; i -= 1) if (/^I1[0-2](\.|$)/.test(out[i].icd)) out.splice(i, 1);
+    } else if (hfDocumented) {
+      // Hypertensive heart disease WITH heart failure, no CKD → I11.0.
+      if (!(await upgrade(/^I10$|^I11\.9$/, 'I11.0', 'Hypertensive heart disease with heart failure', 'HTN + HF'))) {
+        await add('I11.0', 'Hypertensive heart disease with heart failure', 'HTN + HF');
+      }
     }
-    if (!hasCode(/^I50\./)) await add('I50.9', 'Heart failure, unspecified', 'HF type reported with I11.0');
+    // Heart-failure TYPE is always reported additionally when HF is documented (I50.-, default I50.9).
+    if (hfDocumented && !hasCode(/^I50\./)) await add('I50.9', 'Heart failure, unspecified', 'HF type reported');
+  }
+
+  // Hypertensive HEART AND chronic kidney disease (I13.-) requires DOCUMENTED heart disease (ICD-10-CM
+  // I.C.9.a): the HTN↔CKD relationship is presumed, but the HEART component is NOT. A phrase like
+  // "hypertensive chronic kidney disease" can text-match an I13.- descriptor (which literally contains
+  // "hypertensive … chronic kidney disease") even though no cardiac involvement is documented — an OVER-CODE
+  // that asserts heart disease the note never states. When heart disease is NOT documented, correct I13.- to
+  // the hypertensive-CKD-only code (I12.-), preserving the CKD stage. I13.0/I13.2 imply heart failure and
+  // cannot arise without heart documentation, so only the without-HF leaves (I13.10→I12.9, I13.11→I12.0) map.
+  const heartDocumented = hfDocumented || htnHeartStated || hasCode(/^I11\./)
+    || hasTextPos(/hypertensive heart|cardiomegaly|left ventricular hypertrophy|\blvh\b|hypertrophic cardiomyopathy/);
+  if (hasCode(/^I13\./) && !heartDocumented) {
+    await upgrade(/^I13\.10$/, 'I12.9', 'Hypertensive chronic kidney disease with stage 1 through stage 4 CKD, or unspecified CKD', 'I13→I12 (no heart disease documented)');
+    await upgrade(/^I13\.11$/, 'I12.0', 'Hypertensive chronic kidney disease with stage 5 CKD or end stage renal disease', 'I13→I12 (no heart disease documented)');
   }
 
   // ESRD documented → the CKD stage code is N18.6 (coded IN ADDITION to any hypertensive/diabetic combo).
@@ -1241,25 +1379,70 @@ async function applyLinkage(diagnoses, content) {
     }
   }
 
-  // Status / long-term-use Z-codes from documented status.
-  if (hasText(/hemodialysis|dialysis|\bon hd\b/)) await add('Z99.2', 'Dependence on renal dialysis', 'on dialysis');
-  if (hasText(/gastrostomy|\bg.?tube\b|\bpeg tube\b|tube feeding/)) await add('Z93.1', 'Gastrostomy status', 'gastrostomy');
+  // Status / long-term-use Z-codes from documented status. hasTextPos so a NEGATED mention ("not on
+  // insulin", "no dialysis", "off anticoagulation") never adds the status code.
+  if (hasTextPos(/hemodialysis|dialysis|\bon hd\b/)) await add('Z99.2', 'Dependence on renal dialysis', 'on dialysis');
+  if (hasTextPos(/gastrostomy|\bg.?tube\b|\bpeg tube\b|tube feeding/)) await add('Z93.1', 'Gastrostomy status', 'gastrostomy');
   // Long-term insulin: documented long-term use, OR insulin named in a diabetic patient's regimen.
-  if (hasText(/long.?term.*insulin|on insulin|insulin dependent/) || (hasDM2 && hasText(/\binsulin\b/))) {
+  if (hasTextPos(/long.?term.*insulin|on insulin|insulin dependent/) || (hasDM2 && hasTextPos(/\binsulin\b/))) {
     await add('Z79.4', 'Long term (current) use of insulin', 'insulin');
   }
-  if (hasText(/eliquis|apixaban|warfarin|coumadin|xarelto|rivaroxaban|anticoagulant|anticoagulation|blood thinner/)) await add('Z79.01', 'Long term (current) use of anticoagulants', 'anticoagulant');
+  if (hasTextPos(/eliquis|apixaban|warfarin|coumadin|xarelto|rivaroxaban|anticoagulant|anticoagulation|blood thinner/)) await add('Z79.01', 'Long term (current) use of anticoagulants', 'anticoagulant');
+  // Overweight/obesity WITH a documented BMI → the Z68.- BMI code is coded IN ADDITION (ICD-10-CM: BMI codes
+  // accompany the associated overweight/obesity diagnosis). Adult BMI → Z68 range, deterministic by value.
+  if (hasCode(/^E66\./) || hasTextPos(/\bobes|overweight\b/)) {
+    const bm = text.match(/\bbmi\b[^0-9]{0,6}(\d{2,3}(?:\.\d)?)/);
+    if (bm) {
+      const bmi = parseFloat(bm[1]);
+      let z = null;
+      if (bmi >= 70) z = 'Z68.45';
+      else if (bmi >= 60) z = 'Z68.44';
+      else if (bmi >= 50) z = 'Z68.43';
+      else if (bmi >= 45) z = 'Z68.42';
+      else if (bmi >= 40) z = 'Z68.41';
+      else if (bmi >= 30) z = `Z68.3${Math.floor(bmi) - 30}`;
+      else if (bmi >= 20) z = `Z68.2${Math.floor(bmi) - 20}`;
+      else if (bmi > 0) z = 'Z68.1';
+      if (z) await add(z, 'Body mass index (BMI)', 'BMI with overweight/obesity');
+    }
+  }
   // Long-term opioid therapy (scheduled opioid named in the regimen).
-  if (hasText(/\b(fentanyl|hydrocodone|oxycodone|oxycontin|morphine|hydromorphone|methadone|tramadol|opioid|opiate)\b/)) {
+  if (hasTextPos(/\b(fentanyl|hydrocodone|oxycodone|oxycontin|morphine|hydromorphone|methadone|tramadol|opioid|opiate)\b/)) {
     await add('Z79.891', 'Long term (current) use of opiate analgesic', 'long-term opioid');
   }
-  if (hasText(/below.?the.?knee amputation|below.?knee amputation|\bbka\b/)) {
+  if (hasTextPos(/below.?the.?knee amputation|below.?knee amputation|\bbka\b/)) {
     const left = hasText(/left (below|bka)|\bl bka\b|left lower|left leg/);
     const right = hasText(/right (below|bka)|\br bka\b|right lower|right leg/);
     await add(left ? 'Z89.512' : right ? 'Z89.511' : 'Z89.519', 'Acquired absence of leg below knee', 's/p amputation');
-  } else if (hasText(/above.?the.?knee amputation|above.?knee amputation|\baka\b/)) {
+  } else if (hasTextPos(/above.?the.?knee amputation|above.?knee amputation|\baka\b/)) {
     const left = hasText(/left (above|aka)|left leg/); const right = hasText(/right (above|aka)|right leg/);
     await add(left ? 'Z89.612' : right ? 'Z89.611' : 'Z89.619', 'Acquired absence of leg above knee', 's/p amputation');
+  }
+
+  // MAJOR DEPRESSIVE DISORDER — episode type + severity (ICD-10-CM F32 vs F33). The SNOMED map lands "major
+  // depressive disorder" on F32.9 (single episode, unspecified). A DOCUMENTED "recurrent" qualifier moves it
+  // to the F33 category, and the documented severity picks the leaf (mild .0 / moderate .1 / severe .2 /
+  // severe-with-psychosis .3 / remission .41-.42), so "MDD, recurrent, moderate" bills as F33.1 not a default
+  // single-episode. Qualifiers are read ONLY from the DEPRESSION sentence (so an unrelated "recurrent falls"
+  // elsewhere can't flip it), it only raises DOCUMENTED specificity (never invents an episode/severity), and
+  // every target is billable-validated by `upgrade`. An already-specific F33.0-.3 code is left untouched.
+  const depRow = out.find((d) => /^F32\.(?:[0-9]|A)$|^F33\./.test(d.icd));
+  if (depRow) {
+    const ctx = (text.match(/[^.;\n]*\b(?:major depressive|depressive disorder|depression|mdd)\b[^.;\n]*/) || [''])[0];
+    const inCtx = (re) => re.test(ctx);
+    const recurrent = inCtx(/\brecurrent\b|\brecurring\b|multiple episodes?/);
+    const fullRem = inCtx(/full remission/);
+    const partRem = inCtx(/partial remission/);
+    const sev = inCtx(/psychotic|psychosis/) ? 3 : inCtx(/\bsevere\b/) ? 2 : inCtx(/\bmoderate\b/) ? 1 : inCtx(/\bmild\b/) ? 0 : null;
+    if (recurrent) {
+      const code = fullRem ? 'F33.42' : partRem ? 'F33.41'
+        : sev === 0 ? 'F33.0' : sev === 1 ? 'F33.1' : sev === 2 ? 'F33.2' : sev === 3 ? 'F33.3' : 'F33.9';
+      await upgrade(/^F32\.(?:[0-9]|A)$|^F33\.9$/, code, 'Major depressive disorder, recurrent', 'MDD recurrent + severity');
+    } else if (/^F32\.9$/.test(depRow.icd)) {
+      const code = fullRem ? 'F32.5' : partRem ? 'F32.4'
+        : sev === 0 ? 'F32.0' : sev === 1 ? 'F32.1' : sev === 2 ? 'F32.2' : sev === 3 ? 'F32.3' : null;
+      if (code) await upgrade(/^F32\.9$/, code, 'Major depressive disorder, single episode', 'MDD severity');
+    }
   }
   return out;
 }

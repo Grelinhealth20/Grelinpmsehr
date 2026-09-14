@@ -377,7 +377,7 @@ export const terminologyApi = {
   snomedToIcd: (conceptId) => api.get(`/terminology/snomed/${conceptId}/icd10cm`),
 };
 
-// --- Coding engine (claim edits, PDPM, HCC, MPFS RVU) ----------------------
+// --- SNOMED CT (claim edits, PDPM, HCC, MPFS RVU) ----------------------
 export const codingApi = {
   scrub: (payload) => api.post('/coding/scrub', payload),
   pdpm: (icd, fy) => api.get(`/coding/pdpm/${encodeURIComponent(icd)}`, { params: { fy } }),

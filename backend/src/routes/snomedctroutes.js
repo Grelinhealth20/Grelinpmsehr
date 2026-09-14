@@ -2,13 +2,13 @@ import { Router } from 'express';
 import { authenticate, requirePasswordSettled } from '../middleware/authenticate.js';
 import { requireEhrAccess } from '../middleware/permissions.js';
 import { csrfProtection } from '../middleware/csrf.js';
-import { scrubClaim, lookupPdpm, lookupHcc, estimatePayment, lookupNcd } from '../services/codingService.js';
+import { scrubClaim, lookupPdpm, lookupHcc, estimatePayment, lookupNcd } from '../services/snomedctservices.js';
 import { calcRaf, deriveSegment } from '../services/hccRafService.js';
 
 const router = Router();
 // Same guard chain as the clinical note routes: authenticated, password-settled, AND holding EHR access.
 // These are CMS-dataset compute/reference endpoints (no PHI, no persistence), but a user without EHR access
-// — PMS/billing-only, or a revoked grant — has no business invoking the coding engine, so gate consistently.
+// — PMS/billing-only, or a revoked grant — has no business invoking the SNOMED CT, so gate consistently.
 router.use(authenticate, requirePasswordSettled, requireEhrAccess);
 
 // CMS-HCC V28 risk-adjustment (RAF) for a diagnosis list. Body: { diagnoses|icds, age, sex, segment }

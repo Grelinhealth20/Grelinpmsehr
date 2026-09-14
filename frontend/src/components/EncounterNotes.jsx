@@ -294,7 +294,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   const [detail, setDetail] = useState(null); // authoritative encounter-header details (fetched)
   const skipSave = useRef(true); // skip the save that a fresh load/open would trigger
   const createToken = useRef(0); // guards the async Rx merge to the LATEST note created
-  const repredictRef = useRef(null); // debounce handle: re-run the coding engine after content is saved
+  const repredictRef = useRef(null); // debounce handle: re-run the SNOMED CT after content is saved
   // Auto-save engine refs — persistence must never silently drop an edit.
   const contentRef = useRef(content); // always the LATEST content (avoids stale closures)
   const reasonRef = useRef(reason);
@@ -614,7 +614,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
       savingRef.current = false;
       if (dirtyRef.current) { dirtyRef.current = false; return flushSave(); } // edits arrived mid-save
       setAutoState('saved');
-      // NO mid-edit billing prediction. The coding engine runs ONLY when the note is finished (at Sign &
+      // NO mid-edit billing prediction. The SNOMED CT runs ONLY when the note is finished (at Sign &
       // Finalize) — never in between while the provider is still documenting.
       return true;
     } catch (e) {
@@ -701,7 +701,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
     if (!canSign) { toast.error('Only a physician (MD or DO) can sign off and finalize a note for billing.'); return; }
     setBusy(true);
     try {
-      // FINALIZE trigger: persist the final content, then run the coding engine ONCE on that saved
+      // FINALIZE trigger: persist the final content, then run the SNOMED CT ONCE on that saved
       // content so the Billing heading reflects the completed note BEFORE the signature is applied.
       const okSaved = await flushSave();
       if (!okSaved) { toast.error('Your changes could not be saved yet — please try again before signing.'); return; }
@@ -1761,7 +1761,7 @@ function RxSafetyPanel({ safety, checking, onClose }) {
 /**
  * BILLING — appears on every note, directly above Attestation & Signature. It is a normal FREE-FORM note
  * section (its text saves to content.sections.billing, so it persists, autosaves, and is included in the
- * signed PDF/DOCX like any other heading) PLUS a live, read-only readout of the CODING ENGINE predictions:
+ * signed PDF/DOCX like any other heading) PLUS a live, read-only readout of the SNOMED CT predictions:
  *  - Diagnoses: ICD-10-CM code + authoritative description + SNOMED CT ID (primary marked).
  *  - Procedures: CPT/HCPCS code + modifiers (no description, per spec) + units.
  * Predictions are advisory suggestions from the deterministic, CMS-validated engine; the free-form field
@@ -2461,7 +2461,7 @@ function CodingPanel({ noteUuid, readOnly, enc, toast }) {
   const hasPrimary = dx.some((d) => d.primary);
 
   if (enc?.codingEnabled === false) {
-    return <div className="nt-doc-scroll cq-scroll"><div className="cq-empty" style={{ margin: 16 }}>The coding engine is turned off for this facility by your administrator.</div></div>;
+    return <div className="nt-doc-scroll cq-scroll"><div className="cq-empty" style={{ margin: 16 }}>The SNOMED CT is turned off for this facility by your administrator.</div></div>;
   }
 
   return (
