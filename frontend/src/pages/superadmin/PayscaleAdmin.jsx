@@ -107,19 +107,24 @@ export default function PayscaleAdmin({ facilities = [], role = '' }) {
   // Display source: a LOCKED period is shown from its immutable snapshots (the amounts actually paid); an
   // OPEN period is shown from the live outstanding computation.
   const rows = isLocked
-    ? lockedSnaps.map((s) => ({ providerUuid: s.providerUuid, name: s.provider, providerType: null, encounters: null, providerPay: s.providerPay }))
+    ? lockedSnaps.map((s) => ({ providerUuid: s.providerUuid, name: s.provider, providerType: null, encounters: null, workRvu: null, groupShare: null, providerPay: s.providerPay }))
     : (data?.providers || []);
   const totalPay = isLocked ? lockedSnaps.reduce((sum, s) => sum + Number(s.providerPay || 0), 0) : (data?.totalPay || 0);
+  const totalWorkRvu = isLocked ? null : (data?.totalWorkRvu ?? 0);
+  const totalGroupShare = isLocked ? null : (data?.totalGroupShare ?? 0);
   const providerCount = isLocked ? lockedSnaps.length : (data?.providerCount ?? 0);
   const totalEncounters = isLocked ? null : (data?.totalEncounters ?? 0);
+  const num = (n) => (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   const [dling, setDling] = useState('');
   async function download(kind) {
     try {
       setDling(kind);
       const params = { facility: facilityUuid || undefined, provider: providerUuid || undefined, from: period?.from, to: period?.to };
-      const res = kind === 'encounters' ? await reportsApi.adminDownloadEncounters(params) : await reportsApi.adminDownloadBilling(params);
-      saveBlob(res, `${kind}_${period?.from || 'all'}.xlsx`);
+      const res = kind === 'encounters' ? await reportsApi.adminDownloadEncounters(params)
+        : kind === 'payscale' ? await reportsApi.adminDownloadPayscale(params)
+          : await reportsApi.adminDownloadBilling(params);
+      saveBlob(res, `${kind === 'payscale' ? 'processed_rvus' : kind}_${period?.from || 'all'}.xlsx`);
     } catch (e) { setErr(toApiError(e).message); } finally { setDling(''); }
   }
 
@@ -160,6 +165,7 @@ export default function PayscaleAdmin({ facilities = [], role = '' }) {
         </label>
         <div className="pay-fld"><span>Download (Excel)</span>
           <div className="pay-dl">
+            <button type="button" className="btn primary sm" disabled={dling === 'payscale'} onClick={() => download('payscale')} title="Every processed RVU line for the applied filters — by date of service, with calculations and the 40/60 split">{dling === 'payscale' ? 'Preparing…' : 'Processed RVUs (detailed)'}</button>
             <button type="button" className="btn ghost sm" disabled={dling === 'encounters'} onClick={() => download('encounters')}>{dling === 'encounters' ? 'Preparing…' : 'Visit / Encounters'}</button>
             <button type="button" className="btn ghost sm" disabled={dling === 'billing'} onClick={() => download('billing')}>{dling === 'billing' ? 'Preparing…' : 'Billing report'}</button>
           </div>
@@ -196,26 +202,42 @@ export default function PayscaleAdmin({ facilities = [], role = '' }) {
       </div>
 
       <div className="rep-table-wrap">
-        <table className="rep-table">
-          <thead><tr><th>Provider</th><th>Type</th><th className="r">Encounters</th><th className="r">Pay</th></tr></thead>
+        <table className="rep-table pay-table">
+          <thead>
+            <tr>
+              <th>Provider</th><th>Type</th><th className="r">Encounters</th>
+              <th className="r">Work RVUs</th><th className="r">Group Share (40%)</th><th className="r">Provider Pay (60%)</th>
+            </tr>
+          </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan="4" className="rep-muted">Loading…</td></tr>
+              <tr><td colSpan="6" className="rep-muted">Loading…</td></tr>
             ) : rows.length === 0 ? (
-              <tr><td colSpan="4" className="rep-muted">{isLocked ? 'This period is locked with no paid encounters.' : 'No signed encounters for this selection.'}</td></tr>
+              <tr><td colSpan="6" className="rep-muted">{isLocked ? 'This period is locked with no paid encounters.' : 'No signed encounters for this selection.'}</td></tr>
             ) : rows.map((p) => (
               <tr key={p.providerUuid}>
                 <td className="strong">{p.name}</td>
                 <td className="pay-type">{p.providerType === 'npp' ? 'NPP' : p.providerType === 'physician' ? 'Physician' : '—'}</td>
                 <td className="r">{p.encounters == null ? '—' : p.encounters}</td>
+                <td className="r">{p.workRvu == null ? '—' : num(p.workRvu)}</td>
+                <td className="r">{p.groupShare == null ? '—' : money(p.groupShare)}</td>
                 <td className="r strong">{money(p.providerPay)}</td>
               </tr>
             ))}
           </tbody>
-          {rows.length > 0 && <tfoot><tr><td colSpan="3" className="r">Total — {period?.label}</td><td className="r strong">{money(totalPay)}</td></tr></tfoot>}
+          {rows.length > 0 && (
+            <tfoot>
+              <tr>
+                <td colSpan="3" className="r">Total — {period?.label}</td>
+                <td className="r strong">{totalWorkRvu == null ? '—' : num(totalWorkRvu)}</td>
+                <td className="r strong">{totalGroupShare == null ? '—' : money(totalGroupShare)}</td>
+                <td className="r strong">{money(totalPay)}</td>
+              </tr>
+            </tfoot>
+          )}
         </table>
       </div>
-      <p className="rep-foot">Pay is each provider's own signed, payable procedures for the period — CMS 2026 Physician Fee Schedule, Central Florida. Real-time; no estimates.</p>
+      <p className="rep-foot">Pay is each provider's own signed, payable procedures for the period — Work RVU × 60% (provider) / 40% (group), CMS 2026 Physician Fee Schedule, Central Florida. Real-time; no estimates. Use <strong>Processed RVUs (detailed)</strong> above to export every line by date of service with its calculation.</p>
     </div>
   );
 }

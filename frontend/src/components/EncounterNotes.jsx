@@ -100,6 +100,17 @@ function deriveSectionOrder(note) {
 const PHYSICIAN_CREDS = ['MD', 'DO'];
 const hasMD = (user) => (user?.credentials || []).some((c) => PHYSICIAN_CREDS.includes(String(c).toUpperCase().trim()));
 const blankRx = () => ({ drug: '', dose: '', route: '', frequency: '', quantity: '', refills: '', sig: '' });
+// CMS Place of Service codes a SNF / Pain / PI provider realistically documents at. The provider sets the
+// ACTUAL POS for the encounter; when left on "Auto", the server identifies it from the documented record.
+// MAJOR, specialty-aligned CMS Place-of-Service codes a SNF / Pain / PI provider actually bills — not the
+// full CMS list. SNF core first, then office/home/telehealth, then the occasional hospital/ASC/hospice/rehab.
+const POS_OPTIONS = [
+  { code: '31', name: 'Skilled nursing facility' }, { code: '32', name: 'Nursing facility' }, { code: '33', name: 'Custodial care facility' }, { code: '13', name: 'Assisted living facility' },
+  { code: '11', name: 'Office' }, { code: '12', name: 'Home' }, { code: '10', name: 'Telehealth — patient home' }, { code: '02', name: 'Telehealth — other than home' },
+  { code: '21', name: 'Inpatient hospital' }, { code: '22', name: 'Hospital outpatient' }, { code: '24', name: 'Ambulatory surgical center' }, { code: '23', name: 'Emergency room' },
+  { code: '34', name: 'Hospice' }, { code: '62', name: 'Outpatient rehabilitation facility' },
+];
+const POS_NAME = Object.fromEntries(POS_OPTIONS.map((o) => [o.code, o.name]));
 // Structured vital signs (Objective). Reference ranges are shown Epic-style beside each field.
 const VITALS = [
   { k: 'temp', label: 'Temp °F', ph: '98.6', range: '97–99' },
@@ -266,6 +277,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   const [showVitals, setShowVitals] = useState(false); // vitals revealed under Chief Complaint (on demand)
   const [content, setContent] = useState({ vitals: {}, sections: {}, checks: {}, prescriptions: [] });
   const [reason, setReason] = useState('');
+  const [pos, setPos] = useState(''); // Place of Service (CMS 2-digit) — the ACTUAL POS for this encounter
   const [pharmacy, setPharmacy] = useState(null);   // pharmacy/PBM vendor from benefits
   const [rxCarry, setRxCarry] = useState(null);      // carry-forward source info
   const [billing, setBilling] = useState(null);      // live coding-engine predictions (ICD/CPT/modifiers)
@@ -285,11 +297,13 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   // Auto-save engine refs — persistence must never silently drop an edit.
   const contentRef = useRef(content); // always the LATEST content (avoids stale closures)
   const reasonRef = useRef(reason);
+  const posRef = useRef(pos);
   const savingRef = useRef(false);    // a save request is in flight
   const dirtyRef = useRef(false);     // edits exist that are not yet confirmed saved
   const retryRef = useRef(null);      // pending retry timer after a failed save
   contentRef.current = content;
   reasonRef.current = reason;
+  posRef.current = pos;
 
   // Fetch the backend-authoritative note-type templates once. No static fallback — the
   // server defs are the single source of truth for the note structure.
@@ -434,6 +448,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
           : deriveSectionOrder(data.note)),
       });
       setReason(data.note.reason || '');
+      setPos(data.note.pos || '');
       setRxCarry(null);
       setShowVitals(false); // vitals auto-show only if this note already has vitals data
       setTab('note');
@@ -543,7 +558,12 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
     savingRef.current = true;
     setAutoState('saving');
     try {
-      await encountersApi.updateNote(active.uuid, { content: contentRef.current, reason: reasonRef.current });
+      await encountersApi.updateNote(active.uuid, {
+        content: contentRef.current, reason: reasonRef.current,
+        // Only send a valid 2-digit CMS POS — never an empty/partial value (which the server would reject),
+        // so changing POS persists but a legacy note with no POS keeps saving normally.
+        ...(/^\d{2}$/.test(posRef.current || '') ? { pos: posRef.current } : {}),
+      });
       savingRef.current = false;
       if (dirtyRef.current) { dirtyRef.current = false; return flushSave(); } // edits arrived mid-save
       setAutoState('saved');
@@ -567,7 +587,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
     setAutoState('saving');
     const t = setTimeout(() => { flushSave(); }, 800);
     return () => clearTimeout(t);
-  }, [content, reason]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [content, reason, pos]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Warn before leaving with unsaved edits (tab close / refresh within the save window).
   useEffect(() => {
@@ -965,6 +985,21 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
                     <PFDetails encounter={enc} noteLabel={noteMeta?.label || 'Clinical Note'} ageStr={ageStr} seenBy={seenBy} statusStr={statusStr}
                       encType={content.encounterType} readOnly={readOnly}
                       onEncType={(v) => setContent((c) => ({ ...c, encounterType: v }))} />
+
+                    <section className="pf-card pf-pos-card">
+                      <div className="pf-card-h">Place of Service</div>
+                      {readOnly ? (
+                        <div className="pf-body">{active?.pos ? `POS ${active.pos} · ${POS_NAME[active.pos] || 'Place of service'}` : 'Identified from the documented record'}</div>
+                      ) : (
+                        <div className="pf-pos-row">
+                          <select className="select" value={pos} onChange={(e) => setPos(e.target.value)} aria-label="Place of Service">
+                            <option value="">Auto — identify from the note</option>
+                            {POS_OPTIONS.map((o) => <option key={o.code} value={o.code}>{o.code} · {o.name}</option>)}
+                          </select>
+                          <span className="pf-pos-hint">{pos ? 'Set by you for this encounter.' : 'Left on Auto, the system identifies the POS from what you document (real-time). You can override it any time.'}</span>
+                        </div>
+                      )}
+                    </section>
 
                     <section className="pf-card">
                       <div className="pf-card-h">Chief complaint</div>

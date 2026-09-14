@@ -18,6 +18,7 @@ router.use(authenticate, requirePasswordSettled);
 router.get('/admin/payscale', authorize(ROLES.SUPER_ADMIN), ctrl.adminPayscale);
 router.get('/admin/download/encounters', authorize(ROLES.SUPER_ADMIN), ctrl.adminDownloadEncounters); // .xlsx
 router.get('/admin/download/billing', authorize(ROLES.SUPER_ADMIN), ctrl.adminDownloadBilling);       // .xlsx
+router.get('/admin/download/payscale', authorize(ROLES.SUPER_ADMIN), ctrl.adminDownloadPayscale);     // .xlsx — processed-RVU pay detail
 // Payroll: pay-period LOCK. Finalize + history = super/master; REOPEN a locked period = master only.
 router.post('/admin/payroll/finalize', authorize(ROLES.SUPER_ADMIN), ctrl.finalize);
 router.get('/admin/payroll/snapshots', authorize(ROLES.SUPER_ADMIN), ctrl.listFinalized);

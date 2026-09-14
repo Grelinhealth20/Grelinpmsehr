@@ -42,6 +42,7 @@ const ABBREV = {
   hfref: 'heart failure with reduced ejection fraction', hfpef: 'heart failure with preserved ejection fraction',
   djd: 'degenerative joint disease', pud: 'peptic ulcer disease', gout: 'gout', bmi: 'body mass index',
   resp: 'respiratory', dka: 'diabetic ketoacidosis', hha: 'hyperosmolar hyperglycemia',
+  exac: 'exacerbation', htx: 'hypertension',
 };
 // Whole-PHRASE clinical synonyms — normalize documented wording to the term the SNOMED CT US edition uses,
 // so a common provider phrasing resolves to the correct BILLABLE concept (deterministic, not fuzzy). Applied
@@ -53,6 +54,10 @@ const PHRASE_SYN = [
   [/\baortic (?:regurgitation|insufficiency)\b/g, 'aortic valve regurgitation'],
   [/\bmitral (?:regurgitation|insufficiency)\b/g, 'mitral valve regurgitation'],
   [/\brepeated falls?\b/g, 'recurrent falls'],
+  // Anatomical NOUN → the ADJECTIVE/region form ICD-10-CM uses, so "pressure ulcer of SACRUM" matches the
+  // same concept as "sacral pressure ulcer" (the noun form otherwise went unmatched — a core SNF wound gap).
+  [/\bof (?:the )?sacrum\b/g, 'of sacral region'], [/\bof (?:the )?coccyx\b/g, 'of coccygeal region'],
+  [/\bof (?:the )?ischium\b/g, 'of ischial region'],
   // Spelled-out shorthand that omits the trailing noun of the SNOMED-preferred term (the abbreviations
   // GERD/GAD expand WITH it and match, but the prose forms don't). The disease/disorder noun is implied
   // in clinical usage; lookahead avoids double-appending when it is already written.
@@ -72,7 +77,9 @@ const PHRASE_SYN = [
 // without loss of consciousness") that identifies a POSITIVE, more-specific diagnosis. True negation is
 // written "no / denies / negative for / no evidence of". Treating "without" as negation dropped valid,
 // billable diagnoses.
-const NEG = /\b(no|not|denies|denied|negative for|r\/o|rule out|ruled out|no evidence of|absence of|free of|unlikely|possible|probable|questionable|differential|history of|h\/o|hx of|status post|s\/p)\b/i;
+// Family history ("FHx breast cancer", "family history of CAD") is the FAMILY's disease, never the patient's
+// active diagnosis (it codes to Z80-Z84, not the disease) — treat it as a non-coding cue like negation.
+const NEG = /\b(no|not|denies|denied|negative for|r\/o|rule out|ruled out|no evidence of|absence of|free of|unlikely|possible|probable|questionable|differential|history of|h\/o|hx of|status post|s\/p|fhx|fh|family h(?:istory|x)|maternal history|paternal history)\b/i;
 // Status/qualifier words trimmed from the tail so the condition phrase matches SNOMED cleanly.
 // Trailing clinical-status words that describe the COURSE of a problem, not its identity — stripped so
 // the base condition matches ("Heart failure improved" → "Heart failure"). NOTE: code-changing modifiers
@@ -148,7 +155,19 @@ function splitListLine(line) {
   }
   buf += s.slice(last);
   parts.push(buf);
-  return parts.map((x) => x.replace(/^(?:and\s+|&\s+)/i, '').trim()).filter((x) => x.length >= 3);
+  let out = parts.map((x) => x.replace(/^(?:and\s+|&\s+)/i, '').trim()).filter((x) => x.length >= 3);
+  // NEGATION / FAMILY-HISTORY CARRY-OVER. A cue that governs the whole list ("Denies chest pain, SOB,
+  // palpitations" / "FHx breast cancer, colon cancer, CAD" / "h/o X, Y, Z") lives ONLY on the first item;
+  // after the split the trailing items lose it and would code as ACTIVE (a false positive). If the first
+  // item leads with a NON-coding cue, prepend that cue to every following item so it is suppressed too.
+  // "without" is excluded (it is an ICD specifier, not negation).
+  if (out.length > 1) {
+    const lead = out[0].match(/^\s*(denies?|denied|no|not|negative for|r\/o|rule out|ruled out|no evidence of|unlikely|possible|probable|questionable|fhx|fh|family h(?:istory|x)(?:\s+of)?|maternal history|paternal history|h\/o|hx of|history of|s\/p|status post)\b/i);
+    if (lead && !/^\s*(denies?|denied|no|not|negative for|r\/o|rule out|ruled out|no evidence of|unlikely|possible|probable|questionable|fhx|fh|family h(?:istory|x)(?:\s+of)?|maternal history|paternal history|h\/o|hx of|history of|s\/p|status post)\b/i.test(out[1])) {
+      out = out.map((x, i) => (i === 0 ? x : `${lead[1]} ${x}`));
+    }
+  }
+  return out;
 }
 
 // Normalize one problem line → { text: condition head, full: line, negated } (or null if too short).
@@ -502,6 +521,15 @@ export async function matchIcdForPhrase(phrase, fullLine) {
       alts.push(clean(phrase.replace(/[()]/g, ' ')));            // fold parenthetical inline (keep "(stage 3)")
       alts.push(clean(phrase.replace(/\s*\([^)]*\)/g, ' ')));    // drop the parenthetical entirely
     }
+    // Trailing MEDICATION / treatment context: "atrial fibrillation ON APIXABAN", "DM ON INSULIN", "…on
+    // anticoagulation" — the "on <drug>" is not part of the diagnosis (the drug is captured separately as a
+    // status Z-code by linkage), so the dx itself must still resolve. Strip a trailing "on <up to 3 words>".
+    if (/\bon\s+\S/i.test(phrase)) alts.push(clean(phrase.replace(/\s+on\s+[A-Za-z0-9/\- ]{2,40}$/i, ' ')));
+    // "diabetes … WITH <complication>" — the combined phrase often dilutes below threshold, but the
+    // complication alone resolves ("diabetic nephropathy"→E11.21). Try the complication; the documented
+    // diabetes TYPE is re-applied afterward from the full line (E10↔E11), so the type is never lost.
+    const dmWith = expanded.match(/\bdiabet\w*\b.*?\b(?:with|w\/)\s+(.{3,})$/i);
+    if (dmWith) alts.push(clean(dmWith[1]));
     alts.push(clean(phrase.replace(SPINE, ' ')));                // drop spinal-level noise, KEEP laterality
     alts.push(clean(phrase.replace(SPINE, ' ').replace(LAT, ' '))); // last resort: drop level AND laterality
     const tried = new Set([norm(phrase)]);
@@ -651,6 +679,19 @@ async function resolveIcdForPhrase(phrase, expanded, pTokens, fullLine) {
     if (!map.primary) continue;
     if (map.primary.billable) {
       let icd = map.primary.icd; let description = map.primary.description;
+      // DIABETES TYPE correction — the SNOMED match can land on the wrong-type parallel code (e.g. "type 2
+      // diabetes … with diabetic polyneuropathy" → E10.42 type-1). E10 (type 1) and E11 (type 2) are
+      // structurally PARALLEL in ICD-10-CM (same 4th-6th char complication), so when the note documents a
+      // specific type, swap ONLY the category digit to the correct type and validate it is billable — a
+      // deterministic, same-complication correction (never invents specificity, never a wrong complication).
+      // Type from the expanded head OR the full line (so a "diabetes with <complication>" recovery that
+      // matched only the complication still corrects to the documented type).
+      const typeSrc = `${expanded} ${fullLine || ''}`;
+      const dmType = /\btype\s*2\b|\bt2dm\b|\btype\s*ii\b/i.test(typeSrc) ? 2 : /\btype\s*1\b|\bt1dm\b|\btype\s*i\b/i.test(typeSrc) ? 1 : 0;
+      if (dmType && ((dmType === 2 && /^E10\./.test(icd)) || (dmType === 1 && /^E11\./.test(icd)))) {
+        const corrected = (dmType === 2 ? 'E11' : 'E10') + icd.slice(3);
+        if (await isBillableIcd(corrected)) { icd = corrected; description = (await icdDescription(corrected)) || description; }
+      }
       // Best-effort specificity enrichment: raise an unspecified leaf to the documented axis. Wrapped so a
       // transient DB error NEVER drops the already-validated base code — worst case the base (correct, less
       // specific) code stands. Enrichment only; not a degraded/mock fallback.
@@ -765,7 +806,11 @@ function detectSetting(content = {}, posHint) {
   if (pos) {
     if (['31', '32'].includes(pos)) return 'nf';                               // skilled/nursing facility
     if (['12', '13', '14', '33'].includes(pos)) return 'home';                 // home / assisted living / group home / custodial
-    if (['11', '19', '22', '49', '50', '71', '72', '20'].includes(pos)) return 'office'; // office / outpatient / clinic / urgent care
+    // Telehealth (POS 02 non-home, 10 patient-home) is billed with the OFFICE/OUTPATIENT E/M codes
+    // (99202-99215) plus modifier 95 per CMS 2024+ — so the E/M FAMILY is office; the 95 modifier is added
+    // in predictEM by POS. (Without this a telehealth visit fell to 'other' → no E/M was suggested.)
+    if (['10', '02'].includes(pos)) return 'office';                           // telehealth → office/outpatient E/M + mod 95
+    if (['11', '19', '22', '49', '50', '71', '72', '20', '62'].includes(pos)) return 'office'; // office / outpatient / clinic / urgent care / outpatient rehab
     if (['21', '51', '61'].includes(pos)) return 'inpatient';                  // hospital inpatient / psych / rehab
     if (pos === '23') return 'ed';                                             // emergency department
     if (['nf', 'home', 'office', 'inpatient', 'ed'].includes(posHint)) return posHint;
@@ -917,9 +962,13 @@ export function predictEM(content = {}, noteType = 'hp', problemCount = 0, posHi
   idx = Math.max(0, Math.min(idx, fam.codes.length - 1));
   // Hospice ATTENDING visit → modifier GV (attending physician, not employed by the hospice, care
   // related to the terminal condition). Coder confirms GV vs GW (services unrelated to the terminal dx).
-  // A pain-management TELEHEALTH visit → modifier 95 (synchronous audio-video); coder confirms POS 10/02.
-  const modifiers = noteType === 'hospice' ? 'GV' : noteType === 'pain_telehealth' ? '95' : '';
-  return { cpt: fam.codes[idx], description: fam.label, units: 1, modifiers, basis, confirm: confirm || noteType === 'hospice' || noteType === 'pain_telehealth', addOn: null };
+  // TELEHEALTH → modifier 95 (synchronous audio-video), driven by the POS (02 non-home / 10 patient-home)
+  // OR the pain-telehealth note type — so ANY note documented at a telehealth POS carries 95, not just the
+  // pain template. Hospice ATTENDING visit → modifier GV (attending not employed by the hospice, care
+  // related to the terminal condition; coder confirms GV vs GW). POS wins for telehealth.
+  const isTelehealth = noteType === 'pain_telehealth' || ['02', '10'].includes(String(posHint || '').trim());
+  const modifiers = noteType === 'hospice' ? 'GV' : isTelehealth ? '95' : '';
+  return { cpt: fam.codes[idx], description: fam.label, units: 1, modifiers, basis, confirm: confirm || noteType === 'hospice' || isTelehealth, addOn: null };
 }
 
 /**
@@ -937,7 +986,7 @@ export function predictEM(content = {}, noteType = 'hp', problemCount = 0, posHi
  * confirm=true (the coder verifies level count, laterality, and imaging before billing). Procedures
  * that are not clearly documented are NOT coded here — they are left for the coder (no fabrication).
  */
-const detectLateralityMod = (t) => (/\bbilateral(ly)?\b|\bboth sides?\b/.test(t) ? '50'
+const detectLateralityMod = (t) => (/\bbilateral(ly)?\b|\bboth sides?\b|\bb\/l\b/.test(t) ? '50'
   : /\bleft\b|\bl\.\s|\(l\)/.test(t) && /\bright\b|\br\.\s|\(r\)/.test(t) ? '50'
     : /\bleft\b|\bl\.\s|\(l\)/.test(t) ? 'LT' : /\bright\b|\br\.\s|\(r\)/.test(t) ? 'RT' : '');
 // cervical/thoracic (C/T) vs lumbar/sacral (L/S) region for spine procedures.
@@ -1175,7 +1224,9 @@ async function applyLinkage(diagnoses, content) {
   // I10 or an I11.9-without-HF), AND ALWAYS report the heart-failure TYPE additionally (I50.-, defaulting to
   // I50.9). Absent a stated relationship, HTN and HF are coded SEPARATELY (I10 + I50.-) — never presumed.
   const hfDocumented = hasCode(/^I50\./) || hasText(/heart failure|congestive heart|\bchf\b|\bhfref\b|\bhfpef\b/);
-  const htnHeartStated = hasCode(/^I11\./) || hasText(/hypertensive heart|(?:heart (?:disease|failure)|\bchf\b|\bhf\b) (?:due to|secondary to|from|related to|attributed to) hypertension/);
+  // Allow a short interposed qualifier/parenthetical between "heart failure" and "due to hypertension"
+  // ("systolic heart failure (HFrEF) due to hypertension") — [^.]{0,25}? stays within the same sentence.
+  const htnHeartStated = hasCode(/^I11\./) || hasText(/hypertensive heart|(?:heart (?:disease|failure)|\bchf\b|\bhf\b)[^.]{0,25}?(?:due to|secondary to|from|related to|attributed to)\s+(?:hypertension|\bhtn\b)/);
   if (hfDocumented && htnHeartStated) {
     if (!(await upgrade(/^I10$|^I11\.9$/, 'I11.0', 'Hypertensive heart disease with heart failure', 'HTN + HF'))) {
       await add('I11.0', 'Hypertensive heart disease with heart failure', 'HTN + HF');
