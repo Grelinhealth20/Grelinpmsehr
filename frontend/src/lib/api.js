@@ -350,6 +350,9 @@ export const encountersApi = {
   // downloadable only by an MD (enforced server-side).
   downloadNote: (noteUuid, name) => downloadPdf(`/encounters/notes/${noteUuid}/pdf`, name || 'medical-record.pdf'),
   updateNote: (noteUuid, payload) => api.patch(`/encounters/notes/${noteUuid}`, payload),
+  // Single-active-editor lease for a draft note (acquire/renew on open + heartbeat, release on close).
+  acquireNoteLock: (noteUuid, editorToken) => api.post(`/encounters/notes/${noteUuid}/edit-lock`, { editorToken }),
+  releaseNoteLock: (noteUuid, editorToken) => api.delete(`/encounters/notes/${noteUuid}/edit-lock`, { data: { editorToken } }),
   deleteNote: (noteUuid) => api.delete(`/encounters/notes/${noteUuid}`),
   signNote: (noteUuid, payload) => api.post(`/encounters/notes/${noteUuid}/sign`, payload),
   amendNote: (noteUuid, payload) => api.post(`/encounters/notes/${noteUuid}/amend`, payload),

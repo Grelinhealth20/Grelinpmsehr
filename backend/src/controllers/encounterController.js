@@ -9,6 +9,7 @@ import {
   updateNote as updateNoteSvc, signNote as signNoteSvc, amendSignedNote as amendNoteSvc,
   getNoteCodes as getNoteCodesSvc, saveNoteCodes as saveNoteCodesSvc, scrubNoteCodes as scrubNoteCodesSvc,
   predictCodes as predictCodesSvc, deleteNote as deleteNoteSvc,
+  acquireNoteEditLock as acquireLockSvc, releaseNoteEditLock as releaseLockSvc,
 } from '../services/encounterNoteService.js';
 import {
   listNoteTypeTemplates, providerCanUseNoteType, providerServiceLines,
@@ -319,11 +320,33 @@ export async function updateNote(req, res, next) {
     const result = await updateNoteSvc(req.params.noteUuid, req.authUserId, req.body);
     if (!result) return res.status(404).json({ error: 'Note not found.', code: 'NOT_FOUND' });
     if (result.locked) return res.status(409).json({ error: 'This note is signed and can no longer be edited.', code: 'NOTE_SIGNED' });
+    // Another editor holds the live single-editor lease — this session must be read-only, never a silent clobber.
+    if (result.editLocked) return res.status(423).json({ error: `This note is being edited${result.by ? ` by ${result.by}` : ' in another session'}.`, code: 'NOTE_EDIT_LOCKED', by: result.by || null });
     // Optimistic-concurrency conflict: the note was edited elsewhere since the client last loaded it. Return
     // the current revision so the client can refetch, re-merge its edits, and retry — never a silent clobber.
     if (result.conflict) return res.status(409).json({ error: 'This note was updated in another session. Reloading the latest version.', code: 'NOTE_CONFLICT', currentRev: result.currentRev });
     await recordAudit({ actorUserId: req.authUserId, action: 'encounter.note.update', entityType: 'encounter_note', entityId: req.params.noteUuid, ...ctx(req) });
     res.json({ note: result });
+  } catch (err) { next(err); }
+}
+
+// Acquire / renew the single-active-editor lease for a draft note. Returns { held:true } if this editor now
+// holds it, or { held:false, by } if another editor holds a live lease (the client then opens read-only).
+export async function acquireNoteLock(req, res, next) {
+  try {
+    const result = await acquireLockSvc(req.params.noteUuid, req.authUserId, req.body?.editorToken);
+    if (result.notFound) return res.status(404).json({ error: 'Note not found.', code: 'NOT_FOUND' });
+    if (result.locked) return res.status(409).json({ error: 'This note is signed and can no longer be edited.', code: 'NOTE_SIGNED' });
+    return res.json({ held: !!result.ok, by: result.by || null, leaseSeconds: result.leaseSeconds });
+  } catch (err) { next(err); }
+}
+
+// Release the lease if this editor holds it (called on close/unmount so others can edit immediately).
+export async function releaseNoteLock(req, res, next) {
+  try {
+    const result = await releaseLockSvc(req.params.noteUuid, req.authUserId, req.body?.editorToken);
+    if (result.notFound) return res.status(404).json({ error: 'Note not found.', code: 'NOT_FOUND' });
+    return res.json({ ok: true });
   } catch (err) { next(err); }
 }
 

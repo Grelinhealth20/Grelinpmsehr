@@ -284,6 +284,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   const [billingLoading, setBillingLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [autoState, setAutoState] = useState('idle'); // idle | saving | saved
+  const [lockedByOther, setLockedByOther] = useState(null); // name of another provider/session editing this draft → read-only here
   const [amending, setAmending] = useState(false); // MD editing a signed note
   const [amendModal, setAmendModal] = useState(false); // reason prompt for amendment
   const [amendReason, setAmendReason] = useState('');
@@ -302,6 +303,9 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   const dirtyRef = useRef(false);     // edits exist that are not yet confirmed saved
   const retryRef = useRef(null);      // pending retry timer after a failed save
   const revRef = useRef(0);           // optimistic-concurrency: the note body revision last confirmed by the server
+  const editorTokenRef = useRef(null); // this editor instance's token for the single-active-editor lease
+  const lockHeartbeatRef = useRef(null); // interval that renews the edit lease while the editor stays open
+  const lockUuidRef = useRef(null); // the note uuid we currently hold the edit lease on (for release on unmount)
   contentRef.current = content;
   reasonRef.current = reason;
   posRef.current = pos;
@@ -427,6 +431,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
 
   async function openNote(uuid) {
     try {
+      releaseEditLock(); // free the lease on any previously-open note before switching
       const { data } = await encountersApi.getNote(uuid);
       skipSave.current = true;
       setAutoState('idle');
@@ -451,6 +456,12 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
       });
       setReason(data.note.reason || '');
       setPos(data.note.pos || '');
+      // Single-active-editor: for an EDITABLE draft, claim the edit lease. If another session/provider holds
+      // it, open READ-ONLY with a "being edited by …" banner so the same note is never edited in two places.
+      setLockedByOther(null);
+      if (data.note.status !== 'signed' && data.note.isOwner !== false) {
+        await acquireEditLock(uuid);
+      } else { releaseEditLock(); editorTokenRef.current = null; }
       setRxCarry(null);
       setShowVitals(false); // vitals auto-show only if this note already has vitals data
       setTab('note');
@@ -514,7 +525,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   // provider's note to review/sign, but only the author edits it (no silent
   // failed saves, no cross-provider edits). EXCEPTION: an MD actively amending a
   // signed note edits it in place — the amendment is saved explicitly with a reason.
-  const readOnly = amending ? false : (signed || active?.isOwner === false);
+  const readOnly = amending ? false : (signed || active?.isOwner === false || !!lockedByOther);
   const setSection = (k, v) => setContent((c) => ({ ...c, sections: { ...c.sections, [k]: v } }));
   const setVital = (k, v) => setContent((c) => ({ ...c, vitals: { ...(c.vitals || {}), [k]: v } }));
   // Toggle a checkbox option for a section (stored in content.checks[key]; autosaves with the note).
@@ -553,8 +564,39 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   // sending contentRef/reasonRef), and NEVER swallows a failure: a failed save moves
   // to the 'error' state and auto-retries, and the dirty flag stays set until the
   // server confirms — so a transient blip can never silently drop a medical-record edit.
+  // --- Single-active-editor lease -------------------------------------------------------------------
+  function stopLockHeartbeat() { if (lockHeartbeatRef.current) { clearInterval(lockHeartbeatRef.current); lockHeartbeatRef.current = null; } }
+  // Acquire/renew the edit lease for `uuid`. On success, start a heartbeat so an idle-but-open editor keeps
+  // the note; on denial, mark it read-only with the holder's name. Never throws to the caller.
+  async function acquireEditLock(uuid) {
+    if (!editorTokenRef.current) {
+      editorTokenRef.current = (window.crypto?.randomUUID?.() || `ed-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    }
+    try {
+      const { data } = await encountersApi.acquireNoteLock(uuid, editorTokenRef.current);
+      if (data.held) {
+        setLockedByOther(null);
+        lockUuidRef.current = uuid; // remember what we hold, so unmount can release it even after `active` changes
+        stopLockHeartbeat();
+        lockHeartbeatRef.current = setInterval(() => {
+          encountersApi.acquireNoteLock(uuid, editorTokenRef.current)
+            .then(({ data: d }) => { if (!d.held) { setLockedByOther(d.by || 'another session'); stopLockHeartbeat(); } })
+            .catch(() => {}); // a transient heartbeat miss is fine; the lease simply lapses if we truly stopped
+        }, 45000);
+      } else {
+        setLockedByOther(data.by || 'another session'); // someone else is editing → this session is read-only
+      }
+    } catch { /* lock service unreachable → fall through; the server still enforces on write */ }
+  }
+  function releaseEditLock() {
+    stopLockHeartbeat();
+    const uuid = lockUuidRef.current; const tok = editorTokenRef.current;
+    lockUuidRef.current = null;
+    if (uuid && tok) encountersApi.releaseNoteLock(uuid, tok).catch(() => {}); // best-effort; a lapsed lease frees itself
+  }
+
   async function flushSave() {
-    if (!active || active.status === 'signed' || active.isOwner === false) return true;
+    if (!active || active.status === 'signed' || active.isOwner === false || lockedByOther) return true;
     if (savingRef.current) { dirtyRef.current = true; return false; } // fold into the in-flight save
     if (retryRef.current) { clearTimeout(retryRef.current); retryRef.current = null; }
     savingRef.current = true;
@@ -563,6 +605,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
       const { data } = await encountersApi.updateNote(active.uuid, {
         content: contentRef.current, reason: reasonRef.current,
         baseRev: revRef.current, // optimistic concurrency: server rejects (409) if the note changed since we loaded it
+        editorToken: editorTokenRef.current, // single-active-editor lease (server refuses if another editor holds it)
         // Only send a valid 2-digit CMS POS — never an empty/partial value (which the server would reject),
         // so changing POS persists but a legacy note with no POS keeps saving normally.
         ...(/^\d{2}$/.test(posRef.current || '') ? { pos: posRef.current } : {}),
@@ -579,6 +622,14 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
       // Optimistic-concurrency conflict: the note was edited in another session. Adopt the server's current
       // revision and retry — the server shallow-merges our sections over the latest, so BOTH sessions' edits
       // survive (no clobber, no lost work). Any other error → visible retry as before.
+      // Another editor took the note (our lease lapsed / someone else opened it) → go READ-ONLY, don't retry;
+      // keep the unsaved edits visible so nothing is lost, and tell the provider who is editing.
+      if (e?.response?.data?.code === 'NOTE_EDIT_LOCKED') {
+        stopLockHeartbeat();
+        setLockedByOther(e.response.data.by || 'another session');
+        setAutoState('idle');
+        return false;
+      }
       if (e?.response?.data?.code === 'NOTE_CONFLICT' && e.response.data.currentRev != null) {
         revRef.current = e.response.data.currentRev;
         dirtyRef.current = true;
@@ -595,13 +646,13 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   // Auto-save: debounced persistence of EVERY edit (vitals, sections, Rx, reason).
   // Skips signed (immutable) notes, read-only viewers, and the initial load.
   useEffect(() => {
-    if (!active || active.status === 'signed' || active.isOwner === false) return undefined;
+    if (!active || active.status === 'signed' || active.isOwner === false || lockedByOther) return undefined;
     if (skipSave.current) { skipSave.current = false; return undefined; }
     dirtyRef.current = true;
     setAutoState('saving');
     const t = setTimeout(() => { flushSave(); }, 800);
     return () => clearTimeout(t);
-  }, [content, reason, pos]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [content, reason, pos, lockedByOther]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Warn before leaving with unsaved edits (tab close / refresh within the save window).
   useEffect(() => {
@@ -611,6 +662,12 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
     window.addEventListener('beforeunload', onBeforeUnload);
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
   }, []);
+  // On a hard tab-close/refresh we can't reliably release the lease; that's fine — it simply lapses after the
+  // lease window (server-side), so the note is never permanently stuck. In-app close releases immediately below.
+
+  // Release the single-editor lease when the editor unmounts (modal closed / navigated away), so the note
+  // is immediately editable by others rather than waiting out the lease window.
+  useEffect(() => () => { releaseEditLock(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Flush any pending edit before closing. If the final save FAILS, keep the editor
   // open and tell the provider — never close over unsaved medical-record changes.
@@ -627,13 +684,14 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
     if (!active) return;
     setBusy(true);
     try {
-      const { data } = await encountersApi.updateNote(active.uuid, { content, reason, baseRev: revRef.current });
+      const { data } = await encountersApi.updateNote(active.uuid, { content: contentRef.current, reason, baseRev: revRef.current, editorToken: editorTokenRef.current });
       if (data?.note?.contentRev != null) revRef.current = data.note.contentRev;
       toast.success('Draft saved.');
       await loadNotes();
     } catch (e) {
+      if (e?.response?.data?.code === 'NOTE_EDIT_LOCKED') { stopLockHeartbeat(); setLockedByOther(e.response.data.by || 'another session'); toast.error(`This note is being edited by ${e.response.data.by || 'another session'} — it's read-only here.`); }
       // On a concurrency conflict, reopen the latest so the provider sees the merged current version.
-      if (e?.response?.data?.code === 'NOTE_CONFLICT') { toast.error('This note was updated in another session — reloading the latest version.'); await openNote(active.uuid); }
+      else if (e?.response?.data?.code === 'NOTE_CONFLICT') { toast.error('This note was updated in another session — reloading the latest version.'); await openNote(active.uuid); }
       else toast.error(toApiError(e).message);
     } finally { setBusy(false); }
   }
@@ -652,6 +710,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
       // `content` — which could be a hair behind if an edit landed mid-flush — so signing can never overwrite
       // the just-saved newer content with a stale copy.
       const { data } = await encountersApi.signNote(active.uuid, { content: contentRef.current, reason: reasonRef.current });
+      releaseEditLock(); // the note is now signed/immutable — free the edit lease
       setActive(data.note);
       toast.success('Note signed — finalized and saved to the patient folder for billing.');
       await loadNotes();
@@ -840,6 +899,9 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
       )}
       {active && !signed && active.isOwner === false && (
         <span className="clr-draft-flag" style={{ marginLeft: 12 }}>Read-only · another provider's note</span>
+      )}
+      {active && !signed && active.isOwner !== false && lockedByOther && (
+        <span className="clr-draft-flag" style={{ marginLeft: 12 }}>Read-only · being edited by {lockedByOther}</span>
       )}
       <span className="spacer" />
       {amending ? (

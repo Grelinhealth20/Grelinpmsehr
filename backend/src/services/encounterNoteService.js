@@ -512,10 +512,65 @@ async function findDraft(noteUuid, providerId) {
   return rows[0] || null;
 }
 
-export async function updateNote(noteUuid, providerId, { content, reason, noteType, pos, baseRev } = {}) {
+// Single-active-editor lease for a DRAFT note. One editor instance (identified by a per-mount token) holds an
+// auto-renewing lease; a second editor (another tab/device, or another provider) is denied and opens
+// read-only, so the SAME field can never be edited in two places at once. Lease-based, so a crashed/closed
+// session frees the note automatically after EDIT_LOCK_LEASE_SEC without a manual unlock.
+const EDIT_LOCK_LEASE_SEC = 90;
+const LEASE_LIVE = `edit_lock_at >= (NOW() - INTERVAL ${EDIT_LOCK_LEASE_SEC} SECOND)`;
+
+async function lockHolderName(noteId) {
+  try {
+    const [h] = await execute('SELECT u.full_name_enc FROM encounter_notes n LEFT JOIN users u ON u.id = n.edit_lock_by WHERE n.id = :id LIMIT 1', { id: noteId });
+    return h[0]?.full_name_enc ? decrypt(h[0].full_name_enc) : null;
+  } catch { return null; }
+}
+
+/** Acquire (or renew) the edit lease on a DRAFT note for this editor instance. A SIGNED note is never
+ *  editable, so it can't be locked. Returns { ok } when held, or { ok:false, by } when another editor holds
+ *  a live lease. Owner-scoped (only the note's owner can edit a draft), matching updateNote. */
+export async function acquireNoteEditLock(noteUuid, providerId, editorToken) {
+  const r = await findDraft(noteUuid, providerId);
+  if (!r) return { notFound: true };
+  if (r.status !== 'draft') return { locked: true }; // signed → cannot be edited, so no edit lock
+  const tok = String(editorToken || '').slice(0, 36);
+  if (!tok) { const e = new Error('An editor token is required to edit a note.'); e.status = 400; e.code = 'EDITOR_TOKEN_REQUIRED'; throw e; }
+  const [res] = await execute(
+    `UPDATE encounter_notes SET edit_lock_token = :tok, edit_lock_by = :uid, edit_lock_at = NOW()
+      WHERE id = :id AND status = 'draft'
+        AND (edit_lock_token IS NULL OR edit_lock_token = :tok OR NOT (${LEASE_LIVE}))`,
+    { tok, uid: providerId, id: r.id },
+  );
+  if (res.affectedRows === 1) return { ok: true, leaseSeconds: EDIT_LOCK_LEASE_SEC };
+  return { ok: false, by: await lockHolderName(r.id) }; // a different editor holds a live lease
+}
+
+/** Release the edit lease if THIS editor instance holds it (best-effort; a lapsed lease frees itself). */
+export async function releaseNoteEditLock(noteUuid, providerId, editorToken) {
+  const r = await findDraft(noteUuid, providerId);
+  if (!r) return { notFound: true };
+  await execute(
+    'UPDATE encounter_notes SET edit_lock_token = NULL, edit_lock_by = NULL, edit_lock_at = NULL WHERE id = :id AND edit_lock_token = :tok',
+    { id: r.id, tok: String(editorToken || '').slice(0, 36) },
+  );
+  return { ok: true };
+}
+
+export async function updateNote(noteUuid, providerId, { content, reason, noteType, pos, baseRev, editorToken } = {}) {
   const r = await findDraft(noteUuid, providerId);
   if (!r) return null;
   if (r.status === 'signed') return { locked: true }; // signed notes are immutable
+  // Server-authoritative single-editor guard: a content change is refused if a DIFFERENT editor instance
+  // holds a LIVE lease — even if a client bypassed the read-only UI. The holding editor's own writes pass and
+  // renew the lease (below). Metadata-only writes are not gated (they don't touch the body).
+  if (content !== undefined) {
+    const tok = String(editorToken || '').slice(0, 36);
+    const [lk] = await execute(`SELECT edit_lock_token, edit_lock_by, (${LEASE_LIVE}) AS live FROM encounter_notes WHERE id = :id LIMIT 1`, { id: r.id });
+    const held = lk[0];
+    if (held && held.live && held.edit_lock_token && held.edit_lock_token !== tok) {
+      return { editLocked: true, by: await lockHolderName(r.id) };
+    }
+  }
   const sets = [];
   const params = { id: r.id };
   // Only overwrite content when the caller actually sends it — a metadata-only
@@ -533,6 +588,9 @@ export async function updateNote(noteUuid, providerId, { content, reason, noteTy
       toStore = { ...existing, ...content };
     }
     sets.push('content_enc = :content', 'content_rev = content_rev + 1'); params.content = toStore ? encrypt(JSON.stringify(toStore)) : null;
+    // Renew this editor's lease on every body write so an actively-editing session keeps the note held
+    // (its autosaves are its heartbeat); a session that stops writing lets the lease lapse and frees the note.
+    if (editorToken) { sets.push('edit_lock_token = :etok', 'edit_lock_by = :euid', 'edit_lock_at = NOW()'); params.etok = String(editorToken).slice(0, 36); params.euid = providerId; }
   }
   if (reason !== undefined) { sets.push('reason = :reason'); params.reason = reason || null; }
   if (noteType !== undefined) { sets.push('note_type = :type'); params.type = noteType; }

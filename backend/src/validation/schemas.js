@@ -348,7 +348,7 @@ export const createNoteSchema = z
 export const updateNoteSchema = z
   // baseRev = the content revision the client last loaded (optimistic concurrency). When present, the server
   // rejects the write with 409 NOTE_CONFLICT if the note changed since, so a stale editor can't clobber.
-  .object({ noteType: z.enum(NOTE_TYPES).optional(), reason: noteReason, content: noteContentSchema, pos: notePos, baseRev: z.number().int().min(0).optional() })
+  .object({ noteType: z.enum(NOTE_TYPES).optional(), reason: noteReason, content: noteContentSchema, pos: notePos, baseRev: z.number().int().min(0).optional(), editorToken: z.string().max(36).optional() })
   .strict();
 
 export const signNoteSchema = z

@@ -247,6 +247,10 @@ export async function runMigrations() {
   // Optimistic-concurrency counter for the note body — bumped on every content write so a stale editor's
   // save is detected (409) and reconciled, instead of silently clobbering a concurrent edit.
   await ensureColumn('encounter_notes', 'content_rev', '`content_rev` INT NOT NULL DEFAULT 0 AFTER `content_enc`');
+  // Single-active-editor lease (draft notes): one editor instance may edit at a time; others open read-only.
+  await ensureColumn('encounter_notes', 'edit_lock_token', '`edit_lock_token` CHAR(36) NULL AFTER `content_rev`');
+  await ensureColumn('encounter_notes', 'edit_lock_by', '`edit_lock_by` BIGINT UNSIGNED NULL AFTER `edit_lock_token`');
+  await ensureColumn('encounter_notes', 'edit_lock_at', '`edit_lock_at` DATETIME NULL AFTER `edit_lock_by`');
   // Patient encounters sub-table (newest DOS first) — kept fast per patient at scale.
   await ensureIndex('encounters', 'idx_enc_patient_date', '`patient_id`, `encounter_date`');
   await ensureIndex('encounters', 'idx_enc_provider', '`provider_id`');

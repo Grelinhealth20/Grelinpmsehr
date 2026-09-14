@@ -63,6 +63,10 @@ router.get('/notes/:noteUuid/predict', ctrl.predictNoteCodes);
 // Saving billable codes IS a note edit → require the editNotes grant (consistent with PATCH/sign/amend).
 router.put('/notes/:noteUuid/codes', csrfProtection, requireEditNotes, ctrl.saveNoteCodes);
 router.post('/notes/:noteUuid/scrub', csrfProtection, ctrl.scrubNote);
+// Single-active-editor lease: acquire/renew on open+heartbeat, release on close. Editing grant required
+// (only an editor takes the lock). No body schema — just { editorToken }.
+router.post('/notes/:noteUuid/edit-lock', csrfProtection, requireEditNotes, ctrl.acquireNoteLock);
+router.delete('/notes/:noteUuid/edit-lock', csrfProtection, requireEditNotes, ctrl.releaseNoteLock);
 router.patch('/notes/:noteUuid', csrfProtection, requireEditNotes, validate(updateNoteSchema), ctrl.updateNote);
 router.post('/notes/:noteUuid/sign', csrfProtection, requireEditNotes, validate(signNoteSchema), ctrl.signNote);
 router.post('/notes/:noteUuid/amend', csrfProtection, requireEditNotes, validate(amendNoteSchema), ctrl.amendNote);

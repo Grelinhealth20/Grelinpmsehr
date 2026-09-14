@@ -366,6 +366,9 @@ export const SCHEMA_STATEMENTS = [
     reason        VARCHAR(120)    NULL,
     content_enc   LONGBLOB        NULL,  -- dynamic long-form records (500k+ words); LONGBLOB removes the 16MB ceiling
     content_rev   INT             NOT NULL DEFAULT 0,  -- optimistic-concurrency counter (bumped on each body write)
+    edit_lock_token CHAR(36)      NULL,  -- single-active-editor lease: the editor instance holding the note
+    edit_lock_by    BIGINT UNSIGNED NULL, -- the user behind that editor (for a "being edited by …" message)
+    edit_lock_at    DATETIME      NULL,  -- lease refresh time; the lock is stale once older than the lease window
     status        ENUM('draft','signed') NOT NULL DEFAULT 'draft',
     billing_ready TINYINT(1)      NOT NULL DEFAULT 0,
     signed_by     BIGINT UNSIGNED NULL,
