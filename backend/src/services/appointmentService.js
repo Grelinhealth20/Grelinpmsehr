@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { execute } from '../db/pool.js';
+import { execute, withTransaction } from '../db/pool.js';
 import { encrypt, decrypt } from '../utils/crypto.js';
 import { schedulingScope } from './accessScope.js';
 
@@ -97,26 +97,32 @@ export async function findOverlap({ providerId, date, startMin, durationMin, exc
 
 export async function createAppointment({ providerId, renderingProviderId, title, patient, patientUuid, type, procedureCode, date, startMin, durationMin, createdBy }) {
   const uuid = uuidv4();
-  await execute(
-    `INSERT INTO appointments
-       (uuid, provider_id, rendering_provider_id, title_enc, patient_name_enc, patient_uuid, appt_type, procedure_code, appt_date, start_min, duration_min, status, created_by)
-     VALUES
-       (:uuid, :pid, :rpid, :titleEnc, :patientEnc, :patientUuid, :type, :proc, :date, :startMin, :durationMin, 'scheduled', :createdBy)`,
-    {
-      uuid,
-      pid: providerId,
-      rpid: renderingProviderId || null,
-      titleEnc: encrypt(title),
-      patientEnc: patient ? encrypt(patient) : null,
-      patientUuid: patientUuid || null,
-      type,
-      proc: procedureCode || null,
-      date,
-      startMin,
-      durationMin,
-      createdBy,
-    },
-  );
+  const endMin = Number(startMin) + Number(durationMin);
+  // Overlap check + insert ATOMICALLY: the controller's pre-check is a friendly early 409, but two concurrent
+  // bookings could both pass it and both insert (double-book). Serialize per-provider by locking the
+  // provider's user row FOR UPDATE, then RE-CHECK overlap inside the transaction before inserting — so the
+  // provider's schedule can never be double-booked by a race. (MySQL has no range-exclusion constraint.)
+  await withTransaction(async (exec) => {
+    await exec('SELECT id FROM users WHERE id = :pid FOR UPDATE', { pid: providerId });
+    const [ov] = await exec(
+      `SELECT uuid FROM appointments
+        WHERE provider_id = :pid AND appt_date = :date AND status <> 'cancelled'
+          AND start_min < :endMin AND (start_min + duration_min) > :startMin LIMIT 1`,
+      { pid: providerId, date, endMin, startMin },
+    );
+    if (ov[0]) { const e = new Error('This time overlaps an existing appointment for the provider.'); e.status = 409; e.code = 'APPT_OVERLAP'; throw e; }
+    await exec(
+      `INSERT INTO appointments
+         (uuid, provider_id, rendering_provider_id, title_enc, patient_name_enc, patient_uuid, appt_type, procedure_code, appt_date, start_min, duration_min, status, created_by)
+       VALUES
+         (:uuid, :pid, :rpid, :titleEnc, :patientEnc, :patientUuid, :type, :proc, :date, :startMin, :durationMin, 'scheduled', :createdBy)`,
+      {
+        uuid, pid: providerId, rpid: renderingProviderId || null,
+        titleEnc: encrypt(title), patientEnc: patient ? encrypt(patient) : null, patientUuid: patientUuid || null,
+        type, proc: procedureCode || null, date, startMin, durationMin, createdBy,
+      },
+    );
+  });
   return toPublicAppointment(await getRawByUuid(uuid));
 }
 

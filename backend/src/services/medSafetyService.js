@@ -291,7 +291,7 @@ export async function checkRxSafety({ name, rxcui = '', allergies = '', currentD
   // are the SAME ingredient clinically, so compare on the salt-stripped base too — otherwise a same-drug
   // duplicate ordered as a different salt would be silently missed.
   const baseIngredients = ingredients.map(stripSalts);
-  for (const raw of (Array.isArray(currentDrugs) ? currentDrugs : [])) {
+  for (const raw of (Array.isArray(currentDrugs) ? currentDrugs.slice(0, 50) : [])) { // bound: real med lists are far under 50
     const d = String(raw == null ? '' : raw).slice(0, 500);   // elements may be non-strings — coerce safely
     if (!d || d.toLowerCase() === name.toLowerCase()) continue;
     const dIngs = ingredientsFromName(d);

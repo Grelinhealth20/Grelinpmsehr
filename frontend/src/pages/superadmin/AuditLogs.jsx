@@ -143,7 +143,15 @@ function fmtRel(t) {
     return usDate(t); // older than a week → mm/dd/yyyy
   } catch { return ''; }
 }
-const csvEscape = (v) => { const s = String(v ?? ''); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+const csvEscape = (v) => {
+  // Neutralize spreadsheet formula/macro injection: a cell that begins with = + - @ (or a control char that
+  // some parsers treat as a leading token) is executed as a formula when the exported log is opened in
+  // Excel/Sheets. Audit rows carry externally-influenced text (e.g. fax-ingested provider/patient names), so
+  // prefix a single quote to force such a cell to render as literal text. Then apply standard CSV quoting.
+  let s = String(v ?? '');
+  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
 const outcomeOf = (e) => ((e.outcome === 'failure' || e.outcome === 'error') ? 'fail' : e.outcome === 'skipped' ? 'skip' : 'ok');
 const OUTCOME_LABEL = { ok: 'Successful', fail: 'Unsuccessful', skip: 'No change' };
 

@@ -10,10 +10,13 @@
  */
 import { execute } from '../db/pool.js';
 import { decrypt } from '../utils/crypto.js';
+import { logger } from '../config/logger.js';
 import {
   RVU_YEAR, PAYABLE_STATUS, PROVIDER_SHARE, GROUP_SHARE, providerRatePerWorkRvu,
   conversionFactor, localityFor, providerType, DEFAULT_LOCALITY, posSetting, posForNoteType,
+  medicareFactorForType,
 } from './payscaleConfig.js';
+import { isNppDifferentialEnabled } from './settingsService.js';
 
 const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 
@@ -109,6 +112,7 @@ export async function providerPayscale(providerId, { from = null, to = null, cre
   const [rows] = await execute(
     `SELECT n.id AS note_id, c.code, c.description, COALESCE(c.units, 1) AS units, n.note_type AS note_type, n.pos_code AS pos_code,
             ${modCase} AS price_mod,
+            mm.work_rvu AS mm_work_rvu,
             COALESCE(mm.work_rvu, mb.work_rvu) AS work_rvu,
             COALESCE(mm.fac_pe_rvu, mb.fac_pe_rvu) AS fac_pe_rvu,
             COALESCE(mm.nonfac_pe_rvu, mb.nonfac_pe_rvu) AS nonfac_pe_rvu,
@@ -132,6 +136,11 @@ export async function providerPayscale(providerId, { from = null, to = null, cre
     const inDataset = r.work_rvu != null || r.conv_factor != null;
     if (!inDataset) { unpriced.add(r.code); continue; }                 // not in the MPFS RVU file
     if (r.status_code && !PAYABLE_STATUS.has(r.status_code)) continue;  // not separately payable by RVUs
+    // A TECHNICAL-COMPONENT (-TC) line carries NO professional work. If the code has a real TC row, its
+    // work is 0 (skipped below). But a GLOBAL-only code billed -TC has no TC row, so COALESCE falls back to
+    // the base row's full work — an overpay. Guard: when the pricing modifier is TC and no TC-specific MPFS
+    // row matched (mm_work_rvu IS NULL), the provider earns no work on that technical-only line.
+    if (r.price_mod === 'TC' && r.mm_work_rvu == null) continue;
     const work = Number(r.work_rvu) || 0;
     if (work <= 0) continue;                                            // no work RVU (e.g. -TC) → no provider pay
     if (datasetCf == null && Number(r.conv_factor) > 0) datasetCf = Number(r.conv_factor);
@@ -148,17 +157,25 @@ export async function providerPayscale(providerId, { from = null, to = null, cre
     byCode.set(key, agg);
   }
 
+  // If payable work exists but NO row carried a conversion factor, the MPFS dataset is incomplete for these
+  // codes and we are pricing on the hardcoded standard CF. Don't do that silently — log loudly so the
+  // dataset gap is visible (real MPFS rows always carry a CF).
+  if (paidNoteIds.size > 0 && datasetCf == null) logger.warn({ providerId, year: RVU_YEAR }, 'payscale: payable codes had no conversion_factor in mpfs_rvu — using standard CF fallback');
   const cf = conversionFactor(cfKind, datasetCf);      // live dataset CF (standard) or CMS APM CF
   const rate = providerRatePerWorkRvu(cf, gpci.work);  // DERIVED: 60% × CF × PW-GPCI (→ $20.0405 in FL)
+  // NPP Medicare differential (super-admin toggle; OFF by default → factor 1.0 for everyone). Applied to
+  // THIS provider by their type: NPP → 0.85 of the Medicare value/pay/fee, physician → 1.0. Work RVUs are
+  // unchanged (same work performed) — only the $ amounts carry the differential.
+  const factor = medicareFactorForType(providerType(credentials), await isNppDifferentialEnabled());
   const lines = [];
   let totalWorkRvu = 0, providerPay = 0, medicareWorkValue = 0, fullFeeRef = 0;
   for (const a of byCode.values()) {
     const totWork = a.workRvu * a.units;
-    const linePay = round2(totWork * rate);                                          // pay: round the total (workbook Step 7)
-    const lineWorkValue = round2(a.units * round2(a.workRvu * gpci.work * cf));       // Work value = Work RVU × PW-GPCI × CF
+    const linePay = round2(totWork * rate * factor);                                 // pay: round the total (workbook Step 7)
+    const lineWorkValue = round2(a.units * round2(a.workRvu * gpci.work * cf * factor)); // Work value = Work RVU × PW-GPCI × CF
     const pe = a.setting === 'facility' ? a.fac_pe : a.nonfac_pe;                     // POS-driven PE (facility vs non-facility)
-    const perEncFee = round2((a.workRvu * gpci.work + pe * gpci.pe + a.mp * gpci.mp) * cf);
-    const lineFee = round2(a.units * perEncFee);                                      // full FL physician fee (reference only)
+    const perEncFee = round2((a.workRvu * gpci.work + pe * gpci.pe + a.mp * gpci.mp) * cf * factor);
+    const lineFee = round2(a.units * perEncFee);                                      // FL allowed amount (reference; NPP-adjusted when enabled)
     totalWorkRvu += totWork;
     providerPay += linePay;
     medicareWorkValue += lineWorkValue;
@@ -249,6 +266,7 @@ export async function providerMonthlyStatement(providerId, { year, month, creden
   }
   const cf = conversionFactor(cfKind, datasetCf);
   const rate = providerRatePerWorkRvu(cf, locality.gpci.work);
+  const factor = medicareFactorForType(providerType(credentials), await isNppDifferentialEnabled()); // NPP 0.85 when enabled
   const lines = [];
   // FLAT statement rows: one per (procedure code + POS + week) with encounters and pay for that week. The
   // per-week pays are RECONCILED so each code's weeks sum EXACTLY to that code's period pay (the penny of
@@ -257,12 +275,12 @@ export async function providerMonthlyStatement(providerId, { year, month, creden
   const stmtRows = [];
   let totalPay = 0, totalEnc = 0;
   for (const a of byCode.values()) {
-    const linePay = round2(a.work * a.total * rate);
+    const linePay = round2(a.work * a.total * rate * factor);
     totalPay += linePay; totalEnc += a.total;
     lines.push({ code: a.code, description: a.description, weeks: a.weeks, encounters: a.total, placeOfService: a.placeOfService, pay: linePay, workRvu: a.work });
     // Per-week rows for weeks that had encounters, reconciled to linePay.
     const wkRows = [];
-    a.weeks.forEach((enc, i) => { if (enc > 0) wkRows.push({ week: i + 1, code: a.code, modifier: a.modifier || undefined, description: a.description, placeOfService: a.placeOfService, encounters: enc, pay: round2(a.work * enc * rate) }); });
+    a.weeks.forEach((enc, i) => { if (enc > 0) wkRows.push({ week: i + 1, code: a.code, modifier: a.modifier || undefined, description: a.description, placeOfService: a.placeOfService, encounters: enc, pay: round2(a.work * enc * rate * factor) }); });
     const drift = round2(linePay - wkRows.reduce((s, w) => s + w.pay, 0));
     if (drift !== 0 && wkRows.length) { // absorb the rounding penny into the busiest week
       let bi = 0; for (let i = 1; i < wkRows.length; i++) if (wkRows[i].encounters > wkRows[bi].encounters) bi = i;
@@ -340,26 +358,30 @@ export async function adminProviderPayscale({ facilityUuid = null, providerUuid 
   }
   const cf = conversionFactor(cfKind, datasetCf);
   const rate = providerRatePerWorkRvu(cf);
+  const nppDiff = await isNppDifferentialEnabled(); // super-admin toggle; OFF → every provider same $/wRVU
   const providers = [];
   let totalPay = 0, totalEnc = 0, totalWrvu = 0, totalMedValue = 0, totalGroup = 0;
   for (const p of byProv.values()) {
+    let creds = []; try { creds = Array.isArray(p.credentials) ? p.credentials : JSON.parse(p.credentials || '[]'); } catch { creds = []; }
+    const ptype = providerType(creds);
+    const factor = medicareFactorForType(ptype, nppDiff); // NPP→0.85 when enabled, else 1.0
     let pay = 0, wrvu = 0, enc = 0, medValue = 0;
-    // Per line: provider pay = round2(work×units×rate) [60%]; Medicare Work-RVU value = round2(work×units×CF)
-    // [100%]; group share = value − pay [40%]. Summed per provider (each line rounded, matching the workbook).
-    for (const cc of p.codes) { pay += round2(cc.work * cc.units * rate); wrvu += cc.work * cc.units; enc += cc.units; medValue += round2(cc.work * cc.units * cf); }
+    // Per line: provider pay = round2(work×units×rate×factor) [60% of the (NPP-adjusted) Medicare value];
+    // Medicare Work-RVU value = round2(work×units×CF×factor); group share = value − pay [40%]. Work RVUs
+    // themselves are UNCHANGED (same work performed) — only the $ value/pay carry the NPP differential.
+    for (const cc of p.codes) { pay += round2(cc.work * cc.units * rate * factor); wrvu += cc.work * cc.units; enc += cc.units; medValue += round2(cc.work * cc.units * cf * factor); }
     pay = round2(pay); medValue = round2(medValue); const group = round2(medValue - pay);
     totalPay += pay; totalEnc += enc; totalWrvu += wrvu; totalMedValue += medValue; totalGroup += group;
-    let creds = []; try { creds = Array.isArray(p.credentials) ? p.credentials : JSON.parse(p.credentials || '[]'); } catch { creds = []; }
     providers.push({
       providerUuid: p.providerUuid,
       name: p.nameEnc ? (() => { try { return decrypt(p.nameEnc); } catch { return '—'; } })() : '—',
-      providerType: providerType(creds),
+      providerType: ptype, medicareFactor: factor,
       encounters: enc, workRvu: round2(wrvu), medicareValue: medValue, groupShare: group, providerPay: pay,
     });
   }
   providers.sort((a, b) => b.providerPay - a.providerPay || String(a.providerUuid).localeCompare(String(b.providerUuid)));
   return {
-    conversionFactor: cf, providerRatePerWorkRvu: rate,
+    conversionFactor: cf, providerRatePerWorkRvu: rate, nppDifferential: nppDiff,
     providerCount: providers.length, totalEncounters: totalEnc,
     totalWorkRvu: round2(totalWrvu), totalMedicareValue: round2(totalMedValue), totalGroupShare: round2(totalGroup), totalPay: round2(totalPay),
     providers,

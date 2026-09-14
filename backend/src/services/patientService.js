@@ -211,6 +211,40 @@ export async function createPatient({ providerId, demographics, insurance, facil
   return toPublicPatient(await getRawByUuid(uuid));
 }
 
+/**
+ * Merge a client face-sheet PATCH onto the FRESHEST server record (called inside the row lock). The client
+ * always posts a full snapshot loaded earlier, so a naive overwrite would silently drop payer-verified data
+ * written by a concurrent eligibility verify (MBI, group, and the read-only `benefits` block the face sheet
+ * never edits). Rule: user-editable fields (payer, memberId, plan, demographics, facility, contacts) take the
+ * client's value; a per-policy `benefits` block and payer-authoritative mbi/group are PRESERVED from the
+ * fresh server copy whenever the incoming policy carries no newer verification — so a demographics edit can
+ * never wipe a just-verified benefits result. Only sections the client actually included are returned.
+ */
+export function mergePatientPatch(fresh, patch) {
+  const out = {};
+  if (patch.demographics !== undefined) out.demographics = patch.demographics;
+  if (patch.facility !== undefined) out.facility = patch.facility;
+  if (patch.emergencyContacts !== undefined) out.emergencyContacts = patch.emergencyContacts;
+  else if (patch.emergencyContact !== undefined) out.emergencyContact = patch.emergencyContact;
+  if (patch.insurance !== undefined) {
+    const server = Array.isArray(fresh?.insurance) ? fresh.insurance : [];
+    const verified = (b) => b && b.eligibilityStatus && b.eligibilityStatus !== 'not_verified';
+    out.insurance = (Array.isArray(patch.insurance) ? patch.insurance : []).map((pol, i) => {
+      const srv = server[i];
+      if (!srv) return pol;
+      const merged = { ...pol };
+      // Preserve the payer-verified benefits block unless the client itself carries a verified one (i.e. the
+      // user didn't just clear a verification by saving a stale/blank face sheet over it).
+      if (verified(srv.benefits) && !verified(pol.benefits)) merged.benefits = srv.benefits;
+      // Preserve payer-authoritative identifiers the face sheet doesn't edit, when the client left them blank.
+      if (srv.mbi && !pol.mbi) merged.mbi = srv.mbi;
+      if (srv.group && !pol.group) merged.group = srv.group;
+      return merged;
+    });
+  }
+  return out;
+}
+
 /** Encode a partial patient patch into SQL SET fragments + bound params. */
 function buildPatientSets({ demographics, insurance, facility, emergencyContact, emergencyContacts }) {
   const sets = [];
@@ -256,12 +290,17 @@ export async function applyPatientUpdateLocked(uuid, mergeFn) {
   return withTransaction(async (exec) => {
     const [rows] = await exec('SELECT * FROM patients WHERE uuid = :uuid FOR UPDATE', { uuid });
     if (!rows[0]) return null;
-    // Read-modify-write guard: NEVER merge onto a silently-blanked snapshot. demographics_enc is
-    // NOT NULL, so if it fails to decrypt the row is corrupt — abort loudly rather than risk
-    // overwriting real PHI (name/insurance) with an empty merge. (A null column is impossible here.)
-    if (rows[0].demographics_enc) {
-      try { JSON.parse(decrypt(rows[0].demographics_enc)); }
-      catch { const e = new Error('Patient record could not be decrypted — update aborted to protect the record.'); e.status = 422; e.code = 'PATIENT_UNREADABLE'; throw e; }
+    // Read-modify-write guard: NEVER merge onto a silently-blanked snapshot. If ANY encrypted PHI column
+    // is present but fails to decrypt, the row is corrupt — abort loudly rather than risk overwriting real
+    // PHI with an empty reconstruction. This covers demographics AND insurance/facility/emergency, because
+    // toPublicPatient renders an undecryptable column as {}/[] and the merge would then persist that blank
+    // over the real (but unreadable) data — a silent, permanent loss. (A null column is legitimately empty
+    // and skipped; only a PRESENT-but-undecryptable blob aborts.)
+    for (const col of ['demographics_enc', 'insurance_enc', 'facility_enc', 'emergency_enc']) {
+      if (rows[0][col]) {
+        try { JSON.parse(decrypt(rows[0][col])); }
+        catch { const e = new Error('Patient record could not be decrypted — update aborted to protect the record.'); e.status = 422; e.code = 'PATIENT_UNREADABLE'; throw e; }
+      }
     }
     const patch = mergeFn(toPublicPatient(rows[0])) || {};
     const { sets, params } = buildPatientSets(patch);

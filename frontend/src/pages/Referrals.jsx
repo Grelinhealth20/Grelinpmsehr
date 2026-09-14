@@ -510,7 +510,10 @@ function ReferralDetail({ uuid, facilities = [], onClose, onChanged }) {
     setPdfBusy(true);
     try {
       const res = await referralsApi.pdf(uuid);
-      const url = URL.createObjectURL(res.data);
+      // Pin the blob MIME to application/pdf — same hardening as the received-fax path below. This letter is
+      // server-generated (lower risk), but both feed the same viewer iframe, so keep the handling consistent
+      // so the iframe can only ever invoke the browser PDF viewer, never execute markup.
+      const url = URL.createObjectURL(new Blob([res.data], { type: 'application/pdf' }));
       setPdfUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return url; });
     } catch (e) { toast.error(toApiError(e).message); } finally { setPdfBusy(false); }
   }, [uuid, toast]);

@@ -319,6 +319,9 @@ export async function updateNote(req, res, next) {
     const result = await updateNoteSvc(req.params.noteUuid, req.authUserId, req.body);
     if (!result) return res.status(404).json({ error: 'Note not found.', code: 'NOT_FOUND' });
     if (result.locked) return res.status(409).json({ error: 'This note is signed and can no longer be edited.', code: 'NOTE_SIGNED' });
+    // Optimistic-concurrency conflict: the note was edited elsewhere since the client last loaded it. Return
+    // the current revision so the client can refetch, re-merge its edits, and retry — never a silent clobber.
+    if (result.conflict) return res.status(409).json({ error: 'This note was updated in another session. Reloading the latest version.', code: 'NOTE_CONFLICT', currentRev: result.currentRev });
     await recordAudit({ actorUserId: req.authUserId, action: 'encounter.note.update', entityType: 'encounter_note', entityId: req.params.noteUuid, ...ctx(req) });
     res.json({ note: result });
   } catch (err) { next(err); }

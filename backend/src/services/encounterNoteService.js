@@ -216,7 +216,7 @@ export async function getNote(noteUuid, providerId) {
   const params = { u: noteUuid };
   const access = noteAccess(scope, providerId, params);
   const [rows] = await execute(
-    `SELECT n.uuid, n.note_type, n.reason, n.content_enc, n.status, n.billing_ready, n.signed_by_name, n.pos_code,
+    `SELECT n.uuid, n.note_type, n.reason, n.content_enc, n.content_rev, n.status, n.billing_ready, n.signed_by_name, n.pos_code,
         DATE_FORMAT(n.signed_at, '%Y-%m-%dT%H:%i:%sZ') AS signed_at,
         (e.provider_id = :pid) AS is_owner
       FROM encounter_notes n
@@ -229,7 +229,7 @@ export async function getNote(noteUuid, providerId) {
   if (!r) return null;
   return {
     uuid: r.uuid, noteType: r.note_type, reason: r.reason,
-    content: parseNoteBody(r.content_enc),
+    content: parseNoteBody(r.content_enc), contentRev: r.content_rev ?? 0,
     status: r.status, billingReady: !!r.billing_ready,
     signedByName: r.signed_by_name, signedAt: r.signed_at, pos: r.pos_code || null,
     isOwner: !!Number(r.is_owner),
@@ -262,11 +262,17 @@ export async function deleteNote(noteUuid, providerId) {
     const e = new Error('Signed notes cannot be deleted. Amend the note instead to correct the record.');
     e.status = 409; e.code = 'NOTE_SIGNED'; throw e;
   }
-  // Remove captured codes first (no FK orphan), then the draft note itself. Re-check status = 'draft' in
-  // the DELETE so a concurrent sign can never race a delete of a now-signed note. No fallback.
-  await execute('DELETE FROM encounter_note_codes WHERE note_id = :id', { id: r.id });
-  const [del] = await execute("DELETE FROM encounter_notes WHERE id = :id AND status = 'draft'", { id: r.id });
-  if (!del.affectedRows) { const e = new Error('Signed notes cannot be deleted.'); e.status = 409; e.code = 'NOTE_SIGNED'; throw e; }
+  // Delete codes + note ATOMICALLY, guarded against a concurrent sign. Both deletes run in ONE transaction
+  // that first re-locks the note row (FOR UPDATE) and re-checks status='draft' — so if a sign wins the race
+  // and flips the note to signed, we abort the WHOLE transaction (NOTE_SIGNED) and the note keeps its codes.
+  // Previously the code-delete ran unguarded and outside a transaction, so a raced sign could leave the
+  // now-signed note stripped of its billing codes (silent data loss) while the note itself survived.
+  await withTransaction(async (exec) => {
+    const [lk] = await exec("SELECT status FROM encounter_notes WHERE id = :id FOR UPDATE", { id: r.id });
+    if (!lk[0] || lk[0].status !== 'draft') { const e = new Error('Signed notes cannot be deleted.'); e.status = 409; e.code = 'NOTE_SIGNED'; throw e; }
+    await exec('DELETE FROM encounter_note_codes WHERE note_id = :id', { id: r.id });
+    await exec("DELETE FROM encounter_notes WHERE id = :id AND status = 'draft'", { id: r.id });
+  });
   logger.info({ noteUuid, providerId }, 'Draft clinical note deleted');
   return { ok: true, noteType: r.note_type };
 }
@@ -338,10 +344,14 @@ export async function saveNoteCodes(noteUuid, providerId, { diagnoses = [], proc
         null, null, (String(p.modifiers ?? '')).slice(0, 20) || null, Number.isFinite(units) ? units : null, 0, i]);
     }
   });
-  // Replace codes ATOMICALLY: the old delete-then-insert was not transactional, so an INSERT error
-  // (bad row, oversized batch) left the note's codes permanently deleted while returning 500. A
-  // transaction rolls back the delete on any failure, so codes are never lost.
+  // Replace codes ATOMICALLY, and re-lock + re-check status='draft' INSIDE the transaction so a concurrent
+  // sign can't be raced: if the note was signed between findDraft (line 304) and here, we abort (locked)
+  // rather than replacing the now-signed, immutable note's codes. The transaction also rolls back the delete
+  // if the INSERT fails, so codes are never left deleted.
+  let raced = false;
   await withTransaction(async (exec, conn) => {
+    const [lk] = await exec("SELECT status FROM encounter_notes WHERE id = :id FOR UPDATE", { id: r.id });
+    if (!lk[0] || lk[0].status !== 'draft') { raced = true; return; } // signed after our read — do not touch
     await exec('DELETE FROM encounter_note_codes WHERE note_id = :id', { id: r.id });
     if (rows.length) {
       await conn.query(
@@ -349,6 +359,7 @@ export async function saveNoteCodes(noteUuid, providerId, { diagnoses = [], proc
          VALUES ?`, [rows]);
     }
   });
+  if (raced) return { locked: true };
   return { saved: rows.length };
 }
 
@@ -362,6 +373,16 @@ export async function saveNoteCodes(noteUuid, providerId, { diagnoses = [], proc
  * the final signed content, so it is authoritative (not client-supplied) and, being deterministic,
  * matches exactly what the provider reviewed before signing.
  */
+/** Deterministic diagnosis fingerprint of a note's content — the sorted set of predicted ICD-10 codes.
+ *  Used to decide whether an AMENDMENT changed the diagnoses (→ recode) or was narrative-only (→ preserve
+ *  the coder's curated codes). Diagnoses are POS-independent; the same POS is passed for both sides. */
+async function predictedDxKey(content, noteType, pos) {
+  const pred = await predictEncounterCoding(content || {}, { noteType, pos });
+  return [...new Set((pred.diagnoses || [])
+    .map((d) => (d && d.icd ? String(d.icd).toUpperCase().trim() : ''))
+    .filter(Boolean))].sort().join('|');
+}
+
 async function persistPredictedCodes(noteId, content, noteType, { replace = false } = {}) {
   if (!replace) {
     const [existing] = await execute('SELECT COUNT(*) AS n FROM encounter_note_codes WHERE note_id = :id', { id: noteId });
@@ -484,14 +505,14 @@ export async function createNote({ encounterUuid, providerId, noteType, reason, 
 
 async function findDraft(noteUuid, providerId) {
   const [rows] = await execute(
-    `SELECT n.id, n.status FROM encounter_notes n JOIN encounters e ON e.id = n.encounter_id
+    `SELECT n.id, n.status, n.content_rev FROM encounter_notes n JOIN encounters e ON e.id = n.encounter_id
       WHERE n.uuid = :u AND e.provider_id = :pid LIMIT 1`,
     { u: noteUuid, pid: providerId },
   );
   return rows[0] || null;
 }
 
-export async function updateNote(noteUuid, providerId, { content, reason, noteType, pos }) {
+export async function updateNote(noteUuid, providerId, { content, reason, noteType, pos, baseRev } = {}) {
   const r = await findDraft(noteUuid, providerId);
   if (!r) return null;
   if (r.status === 'signed') return { locked: true }; // signed notes are immutable
@@ -499,7 +520,20 @@ export async function updateNote(noteUuid, providerId, { content, reason, noteTy
   const params = { id: r.id };
   // Only overwrite content when the caller actually sends it — a metadata-only
   // PATCH (e.g. reason/noteType/pos) must NOT wipe the existing draft body (PHI loss).
-  if (content !== undefined) { sets.push('content_enc = :content'); params.content = content ? encrypt(JSON.stringify(content)) : null; }
+  if (content !== undefined) {
+    // MERGE the incoming top-level sections over the CURRENT stored body rather than blindly replacing it, so
+    // a partial/empty body can never silently drop populated sections it omitted (and two editors don't wipe
+    // each other's untouched sections). The client sends the full body, so this is effectively a replace in
+    // normal use — it is a guard. parseNoteBody is fail-loud (422) on an undecryptable body, so we never
+    // merge onto a blanked record. An explicit null still clears the body.
+    let toStore = content;
+    if (content && typeof content === 'object') {
+      const [cur] = await execute('SELECT content_enc FROM encounter_notes WHERE id = :id LIMIT 1', { id: r.id });
+      const existing = cur[0]?.content_enc ? parseNoteBody(cur[0].content_enc) : {};
+      toStore = { ...existing, ...content };
+    }
+    sets.push('content_enc = :content', 'content_rev = content_rev + 1'); params.content = toStore ? encrypt(JSON.stringify(toStore)) : null;
+  }
   if (reason !== undefined) { sets.push('reason = :reason'); params.reason = reason || null; }
   if (noteType !== undefined) { sets.push('note_type = :type'); params.type = noteType; }
   // Place of Service override — the provider sets the ACTUAL POS for this encounter (a SNF provider may
@@ -507,10 +541,20 @@ export async function updateNote(noteUuid, providerId, { content, reason, noteTy
   // CMS POS is stored (never inferred/fabricated); an empty/invalid value is ignored, keeping the current.
   if (pos !== undefined) { const posCode = String(pos).replace(/\D/g, '').slice(0, 4); if (posCode) { sets.push('pos_code = :pos'); params.pos = posCode; } }
   if (!sets.length) return getNote(noteUuid, providerId); // nothing to change
-  // `AND status = 'draft'` makes the DB the arbiter: if a concurrent sign/amend
-  // flipped this note to signed between our read and write, this update no-ops.
-  const [res] = await execute(`UPDATE encounter_notes SET ${sets.join(', ')} WHERE id = :id AND status = 'draft'`, params);
-  if (res.affectedRows === 0) return { locked: true }; // raced into signed — immutable
+  // OPTIMISTIC CONCURRENCY: when the caller sends a content change WITH the baseRev it last loaded, guard the
+  // write on `content_rev = :baseRev` so a stale editor can't silently clobber a newer concurrent edit. On a
+  // mismatch we return { conflict, currentRev } and the client reconciles (refetch + retry the merge). When no
+  // baseRev is sent (legacy callers / metadata-only), behaviour is unchanged. `AND status='draft'` still makes
+  // the DB the arbiter of the draft→signed transition.
+  const revGuard = (content !== undefined && baseRev != null) ? ' AND content_rev = :baseRev' : '';
+  if (revGuard) params.baseRev = Number(baseRev);
+  const [res] = await execute(`UPDATE encounter_notes SET ${sets.join(', ')} WHERE id = :id AND status = 'draft'${revGuard}`, params);
+  if (res.affectedRows === 0) {
+    // Distinguish a raced-into-signed note (immutable) from a stale-revision conflict (concurrent edit).
+    const [chk] = await execute('SELECT status, content_rev FROM encounter_notes WHERE id = :id LIMIT 1', { id: r.id });
+    if (!chk[0] || chk[0].status !== 'draft') return { locked: true };
+    return { conflict: true, currentRev: chk[0].content_rev };
+  }
   return getNote(noteUuid, providerId);
 }
 
@@ -633,7 +677,7 @@ export async function amendSignedNote(noteUuid, providerId, { content, reason } 
   const sp = { u: noteUuid };
   const access = noteAccess(scope, providerId, sp);
   const [srows] = await execute(
-    `SELECT n.id, n.status, n.note_type, n.created_by, n.content_enc FROM encounter_notes n
+    `SELECT n.id, n.status, n.note_type, n.created_by, n.content_enc, n.pos_code FROM encounter_notes n
        JOIN encounters e ON e.id = n.encounter_id
        LEFT JOIN patients p ON p.id = e.patient_id
       WHERE n.uuid = :u AND ${access} LIMIT 1`,
@@ -653,10 +697,25 @@ export async function amendSignedNote(noteUuid, providerId, { content, reason } 
   const [res] = await execute(`UPDATE encounter_notes SET ${sets.join(', ')} WHERE id = :id AND status = 'signed'`, params);
   if (res.affectedRows === 0) return null;
   const amended = await getNote(noteUuid, providerId);
-  // Re-derive the billing codes from the AMENDED content (replace), so the downloaded record and FHIR
-  // reflect the corrected diagnoses — not the codes captured at the original signature. Best-effort.
-  try { await persistPredictedCodes(r.id, finalContent, r.note_type, { replace: true }); }
-  catch (e) { logger.error({ err: e.message, noteId: r.id }, 'amend-time billing-code refresh failed (amend IS saved; codes can be regenerated)'); }
+  // Re-derive billing codes on amend ONLY when the DIAGNOSES actually changed — so a narrative-only
+  // amendment (e.g. an HPI typo fix) NEVER silently overwrites the coder's hand-curated CPT/modifiers/units.
+  // If the amendment changed the diagnosis set (added/removed/altered dx), recode so the record + FHIR stay
+  // in sync; if the note currently has no codes at all, derive them (fill-empty). Best-effort (amend is
+  // already committed). Compares the pre-amend stored body against the amended body via the deterministic
+  // predicted-ICD fingerprint (same POS both sides).
+  try {
+    const [cnt] = await execute('SELECT COUNT(*) AS n FROM encounter_note_codes WHERE note_id = :id', { id: r.id });
+    const hasCodes = Number(cnt[0]?.n) > 0;
+    let recode = !hasCodes;
+    if (hasCodes) {
+      const pos = r.pos_code || null;
+      const preDx = await predictedDxKey(parseNoteBody(r.content_enc), r.note_type, pos);
+      const postDx = await predictedDxKey(finalContent, r.note_type, pos);
+      recode = preDx !== postDx;
+    }
+    if (recode) await persistPredictedCodes(r.id, finalContent, r.note_type, { replace: true });
+    else logger.info({ noteId: r.id }, 'amend: diagnoses unchanged — curated billing codes preserved (no recode)');
+  } catch (e) { logger.error({ err: e.message, noteId: r.id }, 'amend-time billing-code refresh failed (amend IS saved; codes can be regenerated)'); }
   // Best-effort (see signNote): the amendment is already committed; a doc-gen failure must not 500 the
   // request or skip the amend audit.
   try { await generateSignedDoc(r.id, amended, signerName); }

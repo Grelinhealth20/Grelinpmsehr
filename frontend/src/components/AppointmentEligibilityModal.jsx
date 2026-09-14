@@ -28,8 +28,10 @@ export default function AppointmentEligibilityModal({ appointment, onClose, onCh
   const [err, setErr] = useState('');
 
   const load = useCallback(async () => {
-    try { const { data } = await appointmentsApi.eligibility(appointment.uuid); setCheck(data.check || null); }
-    catch { setCheck(null); }
+    // Don't conflate a LOAD FAILURE with "no eligibility on file" — surface the error so the user knows the
+    // existing result couldn't be loaded, rather than silently showing "none".
+    try { const { data } = await appointmentsApi.eligibility(appointment.uuid); setCheck(data.check || null); setErr(''); }
+    catch (e) { setCheck(null); setErr(`Couldn't load eligibility: ${toApiError(e).message}`); }
   }, [appointment.uuid]);
   useEffect(() => { load(); }, [load]);
 

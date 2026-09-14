@@ -349,8 +349,14 @@ export async function latestPrescriptions(providerId, patientUuid) {
       ORDER BY n.created_at DESC LIMIT 40`,
     params,
   );
-  const cf = pickCarryForward(rows.map((r) => ({ content: jsonFromEnc(r.content_enc), date: r.created_at })));
-  return { patientId, ...cf };
+  // content_enc is non-null (WHERE clause), so a null decode = a DECRYPT/parse FAILURE, not an empty note.
+  // Carry-forward would otherwise silently reach PAST an unreadable most-recent note to older (staler) data
+  // and present it as current. Count the unreadable source notes and surface it so the caller can warn the
+  // provider that a previous note couldn't be read (carried meds/vitals may be incomplete) — not silent.
+  const decoded = rows.map((r) => ({ content: jsonFromEnc(r.content_enc), date: r.created_at }));
+  const unreadableSourceNotes = decoded.filter((d) => d.content == null).length;
+  const cf = pickCarryForward(decoded);
+  return { patientId, ...cf, unreadableSourceNotes: unreadableSourceNotes || undefined };
 }
 
 // PURE carry-forward selection (exported for testing): given the patient's notes NEWEST-FIRST, return the

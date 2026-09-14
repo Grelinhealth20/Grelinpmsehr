@@ -14,6 +14,16 @@ import { warmTerminologyCache } from './services/terminologyCache.js';
 import { warmMedSafetyIndex } from './services/medSafetyService.js';
 import { loadPersistedFaxCredentials } from './services/faxService.js';
 import { startFaxReconciler } from './services/faxReconciler.js';
+import { drainAuditOutbox } from './services/auditService.js';
+
+// Periodically re-chain any audit entries parked in the outbox (when a chained write transiently failed) so a
+// security/PHI event is never permanently unrecorded. Independent of fax being enabled; every failure logged.
+function startAuditOutboxDrain(intervalMs = 60 * 1000) {
+  const tick = () => { drainAuditOutbox().catch((e) => logger.warn({ err: e?.message }, 'audit outbox drain error')); };
+  const timer = setInterval(tick, intervalMs);
+  if (timer.unref) timer.unref(); // never keep the process alive on this timer alone
+  tick(); // immediate catch-up on boot
+}
 
 async function bootstrap() {
   await assertDbConnection();
@@ -24,6 +34,7 @@ async function bootstrap() {
   const faxSt = await loadPersistedFaxCredentials(); // hydrate encrypted Fax.Plus refresh token from DB (survives restart)
   logger.info({ enabled: faxSt.enabled, hasRefreshToken: faxSt.hasRefreshToken }, 'Fax.Plus integration status');
   startFaxReconciler(); // if fax is live, start the no-missed-faxes / no-data-loss reconcile heartbeat
+  startAuditOutboxDrain(); // re-chain any parked audit entries (guarantees no security/PHI event is unlogged)
 
   const app = createApp();
 
@@ -47,6 +58,18 @@ async function bootstrap() {
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
+
+  // FAIL-LOUD, never swallow: a truly unhandled rejection or uncaught exception leaves the process in an
+  // undefined state. Log it with full context (structured, not a silent console warning), then exit so a
+  // supervisor restarts a clean process — we do NOT catch-and-continue on corrupt state (no silent recovery).
+  process.on('unhandledRejection', (reason) => {
+    logger.error({ err: reason instanceof Error ? reason.message : String(reason), stack: reason instanceof Error ? reason.stack : undefined }, 'FATAL: unhandled promise rejection — exiting for a clean restart');
+    process.exit(1);
+  });
+  process.on('uncaughtException', (err) => {
+    logger.error({ err: err?.message, stack: err?.stack }, 'FATAL: uncaught exception — exiting for a clean restart');
+    process.exit(1);
+  });
 }
 
 /**

@@ -137,7 +137,10 @@ export async function token({ body, authHeader }) {
   if (client.confidential) {
     const [, b64] = (authHeader || '').split(' ');
     const [cid, secret] = Buffer.from(b64 || '', 'base64').toString().split(':');
-    if (cid !== client.client_id || !secret || sha256Hex(secret) !== client.client_secret_hash) fail('client authentication failed', 'invalid_client', 401);
+    // Constant-time compare of the hashed secret (mirrors the PKCE path's safeEqual) — a plain !== leaks
+    // hash-byte timing. safeEqual handles length mismatch without throwing; the client_id check stays a
+    // plain compare (it is a public identifier, not a secret).
+    if (cid !== client.client_id || !secret || !safeEqual(sha256Hex(secret), client.client_secret_hash)) fail('client authentication failed', 'invalid_client', 401);
   } else if (bodyClientId && bodyClientId !== rec.client_id) {
     fail('client_id mismatch', 'invalid_client', 401);
   }

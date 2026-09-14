@@ -302,8 +302,12 @@ export default function BenefitsVerification({ patientUuid, insurance, onPatient
       const map = {};
       (data.checks || []).forEach((c) => { map[c.policyIndex] = c; });
       setByPolicy(map);
-    } catch { setByPolicy({}); } finally { setLoading(false); }
-  }, [patientUuid]);
+    } catch (e) {
+      // Do NOT silently blank the panel — a load failure must be distinguishable from "no coverage on file",
+      // or a biller reads it as verified-none. Surface the error and keep any previously-loaded data intact.
+      toast.error(`Couldn't load eligibility: ${toApiError(e).message}`);
+    } finally { setLoading(false); }
+  }, [patientUuid, toast]);
 
   useEffect(() => { load(); }, [load]);
 

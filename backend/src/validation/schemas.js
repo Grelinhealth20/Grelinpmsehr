@@ -346,7 +346,9 @@ export const createNoteSchema = z
   .strict();
 
 export const updateNoteSchema = z
-  .object({ noteType: z.enum(NOTE_TYPES).optional(), reason: noteReason, content: noteContentSchema, pos: notePos })
+  // baseRev = the content revision the client last loaded (optimistic concurrency). When present, the server
+  // rejects the write with 409 NOTE_CONFLICT if the note changed since, so a stale editor can't clobber.
+  .object({ noteType: z.enum(NOTE_TYPES).optional(), reason: noteReason, content: noteContentSchema, pos: notePos, baseRev: z.number().int().min(0).optional() })
   .strict();
 
 export const signNoteSchema = z
@@ -439,5 +441,9 @@ export const setUserFacilitiesSchema = z.object({ facilityUuids: z.array(z.strin
 
 // System settings (super-admin feature flags). Only known boolean flags accepted.
 export const updateSettingsSchema = z
-  .object({ eligibilityEnabled: z.boolean().optional(), faxAutoCreatePatients: z.boolean().optional() })
+  .object({
+    eligibilityEnabled: z.boolean().optional(),
+    faxAutoCreatePatients: z.boolean().optional(),
+    nppMedicareDifferential: z.boolean().optional(),
+  })
   .strict();

@@ -157,7 +157,10 @@ export async function finalize(req, res, next) {
     await recordAudit({
       actorUserId: req.authUserId, action: 'payroll.finalize', entityType: 'pay_period', entityId: `${from}_${to}`,
       ip: req.ip, userAgent: req.get('user-agent'),
-      metadata: { from, to, periodType, providers: result.providers, finalized: result.finalized, updated: result.updated, skipped: result.skipped, facility: facilityUuid || undefined, provider: providerUuid || undefined },
+      // Record failed/failures too — a per-provider failure (e.g. a UNIQUE(note_id) collision) means that
+      // provider was NOT paid this run; it must be auditable after the fact, not just in the HTTP response.
+      outcome: result.failed ? 'error' : 'success',
+      metadata: { from, to, periodType, providers: result.providers, finalized: result.finalized, updated: result.updated, skipped: result.skipped, failed: result.failed, failures: result.failures?.length ? result.failures : undefined, lateLocked: result.lateLocked?.length ? result.lateLocked : undefined, facility: facilityUuid || undefined, provider: providerUuid || undefined },
     });
     res.json(result);
   } catch (err) { next(err); }

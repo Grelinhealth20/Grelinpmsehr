@@ -45,8 +45,18 @@ export async function finalizePeriod({ from, to, periodType = 'monthly', provide
     try {
     const [[ex]] = [await execute('SELECT id, status FROM pay_period_snapshots WHERE provider_id = :pid AND period_from = :from AND period_to = :to LIMIT 1', { pid, from, to })];
     if (ex[0] && ex[0].status === 'finalized') { skipped++; continue; } // already locked — never silently overwrite
+    // Load this provider's credentials so the NPP Medicare differential (super-admin toggle) is applied to
+    // the LOCKED snapshot exactly as it is in the real-time views. Without this, credentials default to []
+    // → providerType 'unspecified' → factor 1.0, silently overpaying NPPs at finalize when the toggle is ON.
+    // Normalize to an ARRAY: providerType() only accepts an array (a raw JSON string → 'unspecified'), and
+    // the driver may return this column as either an array or a JSON string.
+    const [[cred]] = [await execute('SELECT credentials FROM users WHERE id = :pid LIMIT 1', { pid })];
+    const rawCreds = cred[0]?.credentials;
+    const credentials = Array.isArray(rawCreds)
+      ? rawCreds
+      : (typeof rawCreds === 'string' ? (() => { try { return JSON.parse(rawCreds); } catch { return []; } })() : []);
     // excludePaid:true → notes already paid in ANOTHER finalized period are not counted or re-ledgered here.
-    const pay = await providerPayscale(pid, { from, to, cfKind, localityCode });
+    const pay = await providerPayscale(pid, { from, to, credentials, cfKind, localityCode });
     const noteIds = pay.noteIds || [];
     const row = {
       uuid: uuidv4(), pid, periodType, from, to, cfKind, localityCode,
@@ -87,7 +97,37 @@ export async function finalizePeriod({ from, to, periodType = 'monthly', provide
       logger.warn({ providerId: pid, from, to, err: e.message }, 'finalizePeriod: provider skipped due to error (batch continues)');
     }
   }
-  return { from, to, periodType, providers: ids.length, finalized, updated, skipped, failed, failures };
+  // LATE CHARGES IN A LOCKED PERIOD: a note's pay period is its DATE OF SERVICE, but only SIGNED notes are
+  // payable. A note whose DOS falls in an ALREADY-FINALIZED period but which was signed AFTER that period was
+  // locked will never be captured by any future finalize (its period is closed) — a silent underpay. Surface
+  // them (unpaid, signed, payable, DOS inside a finalized snapshot's window) so an admin can reopen+refinalize
+  // or pay them deliberately, rather than losing them silently. Detection only — never auto-pays a locked period.
+  const lateLocked = await findLateChargesInLockedPeriods();
+  if (lateLocked.length) logger.warn({ count: lateLocked.length }, 'finalizePeriod: signed charges found with a DOS inside an already-finalized period (unpaid)');
+  return { from, to, periodType, providers: ids.length, finalized, updated, skipped, failed, failures, lateLocked };
+}
+
+/** Signed, payable, UN-LEDGERED procedure notes whose DATE OF SERVICE falls inside a period already finalized
+ *  for that provider — i.e. charges that arrived (were signed) after their period locked and will never be
+ *  paid by a normal finalize. Returned for admin visibility, not auto-paid. */
+export async function findLateChargesInLockedPeriods() {
+  const DOS = 'COALESCE(e.encounter_date, a.appt_date, DATE(e.created_at))';
+  const [rows] = await execute(
+    `SELECT n.uuid AS note_uuid, u.uuid AS provider_uuid, ${DOS} AS dos,
+            s.period_from, s.period_to
+       FROM encounter_notes n
+       JOIN encounters e ON e.id = n.encounter_id
+       LEFT JOIN appointments a ON a.id = e.appointment_id
+       JOIN users u ON u.id = n.provider_id
+       JOIN encounter_note_codes c ON c.note_id = n.id AND c.kind = 'proc'
+       JOIN pay_period_snapshots s
+         ON s.provider_id = n.provider_id AND s.status = 'finalized'
+        AND ${DOS} >= s.period_from AND ${DOS} < s.period_to
+       LEFT JOIN paid_note_ledger pnl ON pnl.note_id = n.id
+      WHERE n.status = 'signed' AND pnl.note_id IS NULL
+      GROUP BY n.uuid, u.uuid, dos, s.period_from, s.period_to
+      ORDER BY dos`);
+  return rows.map((r) => ({ noteUuid: r.note_uuid, providerUuid: r.provider_uuid, dos: r.dos, lockedPeriodFrom: r.period_from, lockedPeriodTo: r.period_to }));
 }
 
 /** The finalized snapshot for one provider+period (or null). Used by reporting to serve locked pay. */

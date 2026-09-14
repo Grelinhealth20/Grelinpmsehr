@@ -72,13 +72,23 @@ export async function logout(req, res, next) {
 }
 
 export async function me(req, res) {
+  const mfaSatisfied = req.mfaClaim === 'ok';
+  const mfa = { enabled: !!req.mfaEnabled, enrolled: !!req.mfaConfirmed, satisfied: mfaSatisfied };
+  // Withhold the account's professional identity (name / role / NPI / license / specialty) until the SECOND
+  // factor is satisfied — mirroring the login controller, which reveals the full profile only when
+  // `mfaStage === 'ok'`. `/me` is reachable pre-MFA (the client polls it to drive the MFA screens), so a
+  // password-only holder (correct password, no TOTP) must see only the minimal handle here, never the full
+  // profile. Gate strictly on MFA (not password-reset) so the forced-reset flow keeps its identity as before.
+  if (!mfaSatisfied) {
+    return res.json({ user: { uuid: req.user?.uuid }, mustResetPassword: req.mustResetPassword, mfa });
+  }
   // Per-facility feature availability for THIS user (drives which sections the EHR shell shows).
   let referrals = true;
   try { referrals = await referralsEnabledForProvider(req.authUserId); } catch { referrals = true; }
   res.json({
     user: req.user,
     mustResetPassword: req.mustResetPassword,
-    mfa: { enabled: !!req.mfaEnabled, enrolled: !!req.mfaConfirmed, satisfied: req.mfaClaim === 'ok' },
+    mfa,
     features: { referrals },
   });
 }
@@ -144,6 +154,13 @@ export async function mfaRecovery(req, res, next) {
 
 export async function changePassword(req, res, next) {
   try {
+    // This route is deliberately reachable pre-password-settled so the FORCED first-login reset can complete.
+    // But a merely password-authenticated (MFA-unsatisfied) session must NOT be able to rotate the credential
+    // before the second factor unless it is exactly that forced-reset case. Allow only when MFA is satisfied
+    // OR a reset is mandated; otherwise require the second factor first. (currentPassword is still verified.)
+    if (req.mfaClaim !== 'ok' && !req.mustResetPassword) {
+      return res.status(403).json({ error: 'Complete two-factor authentication before changing your password.', code: 'MFA_REQUIRED' });
+    }
     const { currentPassword, newPassword } = req.body;
     await changeOwnPassword(req.user.uuid, currentPassword, newPassword, ctxOf(req));
     // Credentials changed → all sessions revoked. Clear cookies; client re-logs in.

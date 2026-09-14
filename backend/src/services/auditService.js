@@ -41,6 +41,11 @@ function canonicalContent(f) {
  * `audit_chain` head is locked FOR UPDATE inside a transaction so concurrent appends chain in a strict
  * order; any later edit/delete/reorder of a row breaks the chain and is detected by verifyAuditChain().
  * Failures never break the primary request, but are logged loudly (an audit gap is a compliance risk).
+ *
+ * `strict:true` makes the audit FAIL-CLOSED: if the tamper-evident row cannot be written, the error is
+ * rethrown so the caller aborts its action rather than proceeding unrecorded. Use it for the highest-
+ * sensitivity security/PHI events (break-glass emergency access, sign-off/amend, user role/status & MFA
+ * changes) where an unlogged action is unacceptable — an ONC (d)(2) integrity requirement.
  */
 export async function recordAudit({
   actorUserId = null,
@@ -52,44 +57,76 @@ export async function recordAudit({
   ip = null,
   userAgent = null,
   metadata = null,
-}) {
+}, { strict = false } = {}) {
+  // App-generated UTC timestamp stored verbatim (DATETIME, no tz shift) so it is part of the hash and
+  // reproducible at verify time. Built OUTSIDE the try so the catch can durably park the exact entry.
+  const fields = {
+    uuid: uuidv4(), actorUserId, actorEmailBidx, action, entityType,
+    entityId: entityId != null ? String(entityId) : null, outcome, ip,
+    userAgent: userAgent ? userAgent.slice(0, 255) : null, metadata,
+    createdAt: new Date().toISOString().slice(0, 19).replace('T', ' '),
+  };
   try {
-    const uuid = uuidv4();
-    // App-generated UTC timestamp stored verbatim (DATETIME, no tz shift) so it is part of the hash and
-    // reproducible at verify time via DATE_FORMAT.
-    const createdAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
-    const ua = userAgent ? userAgent.slice(0, 255) : null;
-    const fields = { uuid, actorUserId, actorEmailBidx, action, entityType, entityId, outcome, ip, userAgent: ua, metadata, createdAt };
-
-    await withTransaction(async (exec) => {
-      const [[head]] = [await exec('SELECT last_hash FROM audit_chain WHERE id = 1 FOR UPDATE')].map((x) => x[0]);
-      const prevHash = head?.last_hash || GENESIS;
-      const rowHash = sha256Hex(prevHash + canonicalContent(fields));
-      await exec(
-        `INSERT INTO audit_logs
-          (uuid, actor_user_id, actor_email_bidx, action, entity_type, entity_id, outcome, ip, user_agent, metadata, created_at, prev_hash, row_hash)
-         VALUES (:uuid, :actorUserId, :actorEmailBidx, :action, :entityType, :entityId, :outcome, :ip, :userAgent, :metadata, :createdAt, :prevHash, :rowHash)`,
-        {
-          uuid,
-          actorUserId,
-          actorEmailBidx,
-          action,
-          entityType,
-          entityId: entityId != null ? String(entityId) : null,
-          outcome,
-          ip,
-          userAgent: ua,
-          metadata: metadata ? JSON.stringify(metadata) : null,
-          createdAt,
-          prevHash,
-          rowHash,
-        },
-      );
-      await exec('UPDATE audit_chain SET last_hash = :rowHash WHERE id = 1', { rowHash });
-    });
+    await chainAppend(fields);
   } catch (err) {
     logger.error({ err, action }, 'Failed to write audit log');
+    // FAIL-CLOSED (strict security event): the action was NOT completed with a record — abort it so nothing
+    // proceeds unlogged. Nothing to park: the action is being rolled back by the rethrow.
+    if (strict) { const e = new Error('Action blocked: its required audit record could not be written.'); e.status = 503; e.code = 'AUDIT_WRITE_FAILED'; throw e; }
+    // NON-blocking event (e.g. an emergency read or PHI view that must stay available): the action already
+    // happened, so the record must NOT be silently lost. Durably PARK it in the outbox for drainAuditOutbox()
+    // to re-chain — this is a guaranteed-retry, not a degraded fallback (no synthetic success, no data drop).
+    try { await execute('INSERT INTO audit_outbox (payload) VALUES (CAST(:p AS JSON))', { p: JSON.stringify(fields) }); }
+    catch (e2) { logger.error({ err: e2?.message, action }, 'CRITICAL: audit outbox park FAILED — event recorded in logs only'); }
   }
+}
+
+/** Append ONE entry to the tamper-evident hash chain (shared by recordAudit + the outbox drainer). Throws on
+ *  failure so callers decide whether to park/retry. `createdAt` is preserved so a re-chained entry keeps its
+ *  original event time. */
+async function chainAppend(fields) {
+  await withTransaction(async (exec) => {
+    const [[head]] = [await exec('SELECT last_hash FROM audit_chain WHERE id = 1 FOR UPDATE')].map((x) => x[0]);
+    const prevHash = head?.last_hash || GENESIS;
+    const rowHash = sha256Hex(prevHash + canonicalContent(fields));
+    await exec(
+      `INSERT INTO audit_logs
+        (uuid, actor_user_id, actor_email_bidx, action, entity_type, entity_id, outcome, ip, user_agent, metadata, created_at, prev_hash, row_hash)
+       VALUES (:uuid, :actorUserId, :actorEmailBidx, :action, :entityType, :entityId, :outcome, :ip, :userAgent, :metadata, :createdAt, :prevHash, :rowHash)`,
+      {
+        uuid: fields.uuid, actorUserId: fields.actorUserId, actorEmailBidx: fields.actorEmailBidx,
+        action: fields.action, entityType: fields.entityType, entityId: fields.entityId, outcome: fields.outcome,
+        ip: fields.ip, userAgent: fields.userAgent,
+        metadata: fields.metadata ? JSON.stringify(fields.metadata) : null,
+        createdAt: fields.createdAt, prevHash, rowHash,
+      },
+    );
+    await exec('UPDATE audit_chain SET last_hash = :rowHash WHERE id = 1', { rowHash });
+  });
+}
+
+/**
+ * Re-chain any audit entries parked in the outbox (in insertion order) and delete them on success — so a
+ * transient audit-write failure never leaves a security/PHI event permanently unrecorded. Idempotent and
+ * safe to call periodically (wired into the reconcile cycle). Returns counts.
+ */
+export async function drainAuditOutbox(limit = 200) {
+  let drained = 0, failed = 0;
+  const lim = Math.max(1, Math.min(1000, Math.floor(Number(limit)) || 200)); // clamped integer, inlined (LIMIT can't bind)
+  const [rows] = await execute(`SELECT id, payload, attempts FROM audit_outbox ORDER BY id ASC LIMIT ${lim}`);
+  for (const r of rows) {
+    try {
+      const fields = typeof r.payload === 'string' ? JSON.parse(r.payload) : r.payload;
+      await chainAppend(fields);                       // re-append to the chain (preserves original createdAt)
+      await execute('DELETE FROM audit_outbox WHERE id = :id', { id: r.id });
+      drained += 1;
+    } catch (e) {
+      failed += 1;
+      await execute('UPDATE audit_outbox SET attempts = attempts + 1, last_error = :err WHERE id = :id', { err: String(e?.message || 'error').slice(0, 500), id: r.id }).catch(() => {});
+    }
+  }
+  if (drained || failed) logger.info({ drained, failed }, 'audit outbox drain run');
+  return { drained, failed };
 }
 
 /**
@@ -232,7 +269,8 @@ export async function listAudit({
   actorUuid = null, facilityUuid = null, dateFrom = null, dateTo = null, q = null,
 } = {}) {
   const lim = Math.min(Math.max(Math.floor(Number(pageSize)) || 25, 1), 200);
-  const pg = Math.max(Math.floor(Number(page)) || 1, 1);
+  // Clamp the page to a sane ceiling so a caller can't force an enormous OFFSET (needless heavy scan).
+  const pg = Math.min(Math.max(Math.floor(Number(page)) || 1, 1), 100000);
   const off = (pg - 1) * lim;
 
   // SCOPE filters — shared by the summary aggregates AND the page query.

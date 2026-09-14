@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Modal from './Modal.jsx';
 import { useToast } from './Toast.jsx';
-import { patientsApi, encountersApi, toApiError } from '../lib/api.js';
+import { patientsApi, encountersApi, toApiError, openExternalUrl } from '../lib/api.js';
 import BenefitsVerification from './BenefitsVerification.jsx';
 import { EncounterNotesModal, usDate, encNo, loadNoteDefs, loadCustomTemplates, CustomTemplateBuilder, encTypeLabel } from './EncounterNotes.jsx';
 import { NOTE_TYPES, SECTION_LABELS } from '../lib/noteTemplates.js';
@@ -158,7 +158,7 @@ function DropZone({ slot, doc, patientUuid, onChanged, onExtract, disabled }) {
     catch (e) { toast.error(toApiError(e).message); } finally { setBusy(false); }
   }
   async function view() {
-    try { const { data } = await patientsApi.documentUrl(patientUuid, doc.uuid); window.open(data.url, '_blank', 'noopener'); }
+    try { const { data } = await patientsApi.documentUrl(patientUuid, doc.uuid); if (!openExternalUrl(data.url)) throw new Error('Invalid document URL.'); }
     catch (e) { toast.error(toApiError(e).message); }
   }
   async function remove() {
@@ -241,7 +241,7 @@ function RecordsUpload({ patientUuid, docs, onChanged, onExtract, disabled }) {
     }
   }
   async function view(d) {
-    try { const { data } = await patientsApi.documentUrl(patientUuid, d.uuid); window.open(data.url, '_blank', 'noopener'); }
+    try { const { data } = await patientsApi.documentUrl(patientUuid, d.uuid); if (!openExternalUrl(data.url)) throw new Error('Invalid document URL.'); }
     catch (e) { toast.error(toApiError(e).message); }
   }
   async function remove(d) {
@@ -363,7 +363,7 @@ function DocumentsLibrary({ patientUuid, onChanged }) {
   const chips = [{ key: 'all', label: 'All' }, ...DOC_CATEGORIES];
   const cnt = (k) => (k === 'all' ? counts.all : counts[k]);
 
-  async function view(d) { try { const { data: r } = await patientsApi.documentUrl(patientUuid, d.uuid); window.open(r.url, '_blank', 'noopener'); } catch (e) { toast.error(toApiError(e).message); } }
+  async function view(d) { try { const { data: r } = await patientsApi.documentUrl(patientUuid, d.uuid); if (!openExternalUrl(r.url)) throw new Error('Invalid document URL.'); } catch (e) { toast.error(toApiError(e).message); } }
   async function download(d) {
     setBusyId(d.uuid);
     try { const { data: r } = await patientsApi.documentUrl(patientUuid, d.uuid, true); const a = document.createElement('a'); a.href = r.url; a.download = d.fileName || 'document'; a.rel = 'noopener'; document.body.appendChild(a); a.click(); a.remove(); }

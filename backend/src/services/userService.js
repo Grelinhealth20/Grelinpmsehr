@@ -228,7 +228,8 @@ export async function listUsers({ role = null, roles = null, status = null, q = 
   }
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   const lim = Math.max(1, Math.min(100, Math.floor(Number(pageSize)) || 25));
-  const pg = Math.max(1, Math.floor(Number(page)) || 1);
+  // Clamp the page to a sane ceiling so a caller can't force an enormous OFFSET (needless heavy scan).
+  const pg = Math.min(Math.max(1, Math.floor(Number(page)) || 1), 100000);
   const off = (pg - 1) * lim;
   // Page + total in parallel (one effective round-trip). USER_SELECT is a full SELECT…FROM, so the count
   // is a separate query over the same alias/predicate rather than a COUNT(*) OVER() column.

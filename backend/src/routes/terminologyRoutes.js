@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authenticate, requirePasswordSettled } from '../middleware/authenticate.js';
+import { csrfProtection } from '../middleware/csrf.js';
 import { searchTerminology, cachedCount, TERM_SOURCES, umlsEnabled,
   lookupCpt, searchCpt, listCptModifiers, searchSnomed, searchRxnorm, snomedToIcd10cm } from '../services/terminologyService.js';
 import { checkRxSafety } from '../services/medSafetyService.js';
@@ -25,12 +26,16 @@ router.get('/rxnorm', async (req, res, next) => {
 
 // Prescribing safety check — deterministic, fully-local: class-based allergy cross-check + duplicate/
 // therapeutic-duplication, from the UMLS drug-class data (no external API). All params string-coerced.
-// GET /terminology/rx-safety?name=lisinopril 10 MG Oral Tablet&rxcui=...&allergies=penicillin, sulfa&current=aspirin 81 MG|metformin 500 MG
-router.get('/rx-safety', async (req, res, next) => {
+// POST (not GET) with the clinical inputs in the JSON body — the allergy list and active-med list are
+// patient clinical data and must never travel in a URL/query string, where proxy and access logs capture
+// them in plaintext. Body: { name, rxcui?, allergies?, current? }. `current` is '|'-separated meds.
+router.post('/rx-safety', csrfProtection, async (req, res, next) => {
   try {
-    const { name = '', rxcui = '', allergies = '', current = '' } = req.query;
+    const { name = '', rxcui = '', allergies = '', current = '' } = req.body || {};
     if (!String(name).trim()) return res.status(400).json({ error: 'name is required' });
-    const currentDrugs = String(current).split('|').map((s) => s.trim()).filter(Boolean);
+    // Bound the med list (a real active-med list is well under this) so the O(n) duplicate scan can't be
+    // driven into a CPU sink by an oversized input.
+    const currentDrugs = String(current).split('|').map((s) => s.trim()).filter(Boolean).slice(0, 50);
     return res.json(await checkRxSafety({ name: String(name), rxcui: String(rxcui), allergies: String(allergies), currentDrugs }));
   } catch (err) { return next(err); }
 });

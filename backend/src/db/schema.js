@@ -149,6 +149,20 @@ export const SCHEMA_STATEMENTS = [
     PRIMARY KEY (id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 
+  // --- Audit outbox (durability for the tamper-evident chain) -----------------
+  // When the hash-chained audit write fails (e.g. lock contention on the chain head) the entry is parked
+  // here instead of being lost, so a security/PHI event is NEVER unrecorded even though its action was not
+  // blocked. `drainAuditOutbox()` re-chains pending rows in order and deletes them on success.
+  `CREATE TABLE IF NOT EXISTS audit_outbox (
+    id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    payload      JSON            NOT NULL,
+    attempts     INT             NOT NULL DEFAULT 0,
+    last_error   VARCHAR(500)    NULL,
+    created_at   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_audit_outbox_created (created_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
   // --- Specialties (managed list, wired to provider users) -------------------
   `CREATE TABLE IF NOT EXISTS specialties (
     id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -351,6 +365,7 @@ export const SCHEMA_STATEMENTS = [
     note_type     VARCHAR(60)     NOT NULL,
     reason        VARCHAR(120)    NULL,
     content_enc   LONGBLOB        NULL,  -- dynamic long-form records (500k+ words); LONGBLOB removes the 16MB ceiling
+    content_rev   INT             NOT NULL DEFAULT 0,  -- optimistic-concurrency counter (bumped on each body write)
     status        ENUM('draft','signed') NOT NULL DEFAULT 'draft',
     billing_ready TINYINT(1)      NOT NULL DEFAULT 0,
     signed_by     BIGINT UNSIGNED NULL,

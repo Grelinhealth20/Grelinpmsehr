@@ -17,6 +17,18 @@ export function setCsrfToken(token) {
   csrfToken = token || null;
 }
 
+/**
+ * Open a URL returned by the API in a new tab, but ONLY if it is an https:// (or http://) URL. These
+ * endpoints return trusted presigned S3 / OAuth URLs, but scheme-guarding is defense-in-depth: if a URL
+ * were ever attacker-influenced, a javascript:/data:/blob: scheme handed to window.open could execute in
+ * a new same-origin context. Returns true if opened. Always passes noopener,noreferrer.
+ */
+export function openExternalUrl(url) {
+  if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) return false;
+  window.open(url, '_blank', 'noopener,noreferrer');
+  return true;
+}
+
 api.interceptors.request.use((cfg) => {
   const method = (cfg.method || 'get').toUpperCase();
   if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && csrfToken) {
@@ -351,9 +363,10 @@ export const encountersApi = {
 export const terminologyApi = {
   snomed: (q, pageSize) => api.get('/terminology/snomed', { params: { q, pageSize } }),
   rxnorm: (q, pageSize) => api.get('/terminology/rxnorm', { params: { q, pageSize } }),
-  // Real-time prescribing safety: FDA-label interactions/warnings + allergy + duplicate-therapy check.
+  // Real-time prescribing safety: allergy cross-check + duplicate-therapy. POST (clinical inputs in the
+  // body, never the URL — the allergy + active-med lists are patient clinical data and must not hit logs).
   rxSafety: ({ name, rxcui, allergies, current }) =>
-    api.get('/terminology/rx-safety', { params: { name, rxcui, allergies, current } }),
+    api.post('/terminology/rx-safety', { name, rxcui, allergies, current }),
   cpt: (q, pageSize) => api.get('/terminology/cpt', { params: { q, pageSize } }),
   search: (q, source, pageSize) => api.get('/terminology/search', { params: { q, source, pageSize } }),
   icd10: (q, pageSize) => api.get('/terminology/search', { params: { q, source: 'ICD10CM', pageSize } }),

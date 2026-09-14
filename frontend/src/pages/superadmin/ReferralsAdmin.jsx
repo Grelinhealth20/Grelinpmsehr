@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useToast } from '../../components/Toast.jsx';
-import { referralsApi, facilitiesApi, toApiError } from '../../lib/api.js';
+import { referralsApi, facilitiesApi, toApiError, openExternalUrl } from '../../lib/api.js';
 import TablePager from '../../components/TablePager.jsx';
 
 const PER = 25;
@@ -321,7 +321,7 @@ function FaxIntegration() {
 
   async function openAuth() {
     setBusy('auth');
-    try { const { data } = await referralsApi.faxAuthorizeUrl(); window.open(data.url, '_blank', 'noopener,noreferrer'); toast.success('Authorization page opened — approve, then paste the code below.'); }
+    try { const { data } = await referralsApi.faxAuthorizeUrl(); if (!openExternalUrl(data.url)) throw new Error('Invalid authorization URL.'); toast.success('Authorization page opened — approve, then paste the code below.'); }
     catch (e) { toast.error(toApiError(e).message); } finally { setBusy(''); }
   }
   async function activate() {

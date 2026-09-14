@@ -28,7 +28,11 @@ export class AuthError extends Error {
 // Grace window in which a just-rotated (revoked) refresh token presented again is treated as a benign
 // concurrent/multi-tab refresh race rather than token theft — long enough to cover parallel requests and a
 // second browser tab, short enough that a stolen-then-replayed token is still caught.
-const REFRESH_RACE_GRACE_MS = 30 * 1000;
+// Grace for a benign refresh-rotation RACE (parallel request / second tab sharing the cookie). A genuine
+// race converges within milliseconds–seconds, so 5s covers it while minimizing the window in which a STOLEN
+// but not-yet-security-revoked refresh token could be replayed for an independent session. (A security
+// revocation — password change / force-logout / reuse-nuke — is never graced regardless of this window.)
+const REFRESH_RACE_GRACE_MS = 5 * 1000;
 
 async function logAttempt(email, ip, successful) {
   try {
@@ -88,6 +92,23 @@ export async function login(email, password, ctx = {}) {
     await logAttempt(email, ctx.ip, false);
     // Constant-ish work to blunt timing oracle.
     await hashPassword('timing-equalizer-placeholder').catch(() => {});
+    // Anti-enumeration: a real LOCKED account returns 423 (below). To keep an UNKNOWN email indistinguishable,
+    // an email hammered past the same threshold within the lock window also returns an identical 423 — so a
+    // 423 never confirms the account exists. Best-effort; any error falls through to the generic 401.
+    try {
+      const mins = config.policy.accountLockMinutes;
+      const cutoff = new Date(Date.now() - mins * 60 * 1000);
+      const [[c]] = [await execute(
+        `SELECT COUNT(*) AS n FROM login_attempts WHERE email_bidx = :b AND successful = 0 AND created_at >= :cutoff`,
+        { b: blindIndex(email), cutoff },
+      )];
+      if (Number(c[0]?.n || 0) >= config.policy.maxFailedLogins) {
+        throw new AuthError(
+          `Account temporarily locked after too many failed attempts. Try again in ${mins} minutes.`,
+          423, 'ACCOUNT_LOCKED',
+        );
+      }
+    } catch (e) { if (e instanceof AuthError) throw e; /* count failed → fall through */ }
     throw genericFail;
   }
 

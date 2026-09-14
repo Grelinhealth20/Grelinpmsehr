@@ -2,7 +2,7 @@ import { Fragment, useEffect, useRef, useState, useCallback, useMemo } from 'rea
 import Modal from './Modal.jsx';
 import { useToast } from './Toast.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
-import { encountersApi, terminologyApi, toApiError } from '../lib/api.js';
+import { encountersApi, terminologyApi, toApiError, openExternalUrl } from '../lib/api.js';
 import { SECTION_LABELS } from '../lib/noteTemplates.js';
 import { checksForHeading } from '../lib/snfHeadingChecks.js';
 
@@ -301,6 +301,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
   const savingRef = useRef(false);    // a save request is in flight
   const dirtyRef = useRef(false);     // edits exist that are not yet confirmed saved
   const retryRef = useRef(null);      // pending retry timer after a failed save
+  const revRef = useRef(0);           // optimistic-concurrency: the note body revision last confirmed by the server
   contentRef.current = content;
   reasonRef.current = reason;
   posRef.current = pos;
@@ -430,6 +431,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
       skipSave.current = true;
       setAutoState('idle');
       setAmending(false); setAmendReason('');
+      revRef.current = data.note?.contentRev ?? 0; // seed the optimistic-concurrency baseline for this note
       setActive(data.note);
       setContent({
         vitals: data.note.content?.vitals || {},
@@ -558,20 +560,32 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
     savingRef.current = true;
     setAutoState('saving');
     try {
-      await encountersApi.updateNote(active.uuid, {
+      const { data } = await encountersApi.updateNote(active.uuid, {
         content: contentRef.current, reason: reasonRef.current,
+        baseRev: revRef.current, // optimistic concurrency: server rejects (409) if the note changed since we loaded it
         // Only send a valid 2-digit CMS POS — never an empty/partial value (which the server would reject),
         // so changing POS persists but a legacy note with no POS keeps saving normally.
         ...(/^\d{2}$/.test(posRef.current || '') ? { pos: posRef.current } : {}),
       });
+      if (data?.note?.contentRev != null) revRef.current = data.note.contentRev; // advance our baseline
       savingRef.current = false;
       if (dirtyRef.current) { dirtyRef.current = false; return flushSave(); } // edits arrived mid-save
       setAutoState('saved');
       // NO mid-edit billing prediction. The coding engine runs ONLY when the note is finished (at Sign &
       // Finalize) — never in between while the provider is still documenting.
       return true;
-    } catch {
+    } catch (e) {
       savingRef.current = false;
+      // Optimistic-concurrency conflict: the note was edited in another session. Adopt the server's current
+      // revision and retry — the server shallow-merges our sections over the latest, so BOTH sessions' edits
+      // survive (no clobber, no lost work). Any other error → visible retry as before.
+      if (e?.response?.data?.code === 'NOTE_CONFLICT' && e.response.data.currentRev != null) {
+        revRef.current = e.response.data.currentRev;
+        dirtyRef.current = true;
+        setAutoState('saving');
+        retryRef.current = setTimeout(() => { flushSave(); }, 400); // quick converge
+        return false;
+      }
       setAutoState('error'); // visible: "Not saved — retrying" — never silent
       retryRef.current = setTimeout(() => { flushSave(); }, 3000); // auto-recover
       return false;
@@ -613,10 +627,15 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
     if (!active) return;
     setBusy(true);
     try {
-      await encountersApi.updateNote(active.uuid, { content, reason });
+      const { data } = await encountersApi.updateNote(active.uuid, { content, reason, baseRev: revRef.current });
+      if (data?.note?.contentRev != null) revRef.current = data.note.contentRev;
       toast.success('Draft saved.');
       await loadNotes();
-    } catch (e) { toast.error(toApiError(e).message); } finally { setBusy(false); }
+    } catch (e) {
+      // On a concurrency conflict, reopen the latest so the provider sees the merged current version.
+      if (e?.response?.data?.code === 'NOTE_CONFLICT') { toast.error('This note was updated in another session — reloading the latest version.'); await openNote(active.uuid); }
+      else toast.error(toApiError(e).message);
+    } finally { setBusy(false); }
   }
 
   async function sign() {
@@ -629,7 +648,10 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
       const okSaved = await flushSave();
       if (!okSaved) { toast.error('Your changes could not be saved yet — please try again before signing.'); return; }
       await runBillingPrediction();
-      const { data } = await encountersApi.signNote(active.uuid, { content, reason });
+      // Sign the FRESHEST body that flushSave just persisted (contentRef.current), not the render-time closure
+      // `content` — which could be a hair behind if an edit landed mid-flush — so signing can never overwrite
+      // the just-saved newer content with a stale copy.
+      const { data } = await encountersApi.signNote(active.uuid, { content: contentRef.current, reason: reasonRef.current });
       setActive(data.note);
       toast.success('Note signed — finalized and saved to the patient folder for billing.');
       await loadNotes();
@@ -693,7 +715,7 @@ export function EncounterNotesModal({ encounter, onClose, onChanged }) {
     if (!active) return;
     setBusy(true);
     try {
-      const { data } = await encountersApi.amendNote(active.uuid, { content, reason: amendReason.trim() });
+      const { data } = await encountersApi.amendNote(active.uuid, { content: contentRef.current, reason: amendReason.trim() });
       setActive(data.note);
       setAmending(false);
       setAmendReason('');
@@ -1827,7 +1849,7 @@ function OrderAttachments({ encounterUuid, kind, label, readOnly, orderText, enc
     catch (e2) { toast.error(toApiError(e2).message); } finally { setBusy(false); }
   }
   async function view(doc) {
-    try { const { data } = await encountersApi.encounterDocUrl(doc.uuid); window.open(data.url, '_blank', 'noopener'); }
+    try { const { data } = await encountersApi.encounterDocUrl(doc.uuid); if (!openExternalUrl(data.url)) throw new Error('Invalid document URL.'); }
     catch (e) { toast.error(toApiError(e).message); }
   }
   async function del(doc) {
@@ -2024,7 +2046,8 @@ export function CustomTemplateBuilder({ initial, headingDict, onSave, onClose })
       ...(row.checks.trim() ? { checks: row.checks.split(',').map((c) => c.trim()).filter(Boolean) } : {}),
     }));
     setSaving(true);
-    try { await onSave({ uuid: initial?.uuid, name: name.trim(), sections }); } catch { setSaving(false); }
+    try { await onSave({ uuid: initial?.uuid, name: name.trim(), sections }); }
+    catch (e) { setSaving(false); toast.error(toApiError(e).message); } // surface the failure — never stop the spinner silently
   }
 
   const chev = (dir) => (

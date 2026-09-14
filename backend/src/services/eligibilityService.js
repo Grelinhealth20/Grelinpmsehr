@@ -526,8 +526,11 @@ export function insuranceBidxOf(payer, memberOrMbi) {
 }
 
 /** Store one verification. `response` is the raw 271 payload (an object). */
-export async function saveCheck({ patientId, policyIndex = 0, response, createdBy = null, context = null, appointmentUuid = null, serviceDate = null, insuranceBidx = null, automatic = false }) {
+export async function saveCheck({ patientId, policyIndex = 0, response, createdBy = null, context = null, appointmentUuid = null, serviceDate = null, insuranceBidx = null, automatic = false, source = null }) {
   const summary = normalize271(response);
+  // Provenance marker persisted in the (encrypted) summary so a caller-supplied import ('manual_import') is
+  // forever distinguishable from a live payer verification — auditability for a non-authoritative 271.
+  if (source) summary.source = source;
   summary.coverageLevels = coverageLevelSummary(response, context?.requestedStcs || ['30']);
   // Record what was asked for (procedure-specific STC targeting) alongside the result.
   if (context) {
@@ -641,13 +644,18 @@ export async function cloneCheckToAppointment(sourceUuid, { appointmentUuid, ser
  */
 export function mergeVerificationIntoPatient(patient, summary, policyIndex = 0, opts = {}) {
   const m = summary?.member || {};
+  // A MANUALLY-IMPORTED 271 (caller-supplied payload, not a live Stedi verification) is not authoritative,
+  // so it must never OVERWRITE provider-entered identity — it may only FILL blanks, the same conservative
+  // rule already applied to name/DOB. A real Stedi verification (opts.manualImport falsy) keeps correcting
+  // address/group/MBI as before. `keep(existing, next)` = fill-when-missing under manual import, else next.
+  const keep = (existing, next) => (opts.manualImport && existing ? existing : (next || existing));
   const demographics = { ...(patient?.demographics || {}) };
   const ap = m.addressParts;
   if (ap) {
-    if (ap.address1) demographics.address = ap.address1;
-    if (ap.city) demographics.city = ap.city;
-    if (ap.state) demographics.state = ap.state;
-    if (ap.zip) demographics.zip = ap.zip;
+    if (ap.address1) demographics.address = keep(demographics.address, ap.address1);
+    if (ap.city) demographics.city = keep(demographics.city, ap.city);
+    if (ap.state) demographics.state = keep(demographics.state, ap.state);
+    if (ap.zip) demographics.zip = keep(demographics.zip, ap.zip);
   }
   if (!demographics.dob && m.dob) demographics.dob = m.dob;
   if (!demographics.firstName && m.firstName) demographics.firstName = m.firstName;
@@ -663,8 +671,8 @@ export function mergeVerificationIntoPatient(patient, summary, policyIndex = 0, 
     insurance.push({ type: RANKS[insurance.length] || 'primary', payer: '', memberId: '', group: '', planType: '', mbi: '', benefits: {} });
   }
   const pol = insurance[policyIndex];
-  if (m.group) pol.group = m.group;             // payer-authoritative
-  if (m.mbi) pol.mbi = m.mbi;                    // payer-authoritative
+  if (m.group) pol.group = keep(pol.group, m.group); // payer-authoritative (fill-only under manual import)
+  if (m.mbi) pol.mbi = keep(pol.mbi, m.mbi);          // payer-authoritative (fill-only under manual import)
   // Fill the plan member ID only when missing — never overwrite it with an echoed
   // MBI (the MBI lives in its own field; the two must not be conflated).
   if (m.memberId && !pol.memberId) pol.memberId = m.memberId;

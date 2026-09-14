@@ -244,6 +244,9 @@ export async function runMigrations() {
   // CMS Place of Service on the note (seeded from the note type at creation, provider-overridable to any
   // CMS POS — 11/12/31/32/10/…). Drives facility vs non-facility PE RVU in the payscale/coding. Not PHI.
   await ensureColumn('encounter_notes', 'pos_code', '`pos_code` VARCHAR(4) NULL AFTER `note_type`');
+  // Optimistic-concurrency counter for the note body — bumped on every content write so a stale editor's
+  // save is detected (409) and reconciled, instead of silently clobbering a concurrent edit.
+  await ensureColumn('encounter_notes', 'content_rev', '`content_rev` INT NOT NULL DEFAULT 0 AFTER `content_enc`');
   // Patient encounters sub-table (newest DOS first) — kept fast per patient at scale.
   await ensureIndex('encounters', 'idx_enc_patient_date', '`patient_id`, `encounter_date`');
   await ensureIndex('encounters', 'idx_enc_provider', '`provider_id`');

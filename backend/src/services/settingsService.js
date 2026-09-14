@@ -11,10 +11,10 @@ import { logger } from '../config/logger.js';
 // Defaults applied when a key has never been set. Eligibility is ON by default. Automatic patient
 // creation from an incoming referral fax is ON by default (deterministic match-or-create); a super/master
 // admin can disable it so unmatched inbound faxes stay unlinked in the intake queue for manual review.
-const DEFAULTS = Object.freeze({ eligibilityEnabled: true, faxAutoCreatePatients: true });
+const DEFAULTS = Object.freeze({ eligibilityEnabled: true, faxAutoCreatePatients: true, nppMedicareDifferential: false });
 
 // Only these keys are accepted from an admin PATCH (allowlist — no arbitrary keys).
-const BOOLEAN_KEYS = new Set(['eligibilityEnabled', 'faxAutoCreatePatients']);
+const BOOLEAN_KEYS = new Set(['eligibilityEnabled', 'faxAutoCreatePatients', 'nppMedicareDifferential']);
 
 const CACHE_TTL_MS = 15 * 1000;
 let cache = null;
@@ -28,7 +28,9 @@ async function loadAll() {
   for (const r of rows) {
     let val = r.setting_value;
     if (typeof val === 'string') { try { val = JSON.parse(val); } catch { /* keep raw */ } }
-    if (r.setting_key in DEFAULTS) out[r.setting_key] = typeof DEFAULTS[r.setting_key] === 'boolean' ? asBool(val) : val;
+    // Object.hasOwn (not `in`) so a stored row keyed `__proto__`/`constructor`/`toString` cannot satisfy the
+    // allowlist via the prototype chain and write onto the returned settings object.
+    if (Object.hasOwn(DEFAULTS, r.setting_key)) out[r.setting_key] = typeof DEFAULTS[r.setting_key] === 'boolean' ? asBool(val) : val;
   }
   return out;
 }
@@ -40,8 +42,15 @@ export async function getSettings() {
     cache = await loadAll();
     cacheAt = Date.now();
   } catch (err) {
-    // Never fail a request because settings couldn't load — fall back to defaults.
-    logger.error({ err: err.message }, 'Failed to load app settings — using defaults');
+    // A transient load failure must NOT silently flip a flag to its default (which would, e.g., re-enable
+    // fax auto-create an admin disabled, or drop the NPP differential an admin enabled). Serve the LAST-GOOD
+    // cached values if we have them — only a COLD-START failure (never loaded) falls back to DEFAULTS.
+    if (cache) {
+      logger.error({ err: err.message }, 'Failed to reload app settings — serving last-good cached values');
+      cacheAt = Date.now(); // brief re-cache so we don't hammer the DB on every request during the outage
+      return cache;
+    }
+    logger.error({ err: err.message }, 'Failed to load app settings on cold start — using defaults');
     return { ...DEFAULTS };
   }
   return cache;
@@ -61,6 +70,14 @@ export async function isEligibilityEnabled() {
 export async function isFaxAutoCreateEnabled() {
   const s = await getSettings();
   return s.faxAutoCreatePatients !== false;
+}
+
+/** Whether the NPP Medicare 85% differential is applied to the payscale (default OFF → every provider paid
+ *  the same $/Work-RVU). Read live at pay computation (cached ≤15s) so a super-admin toggle takes effect
+ *  in ~real time. Only affects NPP-rendered work; physician (MD/DO) pay is never changed. */
+export async function isNppDifferentialEnabled() {
+  const s = await getSettings();
+  return s.nppMedicareDifferential === true;
 }
 
 /**

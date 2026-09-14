@@ -7,6 +7,7 @@ import { Router } from 'express';
 import { authenticate, requirePasswordSettled } from '../middleware/authenticate.js';
 import { requireEhrAccess } from '../middleware/permissions.js';
 import { authorize } from '../middleware/authorize.js';
+import { csrfProtection } from '../middleware/csrf.js';
 import { ROLES } from '../config/env.js';
 import * as ctrl from '../controllers/reportsController.js';
 
@@ -20,9 +21,11 @@ router.get('/admin/download/encounters', authorize(ROLES.SUPER_ADMIN), ctrl.admi
 router.get('/admin/download/billing', authorize(ROLES.SUPER_ADMIN), ctrl.adminDownloadBilling);       // .xlsx
 router.get('/admin/download/payscale', authorize(ROLES.SUPER_ADMIN), ctrl.adminDownloadPayscale);     // .xlsx — processed-RVU pay detail
 // Payroll: pay-period LOCK. Finalize + history = super/master; REOPEN a locked period = master only.
-router.post('/admin/payroll/finalize', authorize(ROLES.SUPER_ADMIN), ctrl.finalize);
+// CSRF-guarded like every other state-changing admin route (auth is via the httpOnly cookie, so these
+// POSTs need the double-submit token — reopen in particular takes its target from the URL and no body).
+router.post('/admin/payroll/finalize', csrfProtection, authorize(ROLES.SUPER_ADMIN), ctrl.finalize);
 router.get('/admin/payroll/snapshots', authorize(ROLES.SUPER_ADMIN), ctrl.listFinalized);
-router.post('/admin/payroll/reopen/:uuid', authorize(ROLES.MASTER_ADMIN), ctrl.reopen);
+router.post('/admin/payroll/reopen/:uuid', csrfProtection, authorize(ROLES.MASTER_ADMIN), ctrl.reopen);
 
 // Provider-facing — strictly the logged-in provider's OWN data.
 router.use(requireEhrAccess);

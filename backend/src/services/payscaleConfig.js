@@ -52,6 +52,21 @@ export function providerRatePerWorkRvu(cf, workGpci = 1) {
   return Math.round(Number(cf) * (Number(workGpci) || 1) * PROVIDER_SHARE * 1e4) / 1e4; // 4 dp
 }
 
+// NPP Medicare differential — OPTIONAL, super-admin toggle (settingsService.nppMedicareDifferential). When
+// ENABLED, work RENDERED BY A NON-PHYSICIAN PRACTITIONER (NP/PA/CNS/…) is valued at 85% of the physician
+// fee schedule — CMS's NPP payment differential for services billed under the NPP's own NPI. The factor
+// scales the Medicare Work-RVU VALUE, so the 60/40 provider/group split is preserved on the reduced value
+// (provider pay = value×0.85×60%, group = value×0.85×40%). Physicians (MD/DO) are always 1.0. Default OFF
+// (every provider paid the same $/Work-RVU, per the group workbook) so enabling it is an explicit, audited
+// super-admin action that never silently changes a paycheck. Groups billing NPP work INCIDENT-TO or
+// SPLIT/SHARED (reimbursed at 100%) leave it OFF. Rate is a config constant (env-overridable), not static.
+export const NPP_MEDICARE_FACTOR = Number(process.env.PAYSCALE_NPP_FACTOR || 0.85);
+/** Pay/value multiplier for a provider TYPE given whether the NPP differential is enabled. NPP→0.85 (when
+ *  enabled), physician/unspecified→1.0. Work RVU, CF and the 60/40 split are otherwise intact. */
+export function medicareFactorForType(providerTypeStr, nppDifferentialEnabled = false) {
+  return (nppDifferentialEnabled && providerTypeStr === 'npp') ? NPP_MEDICARE_FACTOR : 1;
+}
+
 /**
  * The CMS payment modifier that changes a procedure's WORK RVU: TC (technical component — no physician
  * work, work RVU 0) and 26 (professional component). Informational modifiers (25, 59, 57, 24, 76, …) do

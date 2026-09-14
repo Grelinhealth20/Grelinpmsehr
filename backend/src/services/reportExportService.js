@@ -10,7 +10,9 @@ import ExcelJS from 'exceljs';
 import { execute } from '../db/pool.js';
 import { decrypt } from '../utils/crypto.js';
 import { providerPayscale, adminProviderPayscale } from './reportsService.js';
-import { posSetting, RVU_YEAR, PAYABLE_STATUS, conversionFactor, providerRatePerWorkRvu } from './payscaleConfig.js';
+import { posSetting, RVU_YEAR, PAYABLE_STATUS, conversionFactor, providerRatePerWorkRvu, providerType, medicareFactorForType } from './payscaleConfig.js';
+import { isNppDifferentialEnabled } from './settingsService.js';
+const credsOf = (raw) => { try { return Array.isArray(raw) ? raw : JSON.parse(raw || '[]'); } catch { return []; } };
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
@@ -233,7 +235,7 @@ export async function payscaleDetailRows({ facilityUuid = null, providerUuid = n
   const modCase = "CASE WHEN UPPER(COALESCE(c.modifiers,'')) REGEXP '(^|[^A-Z])TC([^A-Z]|$)' THEN 'TC' "
     + "WHEN COALESCE(c.modifiers,'') REGEXP '(^|[^0-9])26([^0-9]|$)' THEN '26' ELSE '' END";
   const [rows] = await execute(
-    `SELECT DATE_FORMAT(${DOS}, '%Y-%m-%d') AS dos, e.encounter_no, n.pos_code, u.full_name_enc AS provider_enc,
+    `SELECT DATE_FORMAT(${DOS}, '%Y-%m-%d') AS dos, e.encounter_no, n.pos_code, u.uuid AS provider_uuid, u.full_name_enc AS provider_enc, u.credentials AS provider_creds,
             c.code, c.modifiers, COALESCE(c.units, 1) AS units, c.seq,
             COALESCE(mm.work_rvu, mb.work_rvu) AS work_rvu, COALESCE(mm.conv_factor, mb.conv_factor) AS conv_factor,
             COALESCE(mm.status_code, mb.status_code) AS status_code
@@ -260,12 +262,15 @@ export async function payscaleDetailRows({ facilityUuid = null, providerUuid = n
   }
   const cf = conversionFactor(cfKind, datasetCf);
   const rate = providerRatePerWorkRvu(cf);
-  // Build the lines (DOS order), each with the natural per-line round.
+  const nppDiff = await isNppDifferentialEnabled(); // super-admin toggle; per-provider NPP 0.85 when enabled
+  // Build the lines (DOS order), each with the natural per-line round. The NPP differential (when enabled)
+  // scales the value/pay by 0.85 for NPP-rendered lines — per the rendering provider's own credentials.
   const lines = payable.map((r) => {
     const units = Number(r.units) || 0;
+    const factor = medicareFactorForType(providerType(credsOf(r.provider_creds)), nppDiff);
     const d = new Date(`${r.dos}T00:00:00Z`);
     return {
-      _key: `${r.provider_enc || ''}|${r.code}|${r.modifiers || ''}`, _work: r.work, _units: units,
+      _key: `${r.provider_uuid || r.provider_enc || ''}|${r.code}|${r.modifiers || ''}|${r.pos_code || ''}`, _work: r.work, _units: units, _factor: factor,
       dos: r.dos || '—',
       month: Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' }),
       week: Number.isNaN(d.getTime()) ? '—' : `Week ${Math.min(5, Math.ceil(d.getUTCDate() / 7))}`,
@@ -274,22 +279,24 @@ export async function payscaleDetailRows({ facilityUuid = null, providerUuid = n
       encounterId: r.encounter_no || '—',
       provider: r.provider_enc ? (() => { try { return decrypt(r.provider_enc); } catch { return '—'; } })() : '—',
       workRvu: round2(r.work * units),
-      providerPay: round2(r.work * units * rate),
-      medicareValue: round2(r.work * units * cf),
+      providerPay: round2(r.work * units * rate * factor),
+      medicareValue: round2(r.work * units * cf * factor),
     };
   });
   // RECONCILE to the paycheck. The payscale table / statement / payroll pay `round2(Σ(work×units) × rate)`
-  // PER CODE (round the total). Summing per-line rounds would drift by a few cents, so here the line pays
-  // are reconciled to that authoritative per-code total (work RVU is POS-independent → group key is
-  // provider+code+modifier): the rounding residual is absorbed by the group's LAST line (standard payroll
-  // penny-reconciliation). Result: the detail export's totals equal the actual paycheck to the exact cent.
+  // PER CODE+POS+MODIFIER group (round the total). The group key here MUST match that exact grouping —
+  // provider+code+modifier+POS — so the per-line rounds reconcile to the SAME authoritative group totals the
+  // finalized snapshot uses (a code billed at two POS is two rounded groups in the snapshot; keying without
+  // POS previously merged them and could drift 1¢). The rounding residual is absorbed by the group's LAST
+  // line (standard payroll penny-reconciliation). Result: the detail export equals the paycheck to the cent.
   const byKey = new Map();
   lines.forEach((l, i) => { if (!byKey.has(l._key)) byKey.set(l._key, []); byKey.get(l._key).push(i); });
   for (const idxs of byKey.values()) {
     const w = lines[idxs[0]]._work;
+    const factor = lines[idxs[0]]._factor; // one provider per group → one NPP factor
     const totUnits = idxs.reduce((s, i) => s + lines[i]._units, 0);
-    const authPay = round2(w * totUnits * rate);
-    const authValue = round2(w * totUnits * cf);
+    const authPay = round2(w * totUnits * rate * factor);
+    const authValue = round2(w * totUnits * cf * factor);
     const sumPay = round2(idxs.reduce((s, i) => s + lines[i].providerPay, 0));
     const sumValue = round2(idxs.reduce((s, i) => s + lines[i].medicareValue, 0));
     const last = idxs[idxs.length - 1];

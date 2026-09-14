@@ -12,7 +12,7 @@ import {
 } from '../services/userService.js';
 import { hashPassword, validatePasswordPolicy } from '../utils/password.js';
 import * as mfaAdmin from '../services/mfaService.js';
-import { recordAudit } from '../services/auditService.js';
+import { recordAudit as baseRecordAudit } from '../services/auditService.js';
 import { findSpecialtyIdByUuid } from '../services/specialtyService.js';
 import { listUserFacilities, setUserFacilities } from '../services/facilityService.js';
 import { blindIndex } from '../utils/crypto.js';
@@ -21,6 +21,12 @@ import { revokeAllSessions } from '../services/authService.js';
 import { config, ROLES } from '../config/env.js';
 
 const auditCtx = (req) => ({ ip: req.ip, userAgent: req.get('user-agent') });
+
+// User management is an admin SECURITY surface (create/update/status/role/MFA/password/delete). These audits
+// are FAIL-CLOSED: if the tamper-evident record can't be written the request errors (503) instead of quietly
+// succeeding unlogged. Admin actions are low-volume and ret/yable, so blocking here is safe (unlike an
+// emergency chart read or a login, which must stay available and are left best-effort-but-loud).
+const recordAudit = (entry) => baseRecordAudit(entry, { strict: true });
 
 /** Live NPPES lookup for an INDIVIDUAL provider (NPI-1) by NPI or name. */
 export async function nppesProviderSearch(req, res, next) {

@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import {
-  listPatients, createPatient, updatePatient, applyPatientUpdateLocked, deletePatient, getRawByUuid, toPublicPatient, getPatientS3Ctx,
+  listPatients, createPatient, updatePatient, applyPatientUpdateLocked, mergePatientPatch, deletePatient, getRawByUuid, toPublicPatient, getPatientS3Ctx,
 } from '../services/patientService.js';
 import {
   listFacesheetDocs, listPatientDocumentsPaged, documentCategoryCounts, DOC_CATEGORIES, getRawDocByUuid, findDocByType,
@@ -10,6 +10,7 @@ import {
   s3Enabled, ensurePatientFolder, uploadPatientObject, signedGetUrl, deleteObject, deleteObjects, getObjectBytes, listPatientKeys,
 } from '../services/s3Service.js';
 import { extractDocument, ocrEnabled } from '../services/docExtractService.js';
+import { decrypt } from '../utils/crypto.js';
 import { saveCheck, listChecks, mergeVerificationIntoPatient } from '../services/eligibilityService.js';
 import { verifyPatientEligibility, latestCheckForPolicy } from '../services/eligibilityWorkflow.js';
 import { eligibilityEnabledForPatient } from '../services/facilityService.js';
@@ -160,7 +161,12 @@ export async function getOne(req, res, next) {
 export async function update(req, res, next) {
   try {
     const row = await ownedPatientOr404(req);
-    const patient = await updatePatient(row.uuid, req.body);
+    // Serialize the write under a row lock and re-read the FRESHEST record inside the transaction, then merge
+    // the client's face-sheet patch onto it — so a concurrent eligibility verify (which writes MBI / group /
+    // verified benefits via the same locked path) is never clobbered by this save's stale snapshot. The
+    // locked path also fails loud (422) if any PHI column is present-but-undecryptable, never blanking it.
+    const patient = await applyPatientUpdateLocked(row.uuid, (fresh) => mergePatientPatch(fresh, req.body));
+    if (!patient) return res.status(404).json({ error: 'Patient not found.' });
     await recordAudit({ actorUserId: req.authUserId, action: 'patient.update', entityType: 'patient', entityId: row.uuid, ...ctx(req), metadata: { fields: Object.keys(req.body) } });
     res.json({ patient });
   } catch (err) { next(err); }
@@ -179,7 +185,7 @@ export async function remove(req, res, next) {
           const keys = await listPatientKeys(s3ctx);
           if (keys.length) await deleteObjects(keys);
         }
-      } catch { /* best-effort */ }
+      } catch (e) { logger.error({ err: e?.message, patient: row.uuid }, 'patient purge: S3 objects not fully deleted — orphaned PHI objects may remain (DB record IS removed)'); }
     }
     await deletePatient(row.uuid);
     await recordAudit({ actorUserId: req.authUserId, action: 'patient.delete', entityType: 'patient', entityId: row.uuid, ...ctx(req) });
@@ -227,13 +233,17 @@ export async function uploadDoc(req, res, next) {
     }
     // Per-record cap only (250 MB); there is NO limit on the number of documents or total storage per patient.
     if (req.file.size > MAX_UPLOAD_BYTES) return res.status(400).json({ error: 'File exceeds the 250 MB per-record limit.', code: 'TOO_LARGE' });
-
-    // Replace an existing SINGLE-slot doc (e.g. re-upload license front) — delete the old object. Category
-    // (record) types are multi-document and are never replaced: every upload adds a new document.
-    if (SLOT_TYPES.has(docType)) {
-      const existing = await findDocByType(row.id, docType);
-      if (existing) { try { await deleteObject(existing.s3_key); } catch { /* ignore */ } await deleteDocumentRecord(existing.uuid); }
+    // A provided Date of Service must be a real YYYY-MM-DD; reject a malformed value rather than silently
+    // coercing it to today (which would mis-date the medical record). Absent/empty DOS legitimately defaults.
+    const dosRaw = req.body.serviceDate;
+    if (dosRaw != null && String(dosRaw).trim() !== '' && !/^\d{4}-\d{2}-\d{2}$/.test(String(dosRaw).trim())) {
+      return res.status(400).json({ error: 'Invalid date of service (expected YYYY-MM-DD).', code: 'BAD_DOS' });
     }
+
+    // For a SINGLE-slot doc (e.g. re-upload license front) find the CURRENT one but do NOT delete it yet —
+    // the old scan must survive until the replacement is safely stored, so a mid-upload failure can never
+    // leave the slot empty and unrecoverable. Category (record) types are multi-document, never replaced.
+    const existingSlot = SLOT_TYPES.has(docType) ? await findDocByType(row.id, docType) : null;
 
     const key = `${docType}/${uuidv4()}${ext}`; // stored under the patient's hierarchical folder
     const s3ctx = await getPatientS3Ctx(row.uuid);
@@ -244,6 +254,12 @@ export async function uploadDoc(req, res, next) {
       contentType: req.file.mimetype, size: req.file.size, uploadedBy: req.authUserId,
       serviceDate: req.body.serviceDate, // Date of Service (documents are arranged by this); defaults to today
     });
+    // Replacement is now durably stored — retire the superseded slot object/row. A failure here only leaves
+    // an orphaned old object (logged loudly for cleanup), never a lost current record.
+    if (existingSlot) {
+      try { await deleteObject(existingSlot.s3_key); } catch (e) { logger.error({ err: e?.message, s3Key: existingSlot.s3_key, patient: row.uuid }, 'superseded slot-document S3 object not deleted (orphaned; new record IS stored)'); }
+      await deleteDocumentRecord(existingSlot.uuid);
+    }
     await recordAudit({ actorUserId: req.authUserId, action: 'patient.document.upload', entityType: 'patient', entityId: row.uuid, ...ctx(req), metadata: { docType, dos: doc.dos } });
     res.status(201).json({ document: doc });
   } catch (err) { next(err); }
@@ -256,7 +272,11 @@ export async function getDocUrl(req, res, next) {
     // Double patient-scope: the doc must belong to THIS resolved patient — never another patient's doc.
     if (!doc || Number(doc.patient_id) !== Number(row.id)) return res.status(404).json({ error: 'Document not found.', code: 'NOT_FOUND' });
     const download = req.query.download === '1' || req.query.download === 'true';
-    const url = await signedGetUrl(doc.s3_key, 300, download ? { downloadName: doc.file_name || 'document' } : {});
+    // The stored filename is ENCRYPTED (file_name_enc); decrypt it for the download name so the user gets the
+    // real name instead of a generic "document". Guard the decrypt so a bad blob just falls back to a default.
+    let downloadName = 'document';
+    if (download && doc.file_name_enc) { try { downloadName = decrypt(doc.file_name_enc) || 'document'; } catch { downloadName = 'document'; } }
+    const url = await signedGetUrl(doc.s3_key, 300, download ? { downloadName } : {});
     await recordAudit({ actorUserId: req.authUserId, action: download ? 'patient.document.download' : 'patient.document.view', entityType: 'patient', entityId: row.uuid, ...ctx(req), metadata: { docType: doc.doc_type } });
     res.json({ url, expiresIn: 300 });
   } catch (err) { next(err); }
@@ -401,19 +421,20 @@ export async function importEligibility(req, res, next) {
     const row = await ownedPatientOr404(req); // patient-scoped write
     if (!(await eligibilityEnabledForPatient(row.uuid))) return res.status(403).json({ error: 'Eligibility verification is turned off for this facility.', code: 'ELIGIBILITY_DISABLED' });
     const { policyIndex = 0, response } = req.body;
-    const check = await saveCheck({ patientId: row.id, policyIndex, response, createdBy: req.authUserId });
-    // Payer-confirmed identity (address, group #, MBI, plan, cost-shares) corrects
-    // the Face Sheet + this insurance policy — for THIS patient only. Applied under a
-    // row lock against the freshest record so a concurrent edit is never clobbered.
+    const check = await saveCheck({ patientId: row.id, policyIndex, response, createdBy: req.authUserId, source: 'manual_import' });
+    // This is a caller-SUPPLIED 271 (programmatic import), NOT a live payer verification, so it is treated
+    // as NON-authoritative: `manualImport` makes the merge FILL blanks only and never overwrite
+    // provider-entered identity (address, group #, MBI). Applied under a row lock against the freshest
+    // record so a concurrent edit is never clobbered.
     let appliedKeys = [];
     const patient = await applyPatientUpdateLocked(row.uuid, (cur) => {
-      const p = mergeVerificationIntoPatient(cur, check.summary, policyIndex);
+      const p = mergeVerificationIntoPatient(cur, check.summary, policyIndex, { manualImport: true });
       appliedKeys = Object.keys(p);
       return p;
     });
     await recordAudit({
       actorUserId: req.authUserId, action: 'patient.eligibility.verify', entityType: 'patient', entityId: row.uuid,
-      ...ctx(req), metadata: { policyIndex, payer: check.payer, status: check.status, updated: appliedKeys },
+      ...ctx(req), metadata: { policyIndex, payer: check.payer, status: check.status, updated: appliedKeys, source: 'manual_import' },
     });
     res.status(201).json({ check, patient });
   } catch (err) { next(err); }
@@ -424,7 +445,9 @@ export async function deleteDoc(req, res, next) {
     const row = await ownedPatientOr404(req);
     const doc = await getRawDocByUuid(req.params.docUuid);
     if (!doc || Number(doc.patient_id) !== Number(row.id)) return res.status(404).json({ error: 'Document not found.', code: 'NOT_FOUND' });
-    try { await deleteObject(doc.s3_key); } catch { /* ignore */ }
+    // Don't swallow an S3 delete failure silently — it would orphan a now-unreferenced PHI object. Log loudly
+    // for cleanup; the DB row is still removed (the user asked to delete, and a dangling object is recoverable).
+    try { await deleteObject(doc.s3_key); } catch (e) { logger.error({ err: e?.message, s3Key: doc.s3_key, patient: row.uuid }, 'document delete: S3 object not deleted — orphaned PHI object may remain (DB record removed)'); }
     await deleteDocumentRecord(doc.uuid);
     await recordAudit({ actorUserId: req.authUserId, action: 'patient.document.delete', entityType: 'patient', entityId: row.uuid, ...ctx(req), metadata: { docType: doc.doc_type } });
     res.json({ ok: true });

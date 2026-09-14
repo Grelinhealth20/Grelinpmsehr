@@ -21,20 +21,28 @@ import { createDocumentRecord } from './patientDocumentService.js';
  * `provider_id`, so patientScopeWhere applies verbatim on the `r` alias — guaranteeing FACILITY-SPECIFIC
  * access with NO cross-facility / cross-provider leakage. WRITES stay strictly owner-scoped (provider_id).
  *
- * INBOUND-FAX TRIAGE: an incoming fax is routed by DID to a facility and OWNED by the intake account, so
- * the owner/service-line scope above would hide it from everyone but SNF MDs. To let the receiving
- * facility actually work its inbox, ANY provider ASSIGNED to that facility may READ its incoming referrals
- * — strictly bounded to their own assigned facilities (provider_facilities), so there is still no
- * cross-facility leakage. This applies to `direction='incoming'` only; outgoing/own referrals are
- * unchanged, and WRITES remain owner-scoped.
+ * INBOUND-FAX TRIAGE (minimum-necessary): an incoming fax is routed by DID to a facility and OWNED by the
+ * intake account, so the owner/service-line scope above would hide it from everyone but SNF MDs. Two cases:
+ *   • UN-TRIAGED (patient_id IS NULL — not yet matched to a chart): stays in a SHARED facility queue so any
+ *     provider assigned to that facility can work the inbox and triage it. Bounded to assigned facilities.
+ *   • MATCHED (linked to a patient): follows the SAME patient access rule as the rest of the EHR — visible
+ *     only to providers who can access THAT patient (the patient's owner + facility MDs of the patient's
+ *     service line). This preserves the care team's visibility while a cross-service-line provider at the
+ *     facility no longer sees a matched referral for a patient outside their scope (HIPAA minimum-necessary).
+ * Applies to `direction='incoming'` only; outgoing/own referrals are unchanged, and WRITES stay owner-scoped.
  */
 async function readScope(providerId, alias = 'r') {
   const scope = await viewerScope(providerId);
-  const base = patientScopeWhere(scope, providerId, alias); // { sql, params }
+  const base = patientScopeWhere(scope, providerId, alias); // { sql, params } — referral-owner scope
   const facIds = await providerFacilityIds(providerId);     // facilities this provider is assigned to
   if (facIds.length) {
     const ph = facIds.map((id, i) => { base.params[`rif${i}`] = id; return `:rif${i}`; }).join(',');
-    base.sql = `((${base.sql}) OR (${alias}.direction = 'incoming' AND ${alias}.facility_id IN (${ph})))`;
+    // Patient-access predicate on the joined chart (same scope, identical param values → safe to merge).
+    const pScope = patientScopeWhere(scope, providerId, 'refp');
+    Object.assign(base.params, pScope.params);
+    const matchedVisible = `EXISTS (SELECT 1 FROM patients refp WHERE refp.id = ${alias}.patient_id AND ${pScope.sql})`;
+    base.sql = `((${base.sql}) OR (${alias}.direction = 'incoming' AND ${alias}.facility_id IN (${ph})`
+      + ` AND (${alias}.patient_id IS NULL OR ${matchedVisible})))`;
   }
   return base;
 }
@@ -610,6 +618,7 @@ export async function selfHealIncomingDocuments(limit = 200) {
       const ctx = r.fac_uuid ? { facilityUuid: r.fac_uuid, facilityName: r.fac_name } : null;
       const key = await uploadReferralObject(ctx, { direction: 'incoming', fileName: `${r.fax_id}.pdf` }, buffer, 'application/pdf');
       await execute('UPDATE referrals SET fax_s3_key = :k, fax_error = NULL WHERE id = :id', { k: key, id: r.id });
+      await fileInboundReferralIntoChart(r.id); // file into the linked chart now that it's stored (idempotent)
       await pushFaxEvent(r.id, 'received', 'Received document stored (auto self-heal)');
       healed += 1;
     } catch (e) { stillMissing += 1; logger.warn({ err: e.message, faxId: r.fax_id }, 'incoming doc self-heal: one row still missing (will retry next cycle)'); }
@@ -689,7 +698,8 @@ export function splitPatientName(full) {
  * extracted DOB and the same-name candidate charts (already facility-scoped by the caller) decide whether
  * to LINK an existing chart, CREATE a new one, leave for MANUAL review, or report BLOCKED (auto-create off).
  * Guarantees: (1) no duplicate — a same-name+DOB chart is always linked; (2) no wrong-patient — a no-DOB fax
- * with multiple same-name charts is never auto-linked (manual); (3) creation only when truly not present.
+ * is NEVER auto-linked to any same-name chart (routed to manual review to confirm identity); (3) creation
+ * only when truly not present.
  * @param {{dob?:string, candidates?:Array<{id:number,dob?:string}>, allowCreate?:boolean}} args
  */
 export function decidePatientMatch({ dob = '', candidates = [], allowCreate = true } = {}) {
@@ -701,8 +711,7 @@ export function decidePatientMatch({ dob = '', candidates = [], allowCreate = tr
     if (exact) res = { action: 'link', id: exact.id, reason: 'matched existing chart (name + DOB)' };
     else if (cands.length === 1 && !cands[0].dob) res = { action: 'link', id: cands[0].id, reason: 'matched existing chart (name; chart had no DOB)' };
     else res = { action: 'create', reason: 'not in system (name present, DOB differs) → new chart' };
-  } else if (cands.length === 1) res = { action: 'link', id: cands[0].id, reason: 'matched existing chart (single same-name, no DOB)' };
-  else if (cands.length > 1) res = { action: 'manual', reason: 'ambiguous — multiple same-name charts and no DOB to disambiguate (manual review)' };
+  } else if (cands.length >= 1) res = { action: 'manual', reason: 'name matches an existing chart but the fax has no DOB to confirm identity — manual review to avoid a namesake mis-attach' };
   else res = { action: 'create', reason: 'not in system → new chart' };
   if (res.action === 'create' && !allowCreate) return { action: 'blocked', reason: 'not in system; auto-create disabled — queued for manual review' };
   return res;
@@ -941,6 +950,32 @@ export async function ingestIncomingFax(rec = {}) {
  * self-heal used to guarantee "every received record is stored". Owner/facility-scoped; returns the new
  * s3 key or null. Idempotent-safe: does nothing if the document is already stored.
  */
+/**
+ * Idempotently file an already-stored inbound-fax document into the LINKED patient's Documents tab. Used by
+ * the self-heal and manual-retrieve paths so a fax that failed S3 on first pass (or arrived unlinked and was
+ * linked later) still appears in the chart — not only reachable via the referral record. No-op unless the
+ * referral has BOTH a patient and a stored object, and skips if a chart document already exists for that key.
+ */
+async function fileInboundReferralIntoChart(referralId) {
+  const [rows] = await execute(
+    `SELECT id, patient_id, fax_s3_key, fax_id, provider_id FROM referrals
+      WHERE id = :id AND direction = 'incoming' LIMIT 1`, { id: referralId });
+  const r = rows[0];
+  if (!r || !r.patient_id || !r.fax_s3_key) return null; // not linked / not stored yet — nothing to file
+  const [ex] = await execute('SELECT id FROM patient_documents WHERE s3_key = :k LIMIT 1', { k: r.fax_s3_key });
+  if (ex[0]) return null; // already filed — idempotent
+  try {
+    const doc = await createDocumentRecord({
+      patientId: r.patient_id, docType: 'referral', s3Key: r.fax_s3_key,
+      fileName: `Incoming referral fax${r.fax_id ? ` ${r.fax_id}` : ''}.pdf`,
+      contentType: 'application/pdf', size: null, uploadedBy: r.provider_id,
+      serviceDate: new Date().toISOString().slice(0, 10),
+    });
+    logger.info({ referralId, patientId: r.patient_id }, 'inbound fax back-filed into patient chart');
+    return doc?.uuid || null;
+  } catch (e) { logger.error({ err: e.message, referralId, patientId: r.patient_id }, 'back-filing inbound fax into chart failed (document still stored on referral)'); return null; }
+}
+
 export async function restoreInboundDocument(providerId, uuid) {
   const sc = await readScope(providerId);
   const [rows] = await execute(
@@ -956,6 +991,7 @@ export async function restoreInboundDocument(providerId, uuid) {
   const ctx = r.fac_uuid ? { facilityUuid: r.fac_uuid, facilityName: r.fac_name } : null;
   const key = await uploadReferralObject(ctx, { direction: 'incoming', fileName: `${r.fax_id}.pdf` }, buffer, 'application/pdf');
   await execute('UPDATE referrals SET fax_s3_key = :k, fax_error = NULL WHERE id = :id', { k: key, id: r.id });
+  await fileInboundReferralIntoChart(r.id); // now stored — file into the linked chart if not already there
   await pushFaxEvent(r.id, 'received', 'Received document stored (re-fetched)');
   return key;
 }

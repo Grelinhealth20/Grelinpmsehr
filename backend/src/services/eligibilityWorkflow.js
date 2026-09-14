@@ -132,8 +132,14 @@ export async function verifyPatientEligibility({ patient, patientId, providerId,
     if (!ins.payer) return { skipped: 'no_payer' };
     payer = await resolvePayer(ins.payer, { state: fac.state });
     if (!payer) {
-      try { payer = await searchPayer(ins.payer); } catch { payer = null; }
+      // Distinguish a live-lookup OUTAGE from a definitive no-match: a thrown searchPayer means the Stedi
+      // Payer Network API was unavailable, NOT that the payer doesn't exist — surfacing both as
+      // "payer_unresolved" would tell the biller "not matched" for a real, valid payer. Return a distinct,
+      // retryable reason so the outage is visible and not mistaken for a coverage conclusion.
+      let lookupFailed = false;
+      try { payer = await searchPayer(ins.payer); } catch (e) { payer = null; lookupFailed = true; stediLog('payer.lookup_error', { err: e?.message }); }
       if (payer) stediLog('payer.resolved_live', { stediId: payer.stediId });
+      else if (lookupFailed) return { skipped: 'payer_lookup_unavailable', retryable: true };
     }
   }
   if (!payer || !payer.stediId) return { skipped: 'payer_unresolved' };
